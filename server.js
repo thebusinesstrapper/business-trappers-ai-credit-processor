@@ -2,6 +2,7 @@ import express from "express";
 import dotenv from "dotenv";
 import { runMilestone1 } from "./src/milestone1.js";
 import { runMilestone2 } from "./src/milestone2.js";
+import { runMilestone3 } from "./src/milestone3.js";
 
 dotenv.config();
 
@@ -62,8 +63,29 @@ app.post("/milestone-2", async (req, res) => {
 
 });
 
+app.post("/milestone-3", async (req, res) => {
+
+    try {
+
+        const result = await runMilestone3(req.body);
+
+        res.json(result);
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+
+    }
+
+});
+
 app.listen(PORT, () => {
 
     console.log(`Business Trappers AI Credit Processor listening on port ${PORT}`);
 
-});
+}); 
