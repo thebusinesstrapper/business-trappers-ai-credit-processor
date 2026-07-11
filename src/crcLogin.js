@@ -26,9 +26,7 @@ export async function loginToCRC(page) {
 
     console.log("Logged into CRC.");
 
-    // ---------- NEW ----------
-    // Go directly to the Clients page.
-    // This is our only new milestone.
+    // Navigate directly to the Clients page
     await page.goto(
         "https://app.creditrepaircloud.com/app/clients",
         {
@@ -39,10 +37,12 @@ export async function loginToCRC(page) {
 
     console.log("Clients page opened.");
 
-   console.log("Current URL:", page.url());
+    console.log("Current URL:", page.url());
 
-return {
-    page,
-    currentUrl: page.url(),
-    pageTitle: await page.title()
-};
+    return {
+        page,
+        currentUrl: page.url(),
+        pageTitle: await page.title()
+    };
+
+}
