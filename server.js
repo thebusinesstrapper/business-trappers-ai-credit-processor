@@ -1,6 +1,7 @@
 import express from "express";
 import dotenv from "dotenv";
 import { runMilestone1 } from "./src/milestone1.js";
+import { runMilestone2 } from "./src/milestone2.js";
 
 dotenv.config();
 
@@ -24,6 +25,27 @@ app.post("/milestone-1", async (req, res) => {
     try {
 
         const result = await runMilestone1(req.body);
+
+        res.json(result);
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+
+    }
+
+});
+
+app.post("/milestone-2", async (req, res) => {
+
+    try {
+
+        const result = await runMilestone2(req.body);
 
         res.json(result);
 
