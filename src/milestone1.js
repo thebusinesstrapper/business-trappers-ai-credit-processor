@@ -18,7 +18,7 @@ export async function runMilestone1(data = {}) {
 
         const page = session.page;
 
-        await loginToCRC(page);
+        await page.goto("https://example.com");
 
         return successResponse({
             client_search: clientName,
