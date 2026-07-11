@@ -34,19 +34,68 @@ async function getTableSearchInput(page) {
 }
 
 /**
- * Wait for the table to filter down to a row containing clientName
- * (or determine that no rows match). Matches on the row's full text
- * content rather than requiring an exact-name link, so this tolerates
- * extra whitespace, middle names/initials, badges, icons, etc. inside
- * the row. Avoids arbitrary sleeps by polling for the actual expected
- * end-state instead.
+ * The CRC Clients grid is a MUI DataGrid, which renders rows as
+ * <div role="row"> — NOT as <tr> inside a <table>. Matching only on
+ * "table tr" finds zero elements, which is why a correctly-filtered,
+ * clearly-visible row still came back as "client not found".
  *
- * Returns the clickable element to open the client (preferring a link
- * whose own text contains the name, then any link in the row, then the
- * row itself as a last resort), or null if no row matches.
+ * Covering both shapes keeps this working if CRC ever swaps the grid
+ * back to a real table.
+ */
+const ROW_SELECTOR = '[role="row"]:visible, table tr:visible';
+
+/**
+ * Resolve the clickable blue client-name element inside an already-matched row.
+ *
+ * IMPORTANT: we deliberately do NOT lead with getByRole("link"). An <a> only
+ * carries the ARIA "link" role when it has an href. CRC renders the client
+ * name as an href-less <a>/<span> that navigates via a JS onClick handler —
+ * it looks and behaves like a link, but has no role, so every role-based
+ * query returns zero matches. Tag- and text-based lookups find it; role-based
+ * ones silently do not.
+ *
+ * Returns the name element, or null. Never returns the row container: the row
+ * has no click handler, so clicking it is a silent no-op.
+ */
+async function findClientNameLink(row, clientName) {
+    const candidates = [
+        // 1. A visible anchor in this row whose own text is the client's name.
+        //    Tag-based, so href-less anchors still match.
+        row.locator("a:visible", { hasText: clientName }).first(),
+
+        // 2. Any visible anchor in the row (name may be wrapped in a child
+        //    <span>, which can break the hasText match above).
+        row.locator("a:visible").first(),
+
+        // 3. The name may be a styled clickable <div>/<span> rather than an <a>.
+        //    Click the name text element itself — still not the row container.
+        row.getByText(clientName, { exact: false }).first(),
+
+        // 4. Role-based, kept last: only matches if CRC does supply an href.
+        row.getByRole("link", { name: clientName, exact: false }).first(),
+    ];
+
+    for (const candidate of candidates) {
+        if (await candidate.count()) {
+            return candidate;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Wait for the grid to filter down to a VISIBLE row containing clientName
+ * (or determine that no rows match). Matches on the row's full text content
+ * rather than requiring an exact-name link, so this tolerates extra
+ * whitespace, middle names/initials, badges, icons, etc. inside the row.
+ * Avoids arbitrary sleeps by polling for the actual expected end-state.
+ *
+ * Returns the clickable client-name element, or null if no visible matching
+ * row exists.
  */
 async function waitForFilteredRow(page, clientName) {
-    const row = page.locator("table tr", { hasText: clientName }).first();
+    const row = page.locator(ROW_SELECTOR, { hasText: clientName }).first();
 
     try {
         await row.waitFor({ state: "visible", timeout: ROW_TIMEOUT });
@@ -54,41 +103,50 @@ async function waitForFilteredRow(page, clientName) {
         return null;
     }
 
-    // Prefer clicking directly on the client's name, per spec.
-    const nameLink = row.getByRole("link", { name: clientName, exact: false }).first();
-    if (await nameLink.count()) {
-        return nameLink;
+    const nameLink = await findClientNameLink(row, clientName);
+
+    if (!nameLink) {
+        console.error(
+            `Matched a row for "${clientName}" but found no clickable client-name element inside it.`
+        );
     }
 
-    // Fall back to the first link in the matching row.
-    const anyLink = row.getByRole("link").first();
-    if (await anyLink.count()) {
-        return anyLink;
-    }
-
-    // Last resort: click the row itself.
-    return row;
+    return nameLink;
 }
 
 /**
- * Wait until the client dashboard has actually finished loading,
- * not just navigated. We wait for the URL to move away from the
- * clients list AND for the network to settle.
+ * The "Import/Audit" button only renders on the client dashboard, which makes
+ * it a far more reliable "dashboard is ready" signal than the URL (the
+ * dashboard URL is dynamic per client).
+ *
+ * Note: the Clients page toolbar has a similar-looking "Import/Export" button,
+ * but this pattern requires the literal word "audit", so the two cannot collide.
  */
-async function waitForDashboardLoad(page, previousUrl) {
-    await page.waitForURL((url) => url.toString() !== previousUrl, {
+function getImportAuditButton(page) {
+    const pattern = /import\s*\/?\s*audit/i;
+
+    return page
+        .getByRole("button", { name: pattern })
+        .or(page.getByRole("link", { name: pattern }))
+        .or(page.getByText(pattern))
+        .first();
+}
+
+/**
+ * Wait until the client dashboard has actually finished loading, not just
+ * navigated. The dashboard URL is dynamic, so we gate on the Import/Audit
+ * button becoming visible — it only exists on the client dashboard.
+ */
+async function waitForDashboardLoad(page) {
+    await getImportAuditButton(page).waitFor({
+        state: "visible",
         timeout: DASHBOARD_TIMEOUT,
     });
 
-    await page
-        .waitForLoadState("networkidle", { timeout: DASHBOARD_TIMEOUT })
-        .catch(() => {
-            // Some CRC dashboards keep background polling alive indefinitely,
-            // which prevents "networkidle" from ever firing. Fall back to
-            // "load" so we don't fail the whole flow over that.
-        });
-
-    await page.waitForLoadState("load", { timeout: DASHBOARD_TIMEOUT }).catch(() => {});
+    await page.waitForLoadState("load", { timeout: DASHBOARD_TIMEOUT }).catch(() => {
+        // Some CRC dashboards keep background polling alive, so "load" may not
+        // settle. The Import/Audit button above is the authoritative signal.
+    });
 }
 
 /**
@@ -197,9 +255,9 @@ export async function openClient(page, clientName) {
     await searchInput.fill(clientName);
 
     console.log("Waiting for the table to filter...");
-    const matchingRow = await waitForFilteredRow(page, clientName);
+    const clientNameLink = await waitForFilteredRow(page, clientName);
 
-    if (!matchingRow) {
+    if (!clientNameLink) {
         console.log(`No matching client found for "${clientName}".`);
         await captureFailureContext(page, "client-not-found");
         return {
@@ -213,16 +271,16 @@ export async function openClient(page, clientName) {
     }
 
     console.log(`Match found. Opening client: "${clientName}"`);
-    const clientsPageUrl = page.url();
 
     let dashboardClientName;
     let dashboardClientStatus;
 
     try {
-        await matchingRow.click();
+        // Click the client's blue name hyperlink, not the row container.
+        await clientNameLink.click();
 
-        console.log("Waiting for client dashboard to finish loading...");
-        await waitForDashboardLoad(page, clientsPageUrl);
+        console.log("Waiting for client dashboard to finish loading (Import/Audit button)...");
+        await waitForDashboardLoad(page);
 
         dashboardClientName = await readDashboardClientName(page, clientName);
         dashboardClientStatus = await readDashboardClientStatus(page);
