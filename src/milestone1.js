@@ -18,15 +18,17 @@ export async function runMilestone1(data = {}) {
 
         const page = session.page;
 
-        await page.goto("https://example.com");
-
-        return successResponse({
-            client_search: clientName,
-            client_found: false,
-            client_opened: false,
-            verified_client_name: null,
-            message: "Successfully logged into Credit Repair Cloud."
-        });
+const loginResult = await loginToCRC(page);
+        
+       return successResponse({
+    client_search: clientName,
+    client_found: false,
+    client_opened: false,
+    verified_client_name: null,
+    current_url: loginResult.currentUrl,
+    page_title: loginResult.pageTitle,
+    message: "Browser navigation completed."
+});
 
     } catch (error) {
 
