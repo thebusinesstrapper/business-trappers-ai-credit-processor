@@ -39,5 +39,10 @@ export async function loginToCRC(page) {
 
     console.log("Clients page opened.");
 
-    return page;
-}
+   console.log("Current URL:", page.url());
+
+return {
+    page,
+    currentUrl: page.url(),
+    pageTitle: await page.title()
+};
