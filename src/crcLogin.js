@@ -5,37 +5,43 @@ export async function loginToCRC(page) {
     await page.goto(
         "https://app.creditrepaircloud.com/app/login",
         {
-            waitUntil: "networkidle",
+            waitUntil: "domcontentloaded",
             timeout: 60000
         }
     );
 
-    await page.fill(
-        'input[type="email"]',
-        process.env.CRC_USERNAME
-    );
+    const usernameField = page
+        .getByPlaceholder(/email|user id/i)
+        .first();
 
-    await page.fill(
-        'input[type="password"]',
-        process.env.CRC_PASSWORD
-    );
+    const passwordField = page
+        .getByPlaceholder(/password/i)
+        .first();
 
-    await page.click('button[type="submit"]');
+    await usernameField.waitFor({
+        state: "visible",
+        timeout: 60000
+    });
 
-    await page.waitForLoadState("networkidle");
+    await usernameField.fill(process.env.CRC_USERNAME);
 
-    console.log("Logged into CRC.");
+    await passwordField.fill(process.env.CRC_PASSWORD);
 
-    // Navigate directly to the Clients page
+    await page
+        .getByRole("button", { name: /login/i })
+        .click();
+
+    await page.waitForTimeout(5000);
+
+    console.log("Login submitted.");
+
     await page.goto(
         "https://app.creditrepaircloud.com/app/clients",
         {
-            waitUntil: "networkidle",
+            waitUntil: "domcontentloaded",
             timeout: 60000
         }
     );
-
-    console.log("Clients page opened.");
 
     console.log("Current URL:", page.url());
 
@@ -44,5 +50,4 @@ export async function loginToCRC(page) {
         currentUrl: page.url(),
         pageTitle: await page.title()
     };
-
 }
