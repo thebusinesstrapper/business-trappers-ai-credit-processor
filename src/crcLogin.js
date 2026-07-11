@@ -24,6 +24,20 @@ export async function loginToCRC(page) {
 
     await page.waitForLoadState("networkidle");
 
-    return page;
+    console.log("Logged into CRC.");
 
+    // ---------- NEW ----------
+    // Go directly to the Clients page.
+    // This is our only new milestone.
+    await page.goto(
+        "https://app.creditrepaircloud.com/app/clients",
+        {
+            waitUntil: "networkidle",
+            timeout: 60000
+        }
+    );
+
+    console.log("Clients page opened.");
+
+    return page;
 }
