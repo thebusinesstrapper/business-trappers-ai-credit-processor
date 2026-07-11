@@ -24,21 +24,29 @@ export async function loginToCRC(page) {
 
     await page.getByRole("button", { name: "Login" }).click();
 
-    console.log("Login submitted.");
+    console.log("Waiting for dashboard...");
 
-    await page.waitForLoadState("networkidle");
-
-    console.log("Logged into CRC.");
-
-    await page.goto(
-        "https://app.creditrepaircloud.com/app/clients",
+    // Wait until we leave the login page.
+    await page.waitForURL(
+        url => !url.toString().includes("/login"),
         {
-            waitUntil: "networkidle",
             timeout: 60000
         }
     );
 
-    console.log("Clients page opened.");
+    console.log("Dashboard loaded.");
+
+    // Give the dashboard a few seconds to finish rendering.
+    await page.waitForTimeout(3000);
+
+    console.log("Clicking Clients tab...");
+
+    // Click the visible Clients menu.
+    await page.locator("text=Clients").first().click();
+
+    // Give CRC time to navigate.
+    await page.waitForTimeout(5000);
+
     console.log("Current URL:", page.url());
 
     return {
