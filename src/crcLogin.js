@@ -10,13 +10,8 @@ export async function loginToCRC(page) {
         }
     );
 
-    const usernameField = page
-        .getByPlaceholder(/email|user id/i)
-        .first();
-
-    const passwordField = page
-        .getByPlaceholder(/password/i)
-        .first();
+    const usernameField = page.getByPlaceholder("Email or User ID");
+    const passwordField = page.getByPlaceholder("Password");
 
     await usernameField.waitFor({
         state: "visible",
@@ -27,22 +22,23 @@ export async function loginToCRC(page) {
 
     await passwordField.fill(process.env.CRC_PASSWORD);
 
-    await page
-        .getByRole("button", { name: /login/i })
-        .click();
-
-    await page.waitForTimeout(5000);
+    await page.getByRole("button", { name: "Login" }).click();
 
     console.log("Login submitted.");
+
+    await page.waitForLoadState("networkidle");
+
+    console.log("Logged into CRC.");
 
     await page.goto(
         "https://app.creditrepaircloud.com/app/clients",
         {
-            waitUntil: "domcontentloaded",
+            waitUntil: "networkidle",
             timeout: 60000
         }
     );
 
+    console.log("Clients page opened.");
     console.log("Current URL:", page.url());
 
     return {
@@ -50,4 +46,5 @@ export async function loginToCRC(page) {
         currentUrl: page.url(),
         pageTitle: await page.title()
     };
+
 }
