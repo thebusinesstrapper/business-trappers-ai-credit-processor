@@ -1,0 +1,20 @@
+{
+  "name": "business-trappers-ai-credit-processor",
+  "version": "1.0.0",
+  "description": "Business Trappers AI Credit Processor - Milestone 1",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@browserbasehq/sdk": "^2.2.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "playwright": "^1.54.2"
+  }
+}
