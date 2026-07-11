@@ -1,21 +1,31 @@
 import { successResponse, errorResponse } from "./response.js";
+import { launchBrowser } from "./browserbase.js";
+import { loginToCRC } from "./crcLogin.js";
 
 export async function runMilestone1(data = {}) {
+
+    let browser;
 
     try {
 
         const clientName = data.clientName || "Elizabeth Kelley";
 
-        console.log(`Milestone 1 started for ${clientName}`);
+        console.log(`Starting Milestone 1 for ${clientName}`);
 
-        // Browser automation will be added in the next files.
+        const session = await launchBrowser();
+
+        browser = session.browser;
+
+        const page = session.page;
+
+        await loginToCRC(page);
 
         return successResponse({
             client_search: clientName,
             client_found: false,
             client_opened: false,
             verified_client_name: null,
-            message: "Milestone 1 skeleton initialized."
+            message: "Successfully logged into Credit Repair Cloud."
         });
 
     } catch (error) {
@@ -24,6 +34,14 @@ export async function runMilestone1(data = {}) {
             "MILESTONE_1_ERROR",
             error.message
         );
+
+    } finally {
+
+        if (browser) {
+
+            await browser.close();
+
+        }
 
     }
 
