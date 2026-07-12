@@ -5,6 +5,7 @@ import { runMilestone2 } from "./src/milestone2.js";
 import { runMilestone3 } from "./src/milestone3.js";
 import { runMilestone4 } from "./src/milestone4.js";
 import { runMilestone5 } from "./src/milestone5.js";
+import { runCreditHeroSpike } from "./src/spikeCreditHeroRun.js";
 
 dotenv.config();
 
@@ -112,6 +113,27 @@ app.post("/milestone-5", async (req, res) => {
     try {
 
         const result = await runMilestone5(req.body);
+
+        res.json(result);
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+
+    }
+
+});
+
+app.post("/spike-credit-hero", async (req, res) => {
+
+    try {
+
+        const result = await runCreditHeroSpike(req.body);
 
         res.json(result);
 
