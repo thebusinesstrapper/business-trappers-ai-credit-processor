@@ -11,7 +11,7 @@
  */
 
 import { decideAcquisition, DECISIONS } from "./acquisitionDecision.js";
-import { parseCost, FREE_OPTION_ID, PAID_OPTION_ID } from "./orderPageReader.js";
+import { parseCost, parseAvailableFrom, FREE_OPTION_ID, PAID_OPTION_ID } from "./orderPageReader.js";
 
 let passed = 0;
 let failed = 0;
@@ -210,6 +210,121 @@ check(
     decideAcquisition(goodPage({ options: [] }), NEED).decision,
     DECISIONS.MANUAL_REVIEW
 );
+
+console.log("\n=== Availability window (real spike data, 2026-07-12) ===\n");
+
+/**
+ * THE OBSERVED STATE. Both radios disabled.
+ *   free (_01, $0.00)  available 2026-08-10
+ *   paid (_03, $18.95) available 2026-07-18
+ *
+ * Between 7/18 and 8/10 the PAID option is enabled and the FREE one is not.
+ * Anything that "selects whatever is available" buys an $18.95 report.
+ */
+function observedPage(overrides = {}) {
+    return {
+        page_read: true,
+        unaccounted_option_ids: [],
+        options: [
+            {
+                id: FREE_OPTION_ID,
+                cost: 0,
+                cost_evidence: "FREE",
+                available_from: "2026-08-10",
+                disabled: true,
+                visible: false,
+                is_known: true,
+            },
+            {
+                id: PAID_OPTION_ID,
+                cost: 18.95,
+                cost_evidence: "$18.95",
+                available_from: "2026-07-18",
+                disabled: true,
+                visible: false,
+                is_known: true,
+            },
+        ],
+        errors: [],
+        ...overrides,
+    };
+}
+
+check(
+    "observed page today -> not yet available (NOT manual_review)",
+    decideAcquisition(observedPage(), NEED).decision,
+    DECISIONS.FREE_REPORT_NOT_YET_AVAILABLE
+);
+
+check(
+    "not-yet-available surfaces the date",
+    decideAcquisition(observedPage(), NEED).available_from,
+    "2026-08-10"
+);
+
+check(
+    "not-yet-available never submits",
+    decideAcquisition(observedPage(), NEED).submitted,
+    false
+);
+
+// THE CRITICAL TEST. Paid enabled, free still disabled — the 23-day window.
+check(
+    "PAID-ONLY WINDOW: paid enabled, free not -> must NOT submit",
+    decideAcquisition(
+        observedPage({
+            options: [
+                { ...observedPage().options[0] },                                  // free: still disabled
+                { ...observedPage().options[1], disabled: false, visible: true },  // paid: NOW ENABLED
+            ],
+        }),
+        NEED
+    ).decision,
+    DECISIONS.FREE_REPORT_NOT_YET_AVAILABLE
+);
+
+check(
+    "disabled with NO availability date -> manual_review (unexplained)",
+    decideAcquisition(
+        observedPage({
+            options: [
+                { ...observedPage().options[0], available_from: null },
+                { ...observedPage().options[1] },
+            ],
+        }),
+        NEED
+    ).decision,
+    DECISIONS.MANUAL_REVIEW
+);
+
+check(
+    "free option becomes enabled on 8/10 -> submit",
+    decideAcquisition(
+        observedPage({
+            options: [
+                { ...observedPage().options[0], disabled: false, visible: true },
+                { ...observedPage().options[1], disabled: false, visible: true },
+            ],
+        }),
+        NEED
+    ).decision,
+    DECISIONS.SUBMIT_FREE_REPORT
+);
+
+console.log("\n=== parseAvailableFrom ===\n");
+
+check(
+    "parses the observed label format",
+    parseAvailableFrom("(Available 8/10/2026) 3 Bureau Report & Score FREE."),
+    "2026-08-10"
+);
+check(
+    "parses the paid label format",
+    parseAvailableFrom("(Available 7/18/2026) 3 Bureau ... $18.95."),
+    "2026-07-18"
+);
+check("no date -> null", parseAvailableFrom("3 Bureau Report & Score FREE."), null);
+check("non-string -> null", parseAvailableFrom(null), null);
 
 console.log("\n=== Invariant ===\n");
 
