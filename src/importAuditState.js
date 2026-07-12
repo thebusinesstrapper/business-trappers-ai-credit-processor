@@ -95,19 +95,56 @@ const MARKERS = {
 };
 
 /**
- * Is this message currently VISIBLE on the page?
+ * Every frame we should search for state markers: the main page plus any
+ * iframes.
+ *
+ * WHY FRAMES: page.getByText() does NOT pierce iframes. CRC is an older
+ * application and may well render the Import/Audit panel inside one. If it
+ * does, the panel is plainly visible to a human while every page-level locator
+ * returns zero matches — for the full timeout. That produces exactly the
+ * symptom we are chasing: an empty marker set after a 20-second wait, which is
+ * not "we looked too early" but "we looked in the wrong document."
+ *
+ * Searching frames is generic. It does not guess a container selector.
+ */
+function searchableFrames(page) {
+    return page.frames();
+}
+
+/**
+ * Is this message currently VISIBLE anywhere we can see — main page or iframe?
  *
  * Scoped to visibility on purpose: CRC keeps other dashboard tabs in the DOM,
  * so a raw text-content match could read a message from a tab the user isn't
  * looking at. Only what is actually rendered counts as evidence.
  */
 async function isMarkerVisible(page, pattern) {
-    const locator = page.getByText(pattern);
-    const count = await locator.count();
+    for (const frame of searchableFrames(page)) {
+        let locator;
 
-    for (let i = 0; i < count; i++) {
-        if (await locator.nth(i).isVisible()) {
-            return true;
+        try {
+            locator = frame.getByText(pattern);
+        } catch {
+            // A frame can detach mid-render. Skip it rather than fail the run.
+            continue;
+        }
+
+        let count = 0;
+
+        try {
+            count = await locator.count();
+        } catch {
+            continue;
+        }
+
+        for (let i = 0; i < count; i++) {
+            try {
+                if (await locator.nth(i).isVisible()) {
+                    return true;
+                }
+            } catch {
+                // Element went away between count and check. Keep looking.
+            }
         }
     }
 
@@ -120,9 +157,24 @@ async function isMarkerVisible(page, pattern) {
  * Same role -> tag -> text union used elsewhere in this codebase, for the same
  * reason: CRC renders href-less anchors, which carry no ARIA "link" role, so a
  * role-based query alone can silently match nothing.
+ *
+ * THE CLICK IS VERIFIED, NOT ASSUMED.
+ *
+ * openClient.js already documents this failure mode in CRC: an element can look
+ * exactly like a control, match a text locator, and have no click handler at
+ * all — so clicking it is a silent no-op. The text-based branch of the union
+ * below can match a plain LABEL rather than the real tab, and .first() resolves
+ * in DOM order, so the label can win.
+ *
+ * If that happens we never leave the dashboard, and the marker wait then burns
+ * its full timeout looking for a panel that was never opened. So we record the
+ * URL either side of the click and say so loudly when nothing moved.
  */
 async function openImportAuditTab(page) {
+    const urlBeforeClick = page.url();
+
     console.log("Opening the Import/Audit tab...");
+    console.log("URL before Import/Audit click:", urlBeforeClick);
 
     const tab = page
         .getByRole("tab", { name: /import\s*\/?\s*audit/i })
@@ -132,6 +184,58 @@ async function openImportAuditTab(page) {
 
     await tab.waitFor({ state: "visible", timeout: TAB_TIMEOUT });
     await tab.click();
+
+    return urlBeforeClick;
+}
+
+/**
+ * Report what the page ACTUALLY contains when no marker was recognized.
+ *
+ * This exists because "no markers found" has several very different causes and
+ * they are indistinguishable from the outside:
+ *
+ *   1. The tab click no-opped and we are still on the dashboard.
+ *   2. The panel rendered inside an iframe we were not searching.
+ *   3. The marker text is genuinely different from what we were told.
+ *
+ * Guessing between these means changing code without knowing what is broken.
+ * One run with this diagnostic decides it.
+ */
+async function reportRecognitionFailure(page, urlBeforeClick) {
+    console.error("--- Import/Audit recognition failed. Diagnostics follow. ---");
+
+    const urlNow = page.url();
+
+    console.error("URL before Import/Audit click:", urlBeforeClick);
+    console.error("URL now:                      ", urlNow);
+
+    if (urlNow === urlBeforeClick) {
+        console.error(
+            "URL DID NOT CHANGE. The Import/Audit tab click may have hit a " +
+            "non-interactive element and silently done nothing — the same " +
+            "no-op click failure already documented in openClient.js."
+        );
+    }
+
+    const frames = page.frames();
+    console.error(`Frames on page: ${frames.length}`);
+    frames.forEach((frame, i) => {
+        console.error(`  [${i}] ${frame.url()}`);
+    });
+
+    // Dump the visible text so we can read the panel's ACTUAL wording and
+    // compare it against MARKERS, rather than theorizing about it.
+    for (const [i, frame] of frames.entries()) {
+        try {
+            const text = await frame.locator("body").innerText({ timeout: 5000 });
+            console.error(`--- Visible text, frame [${i}] ---`);
+            console.error(text.slice(0, 2000));
+        } catch {
+            console.error(`--- Visible text, frame [${i}] --- (unreadable)`);
+        }
+    }
+
+    console.error("--- End diagnostics ---");
 }
 
 /**
@@ -202,17 +306,28 @@ function formatMarkers(markers) {
  * @returns {Promise<string[]>} the settled marker set, or [] if it never settled
  */
 async function waitForStableMarkers(page) {
-    const anyMarker = page
-        .getByText(MARKERS.CHS_NOT_ACTIVATED)
-        .or(page.getByText(MARKERS.NEW_CLIENT))
-        .or(page.getByText(MARKERS.READY_FOR_REIMPORT))
-        .or(page.getByText(MARKERS.WAITING_FOR_REPORT))
-        .first();
-
     // 1. Wait for the panel to produce at least one recognizable marker.
-    try {
-        await anyMarker.waitFor({ state: "visible", timeout: STATE_MARKER_TIMEOUT });
-    } catch {
+    //
+    //    This polls readVisibleMarkers() rather than waiting on a page-level
+    //    locator union. A .or() union is bound to ONE document, so it cannot see
+    //    into an iframe; readVisibleMarkers() searches every frame. Since the
+    //    markers are our only verified mount signal, this poll IS the gate — we
+    //    do not begin stabilization until the panel has actually produced one.
+    const appearanceDeadline = Date.now() + STATE_MARKER_TIMEOUT;
+
+    let previous = [];
+
+    while (Date.now() < appearanceDeadline) {
+        previous = await readVisibleMarkers(page);
+
+        if (previous.length > 0) {
+            break;
+        }
+
+        await page.waitForTimeout(CONFIRM_INTERVAL_MS);
+    }
+
+    if (previous.length === 0) {
         console.warn("No recognized Import/Audit state message appeared.");
         return [];
     }
@@ -220,7 +335,6 @@ async function waitForStableMarkers(page) {
     // 2. Then wait for the marker set to hold still.
     const deadline = Date.now() + STATE_MARKER_TIMEOUT;
 
-    let previous = await readVisibleMarkers(page);
     let stableIntervals = 0;
 
     console.log(`Import/Audit markers observed: [${formatMarkers(previous)}]`);
@@ -284,13 +398,18 @@ async function waitForStableMarkers(page) {
  * @returns {Promise<{ state: string, observed: string[] }>}
  */
 export async function recognizeImportAuditState(page) {
-    await openImportAuditTab(page);
+    const urlBeforeClick = await openImportAuditTab(page);
 
     // Classification reads from a SETTLED snapshot, never from live per-marker
     // queries issued while the panel may still be painting.
     const markers = await waitForStableMarkers(page);
 
     if (markers.length === 0) {
+        // Either nothing ever rendered, or it never held still. Both fail
+        // closed to manual review — but they have different causes, so dump
+        // enough context to tell them apart on the next run.
+        await reportRecognitionFailure(page, urlBeforeClick);
+
         return { state: CRC_STATES.UNKNOWN, observed: [] };
     }
 
