@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import { runMilestone1 } from "./src/milestone1.js";
 import { runMilestone2 } from "./src/milestone2.js";
 import { runMilestone3 } from "./src/milestone3.js";
+import { runMilestone4 } from "./src/milestone4.js";
 
 dotenv.config();
 
@@ -68,6 +69,27 @@ app.post("/milestone-3", async (req, res) => {
     try {
 
         const result = await runMilestone3(req.body);
+
+        res.json(result);
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+
+    }
+
+});
+
+app.post("/milestone-4", async (req, res) => {
+
+    try {
+
+        const result = await runMilestone4(req.body);
 
         res.json(result);
 
