@@ -25,6 +25,7 @@ import { FREE_OPTION_ID, PAID_OPTION_ID } from "./orderPageReader.js";
 export const DECISIONS = {
     SUBMIT_FREE_REPORT: "submit_free_report",
     NO_ACTION_REQUIRED: "no_action_required",
+    FREE_REPORT_NOT_YET_AVAILABLE: "free_report_not_yet_available",
     MANUAL_REVIEW: "manual_review",
 };
 
@@ -146,17 +147,57 @@ export function decideAcquisition(orderPageState, memoryState = {}) {
     }
 
     // --- Precondition 5: the option must actually be usable now. -----------
-    if (freeOption.disabled) {
-        return manualReview(
-            `free_option_disabled: ${FREE_OPTION_ID} is present but disabled. ` +
-            `Not currently available.`
-        );
-    }
+    //
+    // OBSERVED (Discovery Spike, 2026-07-12):
+    //
+    //   productBuyNew_01 (FREE,  $0.00)  — disabled, available 2026-08-10
+    //   productBuyNew_03 (PAID, $18.95)  — disabled, available 2026-07-18
+    //
+    // ####################################################################
+    // # THE PAID-ONLY WINDOW.                                            #
+    // #                                                                  #
+    // # Between 2026-07-18 and 2026-08-10, the PAID radio is enabled and #
+    // # the FREE one is NOT. Both share name="productBuyNew" — they are  #
+    // # a single radio group.                                            #
+    // #                                                                  #
+    // # Any logic that reasoned "select whichever option is available"   #
+    // # would, for those 23 days, BUY AN $18.95 REPORT.                  #
+    // #                                                                  #
+    // # This engine never reasons that way. It requires productBuyNew_01 #
+    // # SPECIFICALLY, at cost 0, enabled. Availability of the paid option#
+    // # is never a reason to do anything.                                #
+    // ####################################################################
+    if (freeOption.disabled || !freeOption.visible) {
+        // A disabled free option is NOT automatically an anomaly.
+        //
+        // "(Available 8/10/2026)" is a normal business state: the client is
+        // waiting out their 30-day membership refresh. Escalating every waiting
+        // client to a human would flood the queue with non-problems.
+        //
+        // This mirrors the M4 distinction: not_eligible is a POSITIVE finding
+        // ("nothing is wrong, the report simply is not due yet"); manual_review
+        // is for AMBIGUITY. They are not the same and must not be conflated.
+        if (freeOption.available_from) {
+            return {
+                decision: DECISIONS.FREE_REPORT_NOT_YET_AVAILABLE,
+                free_available: false,
+                paid_available: true,
+                selected_option: null,
+                available_from: freeOption.available_from,
+                reason:
+                    `The free membership report (${FREE_OPTION_ID}) is not yet available. ` +
+                    `It becomes available on ${freeOption.available_from}. Not submitting. ` +
+                    `A paid option may be selectable in the meantime; it is never an alternative.`,
+                submitted: false,
+            };
+        }
 
-    if (!freeOption.visible) {
+        // Disabled or hidden with NO stated availability date. We do not know
+        // why it is unusable — and an unexplained state is ambiguity.
         return manualReview(
-            `free_option_not_visible: ${FREE_OPTION_ID} is present in the DOM but not ` +
-            `visible. We do not interact with controls a user could not see.`
+            `free_option_unusable: ${FREE_OPTION_ID} is ` +
+            `${freeOption.disabled ? "disabled" : "not visible"} with no stated availability ` +
+            `date. Reason unknown. Not submitting.`
         );
     }
 
