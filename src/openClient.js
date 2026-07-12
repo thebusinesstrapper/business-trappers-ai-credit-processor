@@ -8,6 +8,8 @@
  * Auth/navigation-to-Clients-page stays in crcLogin.js.
  */
 
+import { getCrcClientId } from "./crcClientId.js";
+
 const SEARCH_TIMEOUT = 20000;
 const ROW_TIMEOUT = 15000;
 const DASHBOARD_TIMEOUT = 30000;
@@ -240,6 +242,7 @@ async function captureFailureContext(page, label) {
  * @returns {Promise<{
  *   clientFound: boolean,
  *   clientOpened: boolean,
+ *   crcClientId: string | null,
  *   currentUrl: string,
  *   pageTitle: string,
  *   clientName: string | null,
@@ -271,6 +274,7 @@ export async function openClient(page, clientName) {
         return {
             clientFound: false,
             clientOpened: false,
+            crcClientId: null,
             currentUrl: page.url(),
             pageTitle: await page.title(),
             clientName: null,
@@ -301,9 +305,16 @@ export async function openClient(page, clientName) {
     console.log("Client dashboard loaded:", page.url());
     console.log("Client Status:", dashboardClientStatus ?? "(not found)");
 
+    // The dashboard is now open, so the URL is authoritative for this client.
+    // This is the ONLY place the CRC Client ID can be derived. It is read here
+    // and passed on — never re-derived later from a page that may have
+    // navigated elsewhere.
+    const crcClientId = getCrcClientId(page);
+
     return {
         clientFound: true,
         clientOpened: true,
+        crcClientId,
         currentUrl: page.url(),
         clientStatus: dashboardClientStatus,
         pageTitle: await page.title(),
