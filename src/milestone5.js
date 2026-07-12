@@ -82,10 +82,22 @@ export async function runMilestone5(data = {}) {
         let memory = { exists: false, created: false };
 
         if (!clientResult.crcClientId) {
+            // Surface the exact dashboard URL so the correct pattern can be
+            // identified and added to crcClientId.js.
+            //
+            // NOTE: this must be clientResult.currentUrl, captured while the
+            // DASHBOARD was open — not page.url(), which by the end of this run
+            // has already navigated on to the Import/Audit tab.
+            console.error(
+                "crc_client_id could not be derived. Dashboard URL was:",
+                clientResult.currentUrl
+            );
+
             memory = {
                 exists: false,
                 created: false,
                 error: "crc_client_id_not_derived",
+                dashboard_url: clientResult.currentUrl,
             };
         } else {
             try {
