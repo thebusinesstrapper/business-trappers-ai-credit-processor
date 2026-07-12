@@ -22,35 +22,28 @@
  * A missing memory record is recoverable. A memory record under the wrong key
  * is not.
  * ---------------------------------------------------------------------------
+ *
+ * VERIFIED CRC URL STRUCTURE (observed live, Elizabeth Kelley):
+ *
+ *   https://app.creditrepaircloud.com/app/clients/15/dashboard
+ *                                                ^^
+ *                                                crc_client_id
+ *
+ * The ID is the numeric segment immediately following "/clients/".
  */
 
 /**
- * Candidate URL shapes, tried in order.
+ * The verified CRC client dashboard URL pattern.
  *
- * We do not yet know which shape CRC actually uses — this is derived live from
- * page.url() on the first production run. Each pattern is anchored on an
- * explicit client path segment or query parameter, so a pattern can only match
- * an ID that CRC has genuinely labelled as a client identifier. A bare
- * "grab the first number in the URL" match is deliberately NOT included: it
- * would happily return a page number, a tab index, or a timestamp.
+ * Deliberately strict:
  *
- * Supports both numeric IDs and UUIDs.
+ *   - "/clients/" is required literally, so we can only ever match a segment
+ *     CRC itself has labelled as a client.
+ *   - \d+ is numeric-only, matching the observed ID format.
+ *   - The trailing (?:[/?#]|$) requires the ID to be a COMPLETE path segment.
+ *     Without it, "/clients/15x/report" would match and silently yield "15".
  */
-const ID = "([0-9a-fA-F-]{6,})";
-
-const URL_PATTERNS = [
-    // /app/client/12345 , /client/12345/dashboard
-    new RegExp(`/clients?/${ID}(?:[/?#]|$)`),
-
-    // /app/clients/12345/overview
-    new RegExp(`/client[_-]?id/${ID}(?:[/?#]|$)`),
-
-    // ?client_id=12345 , ?clientId=12345
-    new RegExp(`[?&]client[_-]?id=${ID}`),
-
-    // #/client/12345 (hash routing)
-    new RegExp(`#.*?/clients?/${ID}(?:[/?#]|$)`),
-];
+const CLIENT_ID_PATTERN = /\/clients\/(\d+)(?:[/?#]|$)/;
 
 /**
  * Extract the CRC Client ID from a client dashboard URL.
@@ -61,23 +54,16 @@ const URL_PATTERNS = [
 export function extractCrcClientId(url) {
     if (!url) return null;
 
-    for (const pattern of URL_PATTERNS) {
-        const match = url.match(pattern);
+    const match = url.match(CLIENT_ID_PATTERN);
 
-        if (match && match[1]) {
-            return match[1];
-        }
-    }
-
-    return null;
+    return match ? match[1] : null;
 }
 
 /**
  * Read the CRC Client ID from the currently-open client dashboard.
  *
- * The raw URL is always logged. On the first production run this is how we
- * learn CRC's actual URL shape — and if extraction misses, the log tells us
- * exactly which pattern to add.
+ * The raw URL is always logged, so that if CRC ever changes its routing the
+ * failure is immediately diagnosable rather than mysterious.
  *
  * @param {import('playwright').Page} page - an OPEN client dashboard
  * @returns {string | null}
