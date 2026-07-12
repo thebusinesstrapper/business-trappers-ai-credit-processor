@@ -3,6 +3,7 @@ import { launchBrowser } from "./browserbase.js";
 import { loginToCRC } from "./crcLogin.js";
 import { openClient } from "./openClient.js";
 import { openCreditHero } from "./openCreditHero.js";
+import { openCreditReport } from "./openCreditReport.js";
 import { discoverCreditHero } from "./spikeCreditHero.js";
 
 /**
@@ -66,10 +67,21 @@ export async function runCreditHeroSpike(data = {}) {
             });
         }
 
-        // Reuses M3 unchanged. This is the capability M3 was built to provide.
+        // Reuses M3 unchanged. Lands on the Credit Hero MEMBER DASHBOARD.
         const creditHeroResult = await openCreditHero(page, context);
 
-        const discovery = await discoverCreditHero(creditHeroResult.page);
+        // Navigate Member Dashboard -> credit report page.
+        //
+        // Reported separately from discovery so navigation can be verified on
+        // its own merits. If this throws, the error surfaces and NO discovery
+        // runs — we do not attempt to parse a page we did not reach.
+        const reportResult = await openCreditReport(creditHeroResult.page);
+
+        // Discovery now runs from the REPORT PAGE, not the dashboard. The
+        // Capture Engine architecture is frozen against this.
+        const discovery = await discoverCreditHero(reportResult.page);
+
+        const reportScreenshot = await reportResult.page.screenshot();
 
         return successResponse({
             milestone: "SPIKE_CREDIT_HERO",
@@ -77,10 +89,20 @@ export async function runCreditHeroSpike(data = {}) {
             client_found: true,
             crc_client_id: clientResult.crcClientId,
 
+            // Where M3 landed (the dashboard).
             credit_hero_url: creditHeroResult.currentUrl,
             credit_hero_title: creditHeroResult.pageTitle,
             opened_in_new_tab: creditHeroResult.openedInNewTab,
-            screenshot_base64: creditHeroResult.screenshotBase64,
+
+            // Navigation to the report page — verifiable independently.
+            report_navigation: {
+                report_opened: reportResult.reportOpened,
+                report_url: reportResult.reportUrl,
+                report_title: reportResult.pageTitle,
+            },
+
+            // Screenshot is of the REPORT PAGE, which is what we now care about.
+            screenshot_base64: reportScreenshot.toString("base64"),
 
             discovery,
 
