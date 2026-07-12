@@ -32,6 +32,26 @@ const TAB_TIMEOUT = 20000;
 const STATE_MARKER_TIMEOUT = 20000;
 
 /**
+ * Gap between successive observations of the marker set.
+ *
+ * This is not a fixed sleep before a blind read. It is the interval between two
+ * comparable observations, inside a loop that exits as soon as the set has held
+ * still, and is bounded by STATE_MARKER_TIMEOUT.
+ */
+const CONFIRM_INTERVAL_MS = 250;
+
+/**
+ * How many CONSECUTIVE confirmation intervals the complete visible marker set
+ * must remain identical before we trust it.
+ *
+ * Two, not one. A single agreement can be produced by two reads that happen to
+ * fall inside the same render pause. Requiring the set to survive two
+ * consecutive intervals means a panel that is still painting has to hold a
+ * false state twice in a row to fool us.
+ */
+const STABLE_INTERVALS_REQUIRED = 2;
+
+/**
  * The recognized CRC page states. These are UI facts, not business decisions.
  */
 export const CRC_STATES = {
@@ -115,20 +135,73 @@ async function openImportAuditTab(page) {
 }
 
 /**
- * Wait for the Import/Audit tab to finish rendering.
+ * Read which markers are CURRENTLY visible on the page.
  *
- * No arbitrary timeout is needed here: the four state messages ARE the
- * readiness signal. Whichever one appears tells us both that the page has
- * rendered and what it is showing. We wait for the union and let Playwright
- * settle on whichever branch the real page uses.
- *
- * If none of them appears, the page is in a state we do not recognize. That is
- * not an error — it is a legitimate UNKNOWN, which the eligibility engine
- * routes to manual review.
- *
- * @returns {Promise<boolean>} true if a known marker rendered
+ * A snapshot, not a wait. Used to detect when rendering has settled.
  */
-async function waitForAnyStateMarker(page) {
+async function readVisibleMarkers(page) {
+    const visible = [];
+
+    for (const [name, pattern] of Object.entries(MARKERS)) {
+        if (await isMarkerVisible(page, pattern)) {
+            visible.push(name);
+        }
+    }
+
+    return visible;
+}
+
+function sameMarkerSet(a, b) {
+    return a.length === b.length && a.every((marker) => b.includes(marker));
+}
+
+/** Render a marker set for logs, so an empty set is visible rather than blank. */
+function formatMarkers(markers) {
+    return markers.length ? markers.join(", ") : "none";
+}
+
+/**
+ * Wait until the set of visible state markers has STOPPED CHANGING.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS NOT JUST "WAIT FOR THE FIRST MARKER"
+ *
+ * An earlier implementation waited on a UNION and released the moment ANY one
+ * marker appeared — then classification read all four. That leaves a window
+ * where the first marker has painted and the others have not.
+ *
+ * That window is dangerous in one specific, asymmetric way. A lead who never
+ * enrolled in Credit Hero Score has also, by definition, never had a report
+ * imported — so CHS_NOT_ACTIVATED and NEW_CLIENT can render on the same page.
+ * That co-occurrence is exactly why the CHS blocker has precedence. But
+ * precedence only protects us if BOTH markers are visible when we read. If
+ * NEW_CLIENT paints first, the union wait releases, we read before the blocker
+ * has rendered, and an un-enrollable lead is classified ELIGIBLE.
+ *
+ * The blocker rule would be silently bypassed by a race, not by a logic error.
+ * So we wait for the marker SET to settle, not for its first member.
+ *
+ * Note what we deliberately do NOT wait on: networkidle. As documented in
+ * openClient.js, CRC keeps background requests alive indefinitely, so it never
+ * fires. And we cannot "wait for the right element" — identifying which element
+ * is right is the entire job of this module.
+ * ---------------------------------------------------------------------------
+ *
+ * STABILITY RULE
+ *
+ * The complete visible marker set must be IDENTICAL across
+ * STABLE_INTERVALS_REQUIRED consecutive confirmation intervals before we will
+ * classify on it. Any change resets the counter — a set that flickers has not
+ * settled, and we do not get to pick whichever snapshot we liked.
+ *
+ * FAILS CLOSED. If the set never stabilizes within STATE_MARKER_TIMEOUT, we
+ * return an EMPTY set rather than classifying on the last thing we happened to
+ * see. An empty set routes to UNKNOWN -> manual_review. We would rather send a
+ * client to a human than classify one against a page that was still moving.
+ *
+ * @returns {Promise<string[]>} the settled marker set, or [] if it never settled
+ */
+async function waitForStableMarkers(page) {
     const anyMarker = page
         .getByText(MARKERS.CHS_NOT_ACTIVATED)
         .or(page.getByText(MARKERS.NEW_CLIENT))
@@ -136,13 +209,60 @@ async function waitForAnyStateMarker(page) {
         .or(page.getByText(MARKERS.WAITING_FOR_REPORT))
         .first();
 
+    // 1. Wait for the panel to produce at least one recognizable marker.
     try {
         await anyMarker.waitFor({ state: "visible", timeout: STATE_MARKER_TIMEOUT });
-        return true;
     } catch {
         console.warn("No recognized Import/Audit state message appeared.");
-        return false;
+        return [];
     }
+
+    // 2. Then wait for the marker set to hold still.
+    const deadline = Date.now() + STATE_MARKER_TIMEOUT;
+
+    let previous = await readVisibleMarkers(page);
+    let stableIntervals = 0;
+
+    console.log(`Import/Audit markers observed: [${formatMarkers(previous)}]`);
+
+    while (Date.now() < deadline) {
+        await page.waitForTimeout(CONFIRM_INTERVAL_MS);
+
+        const current = await readVisibleMarkers(page);
+
+        if (sameMarkerSet(previous, current)) {
+            stableIntervals += 1;
+
+            console.log(
+                `Import/Audit markers observed: [${formatMarkers(current)}] ` +
+                `— stable for ${stableIntervals}/${STABLE_INTERVALS_REQUIRED} interval(s).`
+            );
+
+            if (stableIntervals >= STABLE_INTERVALS_REQUIRED) {
+                return current;
+            }
+        } else {
+            // The page is still rendering. Any change invalidates every prior
+            // confirmation — we start counting again from zero.
+            stableIntervals = 0;
+
+            console.log(
+                `Import/Audit markers observed: [${formatMarkers(current)}] ` +
+                `— changed from [${formatMarkers(previous)}], resetting stability count.`
+            );
+        }
+
+        previous = current;
+    }
+
+    // FAIL CLOSED. The page never held still, so we have no trustworthy
+    // snapshot. Do not classify on the last thing we saw.
+    console.error(
+        "Import/Audit markers never stabilized within the timeout. " +
+        "Failing closed — this client will route to manual review."
+    );
+
+    return [];
 }
 
 /**
@@ -166,35 +286,27 @@ async function waitForAnyStateMarker(page) {
 export async function recognizeImportAuditState(page) {
     await openImportAuditTab(page);
 
-    const markerRendered = await waitForAnyStateMarker(page);
+    // Classification reads from a SETTLED snapshot, never from live per-marker
+    // queries issued while the panel may still be painting.
+    const markers = await waitForStableMarkers(page);
 
-    if (!markerRendered) {
+    if (markers.length === 0) {
         return { state: CRC_STATES.UNKNOWN, observed: [] };
     }
 
     // --- Hard blocker, highest precedence. Stop evaluating immediately. ---
-    if (await isMarkerVisible(page, MARKERS.CHS_NOT_ACTIVATED)) {
+    if (markers.includes("CHS_NOT_ACTIVATED")) {
         console.log("Recognized: Credit Hero Score never activated (hard blocker).");
         return {
             state: CRC_STATES.CHS_NOT_ACTIVATED,
-            observed: ["CHS_NOT_ACTIVATED"],
+            observed: markers,
         };
     }
 
-    // --- Remaining states. Collect ALL matches so we can detect ambiguity. ---
-    const observed = [];
-
-    if (await isMarkerVisible(page, MARKERS.NEW_CLIENT)) {
-        observed.push("NEW_CLIENT");
-    }
-
-    if (await isMarkerVisible(page, MARKERS.READY_FOR_REIMPORT)) {
-        observed.push("READY_FOR_REIMPORT");
-    }
-
-    if (await isMarkerVisible(page, MARKERS.WAITING_FOR_REPORT)) {
-        observed.push("WAITING_FOR_REPORT");
-    }
+    // --- Remaining states. Every match is already captured in the settled
+    //     snapshot, so ambiguity (two markers, or none) is detectable rather
+    //     than raced past. ---
+    const observed = markers;
 
     // Exactly one match is the only confident outcome.
     if (observed.length !== 1) {
