@@ -44,6 +44,34 @@ const OPTION_ID_PATTERN = /^productBuyNew_\d+$/i;
 const READ_TIMEOUT = 20000;
 
 /**
+ * Parse an availability date from an option's label.
+ *
+ * Observed format: "(Available 8/10/2026) 3 Bureau Report & Score FREE."
+ *
+ * This matters because a disabled option is NOT necessarily an error. A free
+ * report that becomes available on a future date is a NORMAL business state —
+ * the client is simply waiting out their 30-day membership refresh. Treating
+ * that as manual_review would escalate every waiting client to a human.
+ *
+ * Returns an ISO date string, or null if no date is stated.
+ */
+export function parseAvailableFrom(text) {
+    if (typeof text !== "string") return null;
+
+    const match = text.match(/\bavailable\s+(\d{1,2})\/(\d{1,2})\/(\d{4})\b/i);
+    if (!match) return null;
+
+    const [, month, day, year] = match;
+    const iso = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+
+    // Reject impossible dates rather than emitting garbage.
+    const parsed = new Date(`${iso}T00:00:00Z`);
+    if (Number.isNaN(parsed.getTime())) return null;
+
+    return iso;
+}
+
+/**
  * Parse a cost from text bound to a SPECIFIC option.
  *
  * Returns { cost, evidence } where cost is a number, or null if the cost could
@@ -233,14 +261,18 @@ export async function readOrderPage(page) {
     const options = raw.options.map((option) => {
         let cost = null;
         let evidence = null;
+        let availableFrom = null;
 
         for (const text of option.bound_text) {
             const parsed = parseCost(text);
 
-            if (parsed.cost !== null) {
+            if (cost === null && parsed.cost !== null) {
                 cost = parsed.cost;
                 evidence = parsed.evidence;
-                break;
+            }
+
+            if (availableFrom === null) {
+                availableFrom = parseAvailableFrom(text);
             }
         }
 
@@ -248,6 +280,7 @@ export async function readOrderPage(page) {
             ...option,
             cost,                         // null = COULD NOT DETERMINE. Not free.
             cost_evidence: evidence,
+            available_from: availableFrom, // ISO date, or null if not stated
             is_known: KNOWN_OPTION_IDS.includes(option.id),
         };
     });
