@@ -14,7 +14,8 @@
  *
  *     1. Which Decision Record(s) govern the facts found.
  *     2. Whether a Constitutional exclusion forbids acting at all.
- *     3. A confidence score, and therefore whether a human must review.
+ *     3. The EVIDENCE CLASS supporting it, and the AUTOMATION TIER that policy
+ *        currently grants that class — and therefore whether a human must review.
  *     4. An explainable reasoning chain from fact to decision.
  *
  *   It does NOT re-discover facts. Analysis already did that, and re-deriving
@@ -30,12 +31,17 @@
 
 import {
     EVIDENCE_CLASS,
+    AUTOMATION_TIER,
+    AUTOMATION_POLICY,
+    POLICY_OVERRIDES,
     FINDING_TO_DECISION,
     DECISION_NO_FURTHER_ACTION,
     DECISION_AUTHORIZED_USER,
     DECISION_HUMAN_EXCEPTION,
     DECISION_MIXED_FILE,
-    automationTier,
+    automationTierFor,
+    applyOverride,
+    requiresHumanReview,
 } from "./decisionRecords.js";
 
 export const DECISION_SCHEMA_VERSION = "BT-DECISION-1.0";
@@ -172,7 +178,6 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
             outcome: OUTCOME.NO_ACTION,
             primaryDecision: DECISION_NO_FURTHER_ACTION,
             decisionRecords: [],
-            confidence: null,
             automationTier: null,
             humanReview: false,
             humanReviewReasons: [],
@@ -194,8 +199,7 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
             outcome: OUTCOME.HUMAN_REVIEW,
             primaryDecision: DECISION_HUMAN_EXCEPTION,
             decisionRecords: [],
-            confidence: null,
-            automationTier: "HUMAN_REVIEW_REQUIRED",
+            automationTier: AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED,
             humanReview: true,
             humanReviewReasons: [
                 "No observation was found in the BT Credit Report Model for this tradeline, so the " +
@@ -222,7 +226,6 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
             outcome: OUTCOME.EXCLUDED,
             primaryDecision: exclusion.decisionRecord,
             decisionRecords: [],
-            confidence: null,
             automationTier: null,
             humanReview: false,
             humanReviewReasons: [],
@@ -271,26 +274,33 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
                 name: mapping.name,
                 triggeredBy: [],
                 evidenceClass: evidence.id,
-                confidence: evidence.confidence,
-                rationale: evidence.rationale,
+                evidenceRank: evidence.rank,   // ORDINAL. Not a probability.
+                evidenceDefinition: evidence.definition,
             });
         }
 
         const entry = decisionRecords.get(mapping.record);
         entry.triggeredBy.push(f.code);
 
-        // Where several findings support one record, keep the STRONGEST evidence
-        // class. A record supported by both a self-evident contradiction and a
-        // circumstantial pattern is carried by the contradiction.
-        if (evidence.confidence > entry.confidence) {
-            entry.confidence = evidence.confidence;
+        // Where several findings support one record, the STRONGEST evidence
+        // class carries it. A record supported by both a self-evident
+        // contradiction and a circumstantial pattern is carried by the
+        // contradiction.
+        //
+        // NOTE WHAT WE DO NOT DO: we do not accumulate. Three cross-bureau
+        // variances remain CROSS_BUREAU evidence — they do not become
+        // self-evident by being numerous. Numerous weak evidence is still weak
+        // evidence, and adding it up would manufacture certainty we have not
+        // earned.
+        if (evidence.rank > entry.evidenceRank) {
+            entry.evidenceRank = evidence.rank;
             entry.evidenceClass = evidence.id;
-            entry.rationale = evidence.rationale;
+            entry.evidenceDefinition = evidence.definition;
         }
     }
 
     const records = [...decisionRecords.values()].sort(
-        (a, b) => b.confidence - a.confidence || a.record.localeCompare(b.record)
+        (a, b) => b.evidenceRank - a.evidenceRank || a.record.localeCompare(b.record)
     );
 
     // ---- Nothing actionable ------------------------------------------------
@@ -306,8 +316,7 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
                 outcome: OUTCOME.HUMAN_REVIEW,
                 primaryDecision: DECISION_HUMAN_EXCEPTION,
                 decisionRecords: [],
-                confidence: null,
-                automationTier: "HUMAN_REVIEW_REQUIRED",
+                automationTier: AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED,
                 humanReview: true,
                 humanReviewReasons: gaps.map((g) => g.reason),
                 exclusion: null,
@@ -327,7 +336,6 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
                 outcome: OUTCOME.REQUIRES_CONSUMER_INPUT,
                 primaryDecision: null,
                 decisionRecords: [],
-                confidence: null,
                 automationTier: null,
                 humanReview: false,
                 humanReviewReasons: [],
@@ -348,7 +356,6 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
             outcome: OUTCOME.NO_ACTION,
             primaryDecision: DECISION_NO_FURTHER_ACTION,
             decisionRecords: [],
-            confidence: null,
             automationTier: null,
             humanReview: false,
             humanReviewReasons: [],
@@ -361,52 +368,41 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
         };
     }
 
-    // ---- Confidence --------------------------------------------------------
+    // ---- Evidence class -> automation tier ---------------------------------
     //
     // The primary decision is the one carried by the STRONGEST evidence, and the
-    // item's confidence is ITS confidence.
-    //
-    // Note what we do NOT do: we do not add confidence together because several
-    // findings agree. Three cross-bureau variances are still cross-bureau
-    // evidence; they do not become self-evident by being numerous. Stacking
-    // would manufacture certainty we have not earned.
+    // item's automation tier is looked up from POLICY — which is provisional and
+    // expected to change — rather than from an invented confidence percentage.
     const primary = records[0];
-    let confidence = primary.confidence;
 
+    let tier = automationTierFor(primary.evidenceClass);
     const humanReviewReasons = [];
+    const appliedOverrides = [];
 
-    // MIXED FILE POISONS EVERYTHING BELOW IT.
-    //
-    // If two consumers' data is merged into one file, a tradeline finding may
-    // describe SOMEONE ELSE'S ACCOUNT. Disputing its balance would implicitly
-    // assert the account is the consumer's — confirming data that may not be
-    // theirs, and undermining the mixed-file claim itself.
-    //
-    // The correct remedy is to resolve the mixed file FIRST. So every item on a
-    // mixed file goes to a human, regardless of how strong its own findings are.
+    // Overrides DEMOTE ONLY. Nothing can talk this engine into more autonomy.
     if (mixedFile) {
-        confidence = Math.min(confidence, 60);
-        humanReviewReasons.push(
-            "MIXED FILE INDICATED ON THIS REPORT. Findings on this tradeline may describe another " +
-            "consumer's account. Disputing item-level details would implicitly assert that this " +
-            "account belongs to the client. The mixed file must be resolved first."
-        );
+        tier = applyOverride(tier, POLICY_OVERRIDES.MIXED_FILE.tier);
+        appliedOverrides.push("MIXED_FILE");
+        humanReviewReasons.push(POLICY_OVERRIDES.MIXED_FILE.reason);
     }
 
     if (unmapped.some((u) => u.libraryGap)) {
+        tier = applyOverride(tier, POLICY_OVERRIDES.UNMAPPED_FINDING.tier);
+        appliedOverrides.push("UNMAPPED_FINDING");
         humanReviewReasons.push(
-            `Additional findings have no governing Decision Record: ` +
-            `${unmapped.filter((u) => u.libraryGap).map((u) => u.code).join(", ")}.`
+            `${POLICY_OVERRIDES.UNMAPPED_FINDING.reason} ` +
+            `Unmapped: ${unmapped.filter((u) => u.libraryGap).map((u) => u.code).join(", ")}.`
         );
     }
 
-    const tier = automationTier(confidence);
+    const humanReview = requiresHumanReview(tier);
 
-    if (tier === "HUMAN_REVIEW_REQUIRED" && humanReviewReasons.length === 0) {
-        humanReviewReasons.push(`Confidence ${confidence} is below the 80% processor-review threshold.`);
+    if (humanReview && humanReviewReasons.length === 0) {
+        humanReviewReasons.push(
+            `Evidence class ${primary.evidenceClass} maps to ${tier} under ` +
+            `${AUTOMATION_POLICY.version}.`
+        );
     }
-
-    const humanReview = tier === "HUMAN_REVIEW_REQUIRED" || tier === "PROCESSOR_REVIEW" || humanReviewReasons.length > 0;
 
     // ---- The reasoning chain — this is the deliverable ----------------------
     const reasoningChain = [
@@ -417,13 +413,18 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
 
         `DECISION: ${primary.record} (${primary.name}), triggered by ${primary.triggeredBy.join(", ")}.`,
 
-        `EVIDENCE CLASS: ${primary.evidenceClass}. ${primary.rationale}`,
+        `EVIDENCE CLASS: ${primary.evidenceClass}. ${primary.evidenceDefinition}`,
 
         ...(records.length > 1
             ? [`ALSO APPLICABLE: ${records.slice(1).map((r) => `${r.record} (${r.name})`).join(", ")}.`]
             : []),
 
-        `CONFIDENCE: ${confidence} -> ${tier}.`,
+        `AUTOMATION: ${tier} (per ${AUTOMATION_POLICY.version} — PROVISIONAL POLICY, ` +
+            `not a measured probability).`,
+
+        ...(appliedOverrides.length
+            ? [`POLICY OVERRIDES APPLIED (demote only): ${appliedOverrides.join(", ")}.`]
+            : []),
 
         ...humanReviewReasons.map((r) => `HUMAN REVIEW: ${r}`),
 
@@ -439,8 +440,9 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
         outcome: humanReview ? OUTCOME.HUMAN_REVIEW : OUTCOME.DISPUTE_CANDIDATE,
         primaryDecision: { record: primary.record, name: primary.name },
         decisionRecords: records,
-        confidence,
+        evidenceClass: primary.evidenceClass,
         automationTier: tier,
+        appliedOverrides,
         humanReview,
         humanReviewReasons,
         exclusion: null,
@@ -522,7 +524,7 @@ export async function decideDisputes(analysis, context = {}) {
             record: DECISION_MIXED_FILE.record,
             name: DECISION_MIXED_FILE.name,
             triggeredBy: ["PI_MIXED_FILE_INDICATOR"],
-            confidence: EVIDENCE_CLASS.SELF_EVIDENT.confidence,
+            evidenceClass: EVIDENCE_CLASS.SELF_EVIDENT.id,
             priority: "FIRST — before any item-level dispute",
         });
     }
@@ -539,7 +541,7 @@ export async function decideDisputes(analysis, context = {}) {
                 record: mapping.record,
                 name: mapping.name,
                 triggeredBy: [f.code],
-                confidence: evidence.confidence,
+                evidenceClass: evidence.id,
                 priority: "Personal information",
             });
         }
@@ -559,9 +561,9 @@ export async function decideDisputes(analysis, context = {}) {
     const itemDecisions = allItems
         .map((item) => decideItem(item, { mixedFile, observationsByItemKey }))
         .sort((a, b) => {
-            const ca = a.confidence ?? -1;
-            const cb = b.confidence ?? -1;
-            return cb - ca || String(a.stableItemKey).localeCompare(String(b.stableItemKey));
+            const ra = a.decisionRecords?.[0]?.evidenceRank ?? -1;
+            const rb = b.decisionRecords?.[0]?.evidenceRank ?? -1;
+            return rb - ra || String(a.stableItemKey).localeCompare(String(b.stableItemKey));
         });
 
     // If we had no report, we could not enforce the exclusions. Say so loudly
@@ -573,11 +575,9 @@ export async function decideDisputes(analysis, context = {}) {
             if (decision.outcome === OUTCOME.DISPUTE_CANDIDATE) {
                 decision.outcome = OUTCOME.HUMAN_REVIEW;
                 decision.humanReview = true;
-                decision.humanReviewReasons.push(
-                    "The BT Credit Report Model was not supplied, so the Constitutional exclusions " +
-                    "(authorized user, positive account) COULD NOT BE CHECKED. No dispute proceeds " +
-                    "automatically without them."
-                );
+                decision.automationTier = POLICY_OVERRIDES.EXCLUSIONS_UNVERIFIABLE.tier;
+                decision.appliedOverrides = [...(decision.appliedOverrides ?? []), "EXCLUSIONS_UNVERIFIABLE"];
+                decision.humanReviewReasons.push(POLICY_OVERRIDES.EXCLUSIONS_UNVERIFIABLE.reason);
             }
         }
     }
@@ -613,6 +613,11 @@ export async function decideDisputes(analysis, context = {}) {
         itemDecisions,
 
         libraryGaps,
+
+        automationPolicy: {
+            version: AUTOMATION_POLICY.version,
+            status: AUTOMATION_POLICY.status,
+        },
 
         summary: {
             itemsEvaluated: itemDecisions.length,
