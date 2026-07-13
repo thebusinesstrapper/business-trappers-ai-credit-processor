@@ -1,0 +1,195 @@
+==============================================================================
+BUSINESS TRAPPERS AI CREDIT PROCESSOR — DISPUTE PACKAGE
+Client: Elizabeth Kelley  |  CRC ID: 15  |  Report: 2026-07-10
+==============================================================================
+
+FINDINGS:        16 across 3 bureau tradelines
+DISPUTED:        3
+EXCLUDED:        1 (Constitutional)
+ESCALATIONS:     1
+LETTERS:         3 -> Experian, TransUnion, TransUnion
+IDENTITY SOURCE: CRC client profile (authoritative). NOT the credit report.
+CROSS-BUREAU LEAK CHECK: PASS
+WITHHELD:        0
+
+
+==============================================================================
+EXCLUDED BY THE CONSTITUTION — no dispute raised
+==============================================================================
+
+  SPOUSE VISA (transunion)
+  RULE: CONSTITUTION_NEVER_DISPUTE_AUTHORIZED_USER
+  Reported responsibility is "Authorized User". The Project Constitution forbids disputing authorized user accounts. Disputing it risks removing beneficial history that is not the consumer's to dispute.
+
+
+==============================================================================
+REASONING TRACE
+==============================================================================
+
+--- NAVY FCU (Experian) — bt_tl_navy_exp
+    DECISION: BT-DM-0031 (Cross-Bureau Reporting Variance) on experian's tradeline for "NAVY FCU".
+    EVIDENCE: CROSS_BUREAU.
+    HISTORY: no prior dispute on this bureau tradeline.
+    NO ESCALATION: No prior dispute on this bureau tradeline. Round 1.
+    STRATEGY: BT-ST-0001 (Bureau Investigation), round 1 of 6.
+    AUTOMATION: AUTOMATED_WITH_VALIDATION.
+    SCOPE: this strategy governs experian only. Other bureaus escalate independently, on their own conduct.
+    NEXT: the Reason Engine selects the approved dispute reason. This engine selects no reason, no law, and no instruction.
+    REASON: BT-RN-0022 (Cannot Verify). Supported by the facts identified in analysis.
+    INSTRUCTION: BT-IN-0016 (Bureau Reinvestigation).
+    BLUEPRINT: BT-BP-0001 (Bureau Reinvestigation).
+
+--- NAVY FEDERAL CR UNION (TransUnion) — bt_tl_navy_tu
+    DECISION: BT-DM-0033 (Metro 2 Reporting Inconsistency) on transunion's tradeline for "NAVY FEDERAL CR UNION".
+    EVIDENCE: SELF_EVIDENT.
+    HISTORY: round 1 (BT-ST-0010) -> verified.
+    ESCALATION EARNED: The bureau reported this item as VERIFIED, yet the item remains internally contradictory on the face of its own report. A reasonable investigation could not have confirmed a record that contradicts itself.
+    STRATEGY: BT-ST-0011 (Failure to Investigate), round 2 of 6.
+    AUTOMATION: PROCESSOR_REVIEW.
+    HUMAN REVIEW: This is an ESCALATION. It asserts that the bureau or furnisher failed to meet an obligation. A person reviews any letter that accuses, regardless of how well the grounds are evidenced.
+    SCOPE: this strategy governs transunion only. Other bureaus escalate independently, on their own conduct.
+    NEXT: the Reason Engine selects the approved dispute reason. This engine selects no reason, no law, and no instruction.
+    REASON: BT-RN-0019 (Failure to Investigate). The bureau reported this item as VERIFIED, yet the item remains internally contradictory on the face of its own report. A reasonable investigation could not have confirmed a record that contradicts itself.
+    INSTRUCTION: BT-IN-0018 (Failure to Investigate Escalation).
+    BLUEPRINT: BT-BP-0011 (Failure to Conduct Reasonable Investigation).
+
+--- MIDLAND CREDIT MGMT (TransUnion) — bt_tl_coll_tu
+    DECISION: BT-DM-0008 (Third-Party Collection) on transunion's tradeline for "MIDLAND CREDIT MGMT".
+    EVIDENCE: SELF_EVIDENT.
+    HISTORY: no prior dispute on this bureau tradeline.
+    NO ESCALATION: No prior dispute on this bureau tradeline. Round 1.
+    STRATEGY: BT-ST-0005 (Collection Validation), round 1 of 6.
+    AUTOMATION: FULL_AUTOMATION.
+    SCOPE: this strategy governs transunion only. Other bureaus escalate independently, on their own conduct.
+    NEXT: the Reason Engine selects the approved dispute reason. This engine selects no reason, no law, and no instruction.
+    REASON: BT-RN-0007 (Third-Party Collection). Supported by the facts identified in analysis.
+    INSTRUCTION: BT-IN-0006 (Validate Collection).
+    BLUEPRINT: BT-BP-0005 (Collection Validation).
+
+
+==============================================================================
+LETTER 1 of 3 — EXPERIAN
+Round 1  |  1 account(s)  |  Review required: false
+==============================================================================
+
+Elizabeth Kelley
+1420 Meridian Road
+Tallahassee, FL 32303
+
+2026-07-13
+
+Experian
+P.O. Box 4500
+Allen, TX 75013
+
+Re: Dispute — Elizabeth Kelley
+
+I am disputing the accuracy of the following information on my credit file and requesting reinvestigation.
+
+---
+
+NAVY FCU
+Account Number: 6095XXXXXXXX
+
+I dispute the accuracy of the balance, past-due amount and status reported for this account. They cannot be verified as accurate.
+
+FCRA § 611 (15 U.S.C. § 1681i) — reinvestigation of disputed information.
+
+Requested action: Delete this account, or correct the reporting, as the investigation requires.
+
+---
+
+Please provide the results of your investigation in writing.
+
+Sincerely,
+
+Elizabeth Kelley
+
+==============================================================================
+LETTER 2 of 3 — TRANSUNION
+Round 2 (ESCALATION)  |  1 account(s)  |  Review required: true
+==============================================================================
+
+Elizabeth Kelley
+1420 Meridian Road
+Tallahassee, FL 32303
+
+2026-07-13
+
+TransUnion Consumer Solutions
+P.O. Box 2000
+Chester, PA 19016-2000
+
+Re: Dispute — Elizabeth Kelley
+
+I previously disputed the accounts identified below. The information remains on my file and the response I received did not resolve it. I am requesting reinvestigation.
+
+---
+
+NAVY FEDERAL CR UNION
+Account Number: ****6095
+
+Reported with a status of "Charge-off" and no date of first delinquency.
+Reported with a past-due amount of $4,200 and a balance of $0.
+I dispute the accuracy of the balance, past-due amount and status reported for this account. They cannot be verified as accurate.
+
+A derogatory account must carry a date of first delinquency. Without it, the permissible reporting period cannot be determined.
+An account with no balance cannot carry an amount past due. The reporting is internally inconsistent.
+
+FCRA § 605(c) (15 U.S.C. § 1681c(c)) — the reporting period runs from the date of first delinquency.
+
+Requested action: Delete this account, or correct the reporting, as the investigation requires.
+
+---
+
+Please provide the results of your investigation in writing.
+
+Sincerely,
+
+Elizabeth Kelley
+
+==============================================================================
+LETTER 3 of 3 — TRANSUNION
+Round 1  |  1 account(s)  |  Review required: false
+==============================================================================
+
+Elizabeth Kelley
+1420 Meridian Road
+Tallahassee, FL 32303
+
+2026-07-13
+
+TransUnion Consumer Solutions
+P.O. Box 2000
+Chester, PA 19016-2000
+
+Re: Dispute — Elizabeth Kelley
+
+I am disputing the accuracy of the following information on my credit file and requesting reinvestigation.
+
+---
+
+MIDLAND CREDIT MGMT
+Account Number: ****3311
+
+Reported as a collection with no original creditor identified.
+Reported as first delinquent on 2021-05-01, before the account opened date of 2021-08-01.
+
+A collection that does not identify the original creditor cannot be verified.
+An account cannot become delinquent before it exists. The reporting is internally inconsistent.
+
+FCRA § 607(b) (15 U.S.C. § 1681e(b)) — reasonable procedures to assure maximum possible accuracy.
+
+Requested action: Delete this account from my credit file.
+
+---
+
+Please provide the results of your investigation in writing.
+
+Sincerely,
+
+Elizabeth Kelley
+
+==============================================================================
+STATUS: AWAITING HUMAN REVIEW. Nothing has been sent.
+==============================================================================
