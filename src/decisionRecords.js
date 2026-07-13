@@ -88,6 +88,20 @@ export const EVIDENCE_CLASS = Object.freeze({
             "alone. It is an observation, not a proof.",
     },
 
+    // "WE CANNOT TELL." Distinct from CIRCUMSTANTIAL — that is weak evidence FOR
+    // something. This is the ABSENCE of the evidence an assertion would require.
+    //
+    // A missing DOFD does not make an item weakly obsolete. It makes obsolescence
+    // UNKNOWABLE, and an unknowable claim is not a weak claim — it is no claim.
+    INDETERMINATE: {
+        id: "INDETERMINATE",
+        rank: 0,
+        label: "Indeterminate",
+        definition:
+            "The report does not contain the information an assertion would require. Nothing is " +
+            "claimed; the item is routed to a human.",
+    },
+
     REQUIRES_CONSUMER: {
         id: "REQUIRES_CONSUMER",
         rank: 0,
@@ -131,6 +145,7 @@ export const AUTOMATION_POLICY = Object.freeze({
         IDENTITY:          AUTOMATION_TIER.AUTOMATED_WITH_VALIDATION,
         CROSS_BUREAU:      AUTOMATION_TIER.AUTOMATED_WITH_VALIDATION,
         CIRCUMSTANTIAL:    AUTOMATION_TIER.PROCESSOR_REVIEW,
+        INDETERMINATE:     AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED,
         REQUIRES_CONSUMER: AUTOMATION_TIER.NEVER_AUTOMATED,
     }),
 });
@@ -155,6 +170,14 @@ export const POLICY_OVERRIDES = Object.freeze({
         reason: "One or more findings have no governing Decision Record.",
     },
 
+    COMPLIANCE_GATED: {
+        tier: AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED,
+        reason:
+            "This Decision Record is compliance-gated. It may be detected and routed, but no " +
+            "automated letter may assert the legal conclusion behind it until the basis and wording " +
+            "are reviewed.",
+    },
+
     EXCLUSIONS_UNVERIFIABLE: {
         tier: AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED,
         reason:
@@ -162,6 +185,43 @@ export const POLICY_OVERRIDES = Object.freeze({
             "We do not dispute an account we cannot verify we are allowed to dispute.",
     },
 });
+
+/**
+ * COMPLIANCE GATES.
+ *
+ * A gated Decision Record may be DETECTED and ROUTED, but no automated letter
+ * may assert the legal conclusion behind it until counsel approves the basis and
+ * the wording.
+ *
+ * This is stronger than "needs review". It constrains WHAT MAY BE SAID, not just
+ * who signs off — the restriction travels with the item all the way into the
+ * Letter Engine, which must refuse to write the forbidden assertion.
+ */
+export const COMPLIANCE_GATES = Object.freeze({
+    "BT-DM-0052": {
+        record: "BT-DM-0052",
+        name: "Obsolete Inquiry Reporting",
+        blocked: true,
+        reason:
+            "The two-year figure for hard inquiries is largely BUREAU PRACTICE, not a clean statutory " +
+            "obsolescence right of the kind FCRA §605 provides for derogatory accounts. FCRA's explicit " +
+            "two-year limit is written with respect to inquiries for EMPLOYMENT purposes.",
+        forbiddenAssertions: [
+            "that the inquiry's age makes it unlawful",
+            "that deletion is legally required on the basis of age alone",
+            "any citation of permissible purpose (§1681b) — that is BT-DM-0001 and needs a fact we do not have",
+        ],
+        permittedAssertions: [
+            "that the inquiry is more than two years old",
+            "a request that the bureau verify the inquiry remains properly reportable",
+        ],
+        clearedBy: "Pending review of the legal basis and approved wording.",
+    },
+});
+
+export function complianceGateFor(record) {
+    return COMPLIANCE_GATES[record] ?? null;
+}
 
 const TIER_RANK = Object.freeze({
     FULL_AUTOMATION: 4,
@@ -212,19 +272,32 @@ export const FINDING_TO_DECISION = Object.freeze({
     TL_DUPLICATE_WITHIN_BUREAU:               { record: "BT-DM-0018", name: "Duplicate Tradeline", evidence: "SELF_EVIDENT" },
 
     // ---- NEW: obsolete reporting -------------------------------------------
+    // SELF_EVIDENT ONLY because the Analysis Engine will not emit these unless the
+    // category is identified, the controlling date is present and readable, the
+    // period is calculable, and expiry has indisputably passed. Where any of that
+    // fails, it emits *_OBSOLESCENCE_INDETERMINATE instead — see below.
     TL_BEYOND_REPORTING_PERIOD: { record: "BT-DM-0051", name: "Obsolete Derogatory Reporting", evidence: "SELF_EVIDENT" },
     PR_BEYOND_REPORTING_PERIOD: { record: "BT-DM-0051", name: "Obsolete Derogatory Reporting", evidence: "SELF_EVIDENT" },
+
+    TL_OBSOLESCENCE_INDETERMINATE: { record: "BT-DM-0051", name: "Obsolete Derogatory Reporting", evidence: "INDETERMINATE" },
 
     // ---- NEW: stale inquiries ----------------------------------------------
     //
     // NOT self-evident. See BT-DM-0052: the two-year figure is bureau practice,
     // not a clean §605 obsolescence rule, so the claim is weaker than an
     // obsolete tradeline and is deliberately not fully automated.
-    INQ_BEYOND_REPORTING_PERIOD: { record: "BT-DM-0052", name: "Obsolete Inquiry Reporting", evidence: "CROSS_BUREAU" },
+    // COMPLIANCE-GATED. Detected and routed; never automatically asserted.
+    INQ_BEYOND_REPORTING_PERIOD: { record: "BT-DM-0052", name: "Obsolete Inquiry Reporting", evidence: "INDETERMINATE" },
 
     // ---- NEW: public record defects ----------------------------------------
-    PR_MISSING_FILING_DATE: { record: "BT-DM-0053", name: "Public Record Reporting Defect", evidence: "SELF_EVIDENT" },
-    PR_XB_INCONSISTENT:     { record: "BT-DM-0053", name: "Public Record Reporting Defect", evidence: "CROSS_BUREAU" },
+    // A missing filing date is READABLE from the report — but it makes the legal
+    // treatment UNKNOWABLE, and it is the treatment we would be asserting.
+    PR_MISSING_FILING_DATE:        { record: "BT-DM-0053", name: "Public Record Reporting Defect", evidence: "INDETERMINATE" },
+    PR_RECORD_TYPE_UNKNOWN:        { record: "BT-DM-0053", name: "Public Record Reporting Defect", evidence: "INDETERMINATE" },
+    PR_OBSOLESCENCE_INDETERMINATE: { record: "BT-DM-0053", name: "Public Record Reporting Defect", evidence: "INDETERMINATE" },
+
+    // Provable from the report: two bureaus state different facts about one record.
+    PR_XB_INCONSISTENT: { record: "BT-DM-0053", name: "Public Record Reporting Defect", evidence: "CROSS_BUREAU" },
 
     // ---- Cross-bureau ------------------------------------------------------
     TL_XB_STATUS_INCONSISTENT:      { record: "BT-DM-0031", name: "Cross-Bureau Reporting Variance", evidence: "CROSS_BUREAU" },
