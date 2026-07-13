@@ -48,6 +48,23 @@ export function isSafeHistoricalDateOption(text) {
     return DATE_PATTERN.test(text);
 }
 
+/**
+ * Escape a value for use inside a quoted CSS attribute selector.
+ *
+ * We deliberately do NOT use CSS.escape() here. `CSS` is a BROWSER global — it
+ * exists inside frame.evaluate(), but this code runs in NODE, where it is
+ * undefined. (orderPageReader.js and spikeOrderPage.js both use CSS.escape
+ * legitimately, because those calls sit inside frame.evaluate() and execute in
+ * the page.)
+ *
+ * An attribute selector sidesteps id-escaping entirely: `select[id="foo:bar"]`
+ * is valid even when `#foo:bar` is not, so we only need to escape backslashes
+ * and the quote character itself.
+ */
+function cssAttrValue(value) {
+    return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function buildReplayUrl(sessionId) {
     return `https://www.browserbase.com/sessions/${sessionId}`;
 }
@@ -214,8 +231,8 @@ export async function runIdentifierSpike(data = {}) {
         console.log("This selects an EXISTING report. It does not order, refresh, or purchase.");
 
         const selectLocator = selector.select.id
-            ? selector.frame.locator(`#${CSS.escape(selector.select.id)}`)
-            : selector.frame.locator(`select[name="${selector.select.name}"]`);
+            ? selector.frame.locator(`select[id="${cssAttrValue(selector.select.id)}"]`)
+            : selector.frame.locator(`select[name="${cssAttrValue(selector.select.name)}"]`);
 
         await selectLocator.selectOption(target.value);
 
