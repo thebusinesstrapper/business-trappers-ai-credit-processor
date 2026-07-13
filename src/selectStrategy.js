@@ -1,0 +1,435 @@
+/**
+ * selectStrategy.js
+ *
+ * THE STRATEGY ENGINE (Milestone 9).
+ *
+ *   Capture -> Normalize -> Analyze -> Decision -> [STRATEGY] -> Reason
+ *           -> Instruction -> Letter Blueprint -> Letter Generation
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THIS ENGINE DOES
+ *
+ *   The Decision Engine said WHICH DECISION RECORD GOVERNS a bureau tradeline.
+ *   This engine says HOW WE PURSUE IT — which Strategy Record, which round, and
+ *   whether the item has earned escalation.
+ *
+ *   It is the FIRST engine that consumes DISPUTE HISTORY. Everything before it
+ *   looked only at the current report. This one asks: what have we already
+ *   tried on THIS bureau tradeline, and what happened?
+ *
+ *   It selects NO law, NO reason, NO instruction. It writes no letters.
+ *
+ *   PURE and DETERMINISTIC. No GPT. No browser. No network.
+ *
+ * ---------------------------------------------------------------------------
+ * ESCALATION IS EARNED, NOT SCHEDULED
+ *
+ *   The single most tempting mistake here is to escalate on a CALENDAR:
+ *   "round 3, so send the angry letter."
+ *
+ *   That is wrong, and it is the reason most credit repair letters fail. A round
+ *   number is not a fact about the bureau's conduct. Escalation must be earned
+ *   by something the bureau actually DID:
+ *
+ *     - it verified an item that is self-evidently wrong  -> failure to investigate
+ *     - it said it would correct, and did not             -> failure to update
+ *     - it deleted an item, and the item came back        -> reinsertion
+ *
+ *   Where none of those happened, we do NOT escalate merely because time passed.
+ *   An unearned escalation asserts misconduct we cannot evidence — and the
+ *   Writing Style Guide forbids exactly that: "State facts instead of making
+ *   accusations."
+ *
+ *   HISTORY IS KEYED ON stable_item_key, NOT stable_account_key.
+ *   TransUnion may have failed to investigate while Experian corrected on round
+ *   one. They are separate legal proceedings and escalate independently.
+ * ---------------------------------------------------------------------------
+ */
+
+import { OUTCOME } from "./decideDisputes.js";
+import { AUTOMATION_TIER } from "./decisionRecords.js";
+
+export const STRATEGY_SCHEMA_VERSION = "BT-STRATEGY-1.0";
+
+export const MAX_ROUNDS = 6; // AI Processing Decision Engine v1.0. Six, not five.
+
+/**
+ * DECISION RECORD -> STRATEGY RECORD, for a FIRST dispute (round 1).
+ *
+ * Escalation strategies (BT-ST-0011 and above) are never selected from this
+ * table. They are only reachable through EARNED escalation, below.
+ */
+const DECISION_TO_STRATEGY = Object.freeze({
+    "BT-DM-0002": { strategy: "BT-ST-0004", name: "Unauthorized Inquiry" },          // duplicate inquiry
+    "BT-DM-0004": { strategy: "BT-ST-0003", name: "Personal Information Correction" },
+    "BT-DM-0006": { strategy: "BT-ST-0003", name: "Personal Information Correction" },
+    "BT-DM-0007": { strategy: "BT-ST-0009", name: "Mixed File Resolution" },
+    "BT-DM-0008": { strategy: "BT-ST-0005", name: "Collection Validation" },
+    "BT-DM-0010": { strategy: "BT-ST-0005", name: "Collection Validation" },
+    "BT-DM-0011": { strategy: "BT-ST-0006", name: "Charge-Off Investigation" },
+    "BT-DM-0013": { strategy: "BT-ST-0006", name: "Charge-Off Investigation" },      // re-aging
+    "BT-DM-0014": { strategy: "BT-ST-0007", name: "Payment History Correction" },
+    "BT-DM-0018": { strategy: "BT-ST-0001", name: "Bureau Investigation" },
+    "BT-DM-0019": { strategy: "BT-ST-0001", name: "Bureau Investigation" },
+    "BT-DM-0028": { strategy: "BT-ST-0003", name: "Personal Information Correction" },
+    "BT-DM-0029": { strategy: "BT-ST-0001", name: "Bureau Investigation" },          // reinsertion
+    "BT-DM-0031": { strategy: "BT-ST-0001", name: "Bureau Investigation" },
+    "BT-DM-0033": { strategy: "BT-ST-0010", name: "Metro 2 Accuracy Review" },
+    "BT-DM-0034": { strategy: "BT-ST-0006", name: "Charge-Off Investigation" },
+    "BT-DM-0051": { strategy: "BT-ST-0001", name: "Bureau Investigation" },          // obsolete
+    "BT-DM-0052": { strategy: "BT-ST-0001", name: "Bureau Investigation" },          // stale inquiry
+    "BT-DM-0053": { strategy: "BT-ST-0001", name: "Bureau Investigation" },          // public record defect
+});
+
+const STRATEGY_NO_FURTHER_ACTION = { strategy: "BT-ST-0016", name: "No Further Action" };
+
+/**
+ * Escalation strategies. Reached ONLY by earning them.
+ */
+const ESCALATION = Object.freeze({
+    FURNISHER: { strategy: "BT-ST-0002", name: "Furnisher Investigation" },
+    FAILURE_TO_INVESTIGATE: { strategy: "BT-ST-0011", name: "Failure to Investigate" },
+    FAILURE_TO_UPDATE: { strategy: "BT-ST-0012", name: "Failure to Update" },
+    NOTICE_AND_CURE: { strategy: "BT-ST-0013", name: "Notice & Cure" },
+});
+
+/** Outcomes AI Memory records for a previously disputed item. */
+export const PRIOR_OUTCOME = Object.freeze({
+    DELETED: "deleted",
+    CORRECTED: "corrected",
+    VERIFIED: "verified",     // the bureau said "we checked, it's right"
+    UNCHANGED: "unchanged",   // nothing came back / nothing moved
+    REAPPEARED: "reappeared",
+    UNKNOWN: "unknown",
+});
+
+// ---------------------------------------------------------------------------
+// Earned escalation
+// ---------------------------------------------------------------------------
+
+/**
+ * Decide whether THIS bureau tradeline has earned escalation, based on what the
+ * bureau actually did — never on the round number alone.
+ *
+ * @returns {{ escalate: boolean, strategy?: object, grounds?: string }}
+ */
+function evaluateEscalation(history, evidenceClass) {
+    const priorRounds = history.rounds ?? [];
+
+    if (priorRounds.length === 0) {
+        return { escalate: false, grounds: "No prior dispute on this bureau tradeline. Round 1." };
+    }
+
+    const last = priorRounds[priorRounds.length - 1];
+
+    // 1. REINSERTION. The item was deleted and came back. This is the most
+    //    serious thing a bureau can do, and it is earned the moment it happens —
+    //    no waiting period, no round threshold.
+    if (last.outcome === PRIOR_OUTCOME.REAPPEARED) {
+        return {
+            escalate: true,
+            strategy: ESCALATION.NOTICE_AND_CURE,
+            grounds:
+                `This item was previously DELETED and has REAPPEARED on the report. Reinserting a ` +
+                `deleted item carries its own notice obligations, and this is established by our own ` +
+                `persisted report history — not inferred.`,
+        };
+    }
+
+    // 2. FAILURE TO INVESTIGATE. The bureau "verified" an item whose defect is
+    //    SELF-EVIDENT on the face of its own report.
+    //
+    //    This is the strongest escalation we can support, and note WHY it is
+    //    available: a bureau cannot have reasonably investigated a record that
+    //    contradicts itself and still concluded it was accurate. The claim rests
+    //    on the contradiction, not on our displeasure with the outcome.
+    //
+    //    It is deliberately NOT available for CROSS_BUREAU evidence. There, the
+    //    bureau may genuinely believe its own data is right, and we cannot say
+    //    it failed to investigate merely because it disagreed with us.
+    if (last.outcome === PRIOR_OUTCOME.VERIFIED && evidenceClass === "SELF_EVIDENT") {
+        return {
+            escalate: true,
+            strategy: ESCALATION.FAILURE_TO_INVESTIGATE,
+            grounds:
+                `The bureau reported this item as VERIFIED, yet the item remains internally ` +
+                `contradictory on the face of its own report. A reasonable investigation could not ` +
+                `have confirmed a record that contradicts itself.`,
+        };
+    }
+
+    // 3. FAILURE TO UPDATE. The bureau said it would correct, and the item is
+    //    unchanged in the current report.
+    if (last.outcome === PRIOR_OUTCOME.CORRECTED && last.stillPresentUnchanged === true) {
+        return {
+            escalate: true,
+            strategy: ESCALATION.FAILURE_TO_UPDATE,
+            grounds:
+                `The bureau indicated this item was CORRECTED, but the current report shows it ` +
+                `unchanged. The promised correction was not made.`,
+        };
+    }
+
+    // 4. Bureau verified, but our evidence is cross-bureau / weaker. We cannot
+    //    claim failure to investigate. We CAN go to the furnisher, who is the
+    //    source of the data and has its own duties.
+    if (last.outcome === PRIOR_OUTCOME.VERIFIED) {
+        return {
+            escalate: true,
+            strategy: ESCALATION.FURNISHER,
+            grounds:
+                `The bureau verified this item. Our evidence (${evidenceClass}) does not establish ` +
+                `that the investigation was unreasonable — the bureau may hold data we cannot see. ` +
+                `The furnisher is the source of the reporting and is addressed directly.`,
+        };
+    }
+
+    // 5. Nothing came back at all.
+    if (last.outcome === PRIOR_OUTCOME.UNCHANGED || last.outcome === PRIOR_OUTCOME.UNKNOWN) {
+        return {
+            escalate: true,
+            strategy: ESCALATION.FURNISHER,
+            grounds:
+                `The previous dispute produced no documented response or change. The furnisher is ` +
+                `addressed directly.`,
+        };
+    }
+
+    // 6. It worked. Nothing to escalate.
+    return {
+        escalate: false,
+        resolved: true,
+        grounds: `The previous dispute resulted in "${last.outcome}". No further action required.`,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// The engine
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {object} decisions  output of decideDisputes()
+ * @param {object} [context]
+ * @param {Map<string, object>|object} [context.itemHistory]
+ *        Item-level dispute history from AI Memory, KEYED ON stable_item_key.
+ *        Shape: { rounds: [{ round, strategy, outcome, stillPresentUnchanged }] }
+ *
+ *        WITHOUT IT, every item is treated as a FIRST dispute. That is the safe
+ *        default: a round-1 letter sent twice is ineffective. An unearned
+ *        escalation asserts bureau misconduct we cannot evidence.
+ */
+export async function selectStrategy(decisions, context = {}) {
+
+    const { itemHistory = new Map() } = context;
+
+    const historyFor = (key) => {
+        if (itemHistory instanceof Map) return itemHistory.get(key) ?? { rounds: [] };
+        return itemHistory[key] ?? { rounds: [] };
+    };
+
+    const haveHistory = itemHistory instanceof Map ? itemHistory.size > 0 : Object.keys(itemHistory).length > 0;
+
+    if (!decisions || decisions.decisionOk !== true) {
+        return {
+            schemaVersion: STRATEGY_SCHEMA_VERSION,
+            strategyOk: false,
+            errors: ["Decisions were not successful. No strategy is selected on an untrusted decision set."],
+            itemStrategies: [],
+            summary: {},
+        };
+    }
+
+    // A mixed file is resolved FIRST. Item-level strategies are held back:
+    // pursuing a tradeline dispute would implicitly assert the tradeline is the
+    // client's, which is the very thing in question.
+    const mixedFile = decisions.reportLevel?.mixedFile === true;
+
+    const itemStrategies = decisions.itemDecisions.map((decision) => {
+        const base = {
+            stableItemKey: decision.stableItemKey,       // the legal unit
+            stableAccountKey: decision.stableAccountKey, // context
+            bureau: decision.bureau,
+            furnisher: decision.furnisher,
+            kind: decision.kind,
+            decisionRecord: decision.primaryDecision?.record ?? null,
+        };
+
+        // ---- Items the Decision Engine already closed -----------------------
+        if (
+            decision.outcome === OUTCOME.EXCLUDED ||
+            decision.outcome === OUTCOME.NO_ACTION ||
+            decision.outcome === OUTCOME.REQUIRES_CONSUMER_INPUT
+        ) {
+            return {
+                ...base,
+                strategy: STRATEGY_NO_FURTHER_ACTION,
+                round: null,
+                escalated: false,
+                automationTier: AUTOMATION_TIER.NEVER_AUTOMATED,
+                humanReview: decision.humanReview ?? false,
+                reasoningChain: [
+                    `The Decision Engine returned ${decision.outcome} for this item.`,
+                    decision.exclusion?.reason ??
+                        decision.reasoningChain?.[decision.reasoningChain.length - 1] ??
+                        "No dispute is pursued.",
+                    `Strategy: ${STRATEGY_NO_FURTHER_ACTION.strategy} (${STRATEGY_NO_FURTHER_ACTION.name}).`,
+                ],
+            };
+        }
+
+        const history = historyFor(decision.stableItemKey);
+        const priorRounds = history.rounds ?? [];
+        const nextRound = priorRounds.length + 1;
+
+        // ---- Round ceiling --------------------------------------------------
+        if (nextRound > MAX_ROUNDS) {
+            return {
+                ...base,
+                strategy: STRATEGY_NO_FURTHER_ACTION,
+                round: null,
+                escalated: false,
+                automationTier: AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED,
+                humanReview: true,
+                humanReviewReasons: [
+                    `${MAX_ROUNDS} dispute rounds have been completed on this bureau tradeline without ` +
+                    `resolution. The approved DFY process is exhausted. A human decides what happens next.`,
+                ],
+                reasoningChain: [
+                    `${priorRounds.length} prior rounds on ${decision.bureau}'s tradeline.`,
+                    `The ${MAX_ROUNDS}-round limit is reached. This engine does not exceed it.`,
+                ],
+            };
+        }
+
+        // ---- Earned escalation ---------------------------------------------
+        const escalation = evaluateEscalation(history, decision.evidenceClass);
+
+        if (escalation.resolved) {
+            return {
+                ...base,
+                strategy: STRATEGY_NO_FURTHER_ACTION,
+                round: null,
+                escalated: false,
+                automationTier: AUTOMATION_TIER.NEVER_AUTOMATED,
+                humanReview: false,
+                reasoningChain: [
+                    escalation.grounds,
+                    `Strategy: ${STRATEGY_NO_FURTHER_ACTION.strategy} (${STRATEGY_NO_FURTHER_ACTION.name}).`,
+                ],
+            };
+        }
+
+        const initial = DECISION_TO_STRATEGY[decision.primaryDecision?.record];
+
+        if (!initial && !escalation.escalate) {
+            return {
+                ...base,
+                strategy: null,
+                round: nextRound,
+                escalated: false,
+                automationTier: AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED,
+                humanReview: true,
+                humanReviewReasons: [
+                    `No Strategy Record is mapped to Decision Record ` +
+                    `${decision.primaryDecision?.record}. Not guessing.`,
+                ],
+                reasoningChain: [
+                    `Decision Record ${decision.primaryDecision?.record} has no mapped strategy.`,
+                    `Routed to a human rather than forcing a strategy that may not fit.`,
+                ],
+            };
+        }
+
+        const selected = escalation.escalate ? escalation.strategy : initial;
+
+        // ---- Automation ------------------------------------------------------
+        //
+        // Escalation ASSERTS BUREAU MISCONDUCT in the consumer's name. Even when
+        // the grounds are solid, a human reads it before it goes out. The cost of
+        // being wrong here is not a failed dispute — it is a false accusation
+        // over the client's signature.
+        let tier = decision.automationTier;
+        const humanReviewReasons = [...(decision.humanReviewReasons ?? [])];
+
+        if (escalation.escalate) {
+            tier = AUTOMATION_TIER.PROCESSOR_REVIEW;
+            humanReviewReasons.push(
+                "This is an ESCALATION. It asserts that the bureau or furnisher failed to meet an " +
+                "obligation. A person reviews any letter that accuses, regardless of how well the " +
+                "grounds are evidenced."
+            );
+        }
+
+        if (mixedFile) {
+            tier = AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED;
+        }
+
+        const humanReview =
+            tier === AUTOMATION_TIER.PROCESSOR_REVIEW ||
+            tier === AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED ||
+            tier === AUTOMATION_TIER.NEVER_AUTOMATED;
+
+        const reasoningChain = [
+            `DECISION: ${decision.primaryDecision.record} (${decision.primaryDecision.name}) on ` +
+                `${decision.bureau}'s tradeline for "${decision.furnisher ?? "this item"}".`,
+
+            `EVIDENCE: ${decision.evidenceClass}.`,
+
+            `HISTORY: ${priorRounds.length === 0
+                ? "no prior dispute on this bureau tradeline"
+                : priorRounds.map((r) => `round ${r.round} (${r.strategy}) -> ${r.outcome}`).join("; ")}.`,
+
+            escalation.escalate
+                ? `ESCALATION EARNED: ${escalation.grounds}`
+                : `NO ESCALATION: ${escalation.grounds}`,
+
+            `STRATEGY: ${selected.strategy} (${selected.name}), round ${nextRound} of ${MAX_ROUNDS}.`,
+
+            `AUTOMATION: ${tier}.`,
+
+            ...humanReviewReasons.map((r) => `HUMAN REVIEW: ${r}`),
+
+            `SCOPE: this strategy governs ${decision.bureau} only. Other bureaus escalate ` +
+                `independently, on their own conduct.`,
+
+            `NEXT: the Reason Engine selects the approved dispute reason. This engine selects no ` +
+                `reason, no law, and no instruction.`,
+        ];
+
+        return {
+            ...base,
+            strategy: selected,
+            round: nextRound,
+            escalated: escalation.escalate,
+            escalationGrounds: escalation.escalate ? escalation.grounds : null,
+            evidenceClass: decision.evidenceClass,
+            automationTier: tier,
+            humanReview,
+            humanReviewReasons,
+            priorRounds: priorRounds.length,
+            reasoningChain,
+        };
+    });
+
+    const active = itemStrategies.filter((s) => s.strategy && s.strategy.strategy !== "BT-ST-0016");
+
+    return {
+        schemaVersion: STRATEGY_SCHEMA_VERSION,
+        strategyOk: true,
+        errors: [],
+
+        itemStrategies,
+
+        summary: {
+            itemsEvaluated: itemStrategies.length,
+            activeStrategies: active.length,
+            escalations: itemStrategies.filter((s) => s.escalated).length,
+            noFurtherAction: itemStrategies.filter((s) => s.strategy?.strategy === "BT-ST-0016").length,
+            requiringHumanReview: itemStrategies.filter((s) => s.humanReview).length,
+            disputeHistoryAvailable: haveHistory,
+            allTreatedAsFirstDispute: !haveHistory,
+            blockedByMixedFile: mixedFile,
+            maxRounds: MAX_ROUNDS,
+        },
+    };
+}
