@@ -1,17 +1,24 @@
 /**
  * spikeIdentifiers.test.js
  *
- * The analyzer decides which identifiers we may trust with dispute history.
- * A wrong verdict here corrupts AI Memory silently and irreversibly, so the
- * logic is proven against payloads whose correct answer we already know —
- * before it is ever pointed at a live report.
- *
  * Run: node src/spikeIdentifiers.test.js
+ *
+ * The analyzer decides which identifiers may be trusted with dispute history.
+ * A wrong verdict corrupts AI Memory silently and irreversibly, so the logic is
+ * proven against payloads whose correct answer we already know.
+ *
+ * THE CENTRAL TEST IS THE FALSE-COLLISION CASE. The previous analyzer keyed
+ * accounts on the furnisher name, so it saw "NAVY FEDERAL CR UNION | 6095" and
+ * "NAVY FCU | 6095" as DIFFERENT accounts -- and therefore flagged an identifier
+ * that CORRECTLY grouped them as COLLIDING. The better the identifier, the more
+ * likely it was rejected. That must never happen again.
  */
 
 import {
     extractTradelineRecords,
-    validationKey,
+    clusterIntoAccounts,
+    sameAccount,
+    demonstrablyDifferentAccounts,
     analyzeIdentifiers,
 } from "./spikeIdentifiers.js";
 
@@ -22,177 +29,209 @@ function check(name, actual, expected) {
     const ok = actual === expected;
     ok ? passed++ : failed++;
     console.log(
-        `${ok ? "PASS" : "FAIL"}  ${name.padEnd(62)} -> ${actual}${ok ? "" : `\n      expected: ${expected}`}`
+        `${ok ? "PASS" : "FAIL"}  ${name.padEnd(64)} -> ${actual}${ok ? "" : `\n      expected: ${expected}`}`
     );
 }
 
 /**
- * Build a ListAndStack-shaped record: ONE account, THREE stacked bureau rows.
- *
- * arrayId    — same across bureaus and across time (a true entity id)
- * simpleHash — same across bureaus, same across time
- * complexHash— DIFFERENT every report (it hashes balance/status: a change hash)
- * liabilityId— document-local sequential; REUSED for different accounts
+ * ONE underlying account, THREE bureau tradelines -- each with that bureau's own
+ * furnisher name and masking format, exactly as ListAndStack delivers it.
  */
-function stack({ creditor, acct, opened, arrayId, simpleHash, complexHash, liabilityIds }) {
+function account({ names, acct, opened, accountId, simple, complex, liabilityIds }) {
     const bureaus = ["TransUnion", "Experian", "Equifax"];
 
     return bureaus.map((bureau, i) => ({
         "@CreditRepositorySourceType": bureau,
-        "@ArrayAccountIdentifier": arrayId,
-        "@TradelineHashSimple": simpleHash,
-        "@TradelineHashComplex": complexHash[i],
+        "@ArrayAccountIdentifier": accountId,
+        "@TradelineHashSimple": simple[i],
+        "@TradelineHashComplex": complex[i],
         "@CreditLiabilityID": liabilityIds[i],
-        "_CREDITOR": { "@_FullName": creditor },
-        "@_AccountIdentifier": acct,
+        "_CREDITOR": { "@_FullName": names[i] },
+        "@_AccountIdentifier": acct[i],
         "@_AccountType": "Revolving",
         "@_AccountOpenedDate": opened,
     }));
 }
 
-// ---- Report 1 (June) -------------------------------------------------------
+// THE REAL-WORLD CASE. One Navy Federal account. Three bureau namings.
+const NAVY = {
+    names: ["NAVY FEDERAL CR UNION", "NAVY FCU", "NAVY FEDERAL CREDIT UNION"],
+    acct: ["****6095", "6095XXXXXXXX", "XXXX6095"],
+    opened: "2019-03-14",
+};
+
+const CAPONE = {
+    names: ["CAPITAL ONE", "CAP ONE", "CAPITAL ONE BANK USA NA"],
+    acct: ["****9999", "9999XXXXXXXX", "XXXX9999"],
+    opened: "2021-07-01",
+};
+
 const june = {
-    CREDIT_LIABILITIES: [
-        ...stack({
-            creditor: "CHASE BANK USA NA",
-            acct: "411111******1234",
-            opened: "2019-03-14",
-            arrayId: "arr_aaa",
-            simpleHash: "simple_aaa",
-            complexHash: ["cx_j1", "cx_j2", "cx_j3"],
+    LIABILITIES: [
+        ...account({
+            ...NAVY,
+            accountId: "arr_navy",
+            simple: ["tl_navy_tu", "tl_navy_exp", "tl_navy_eqf"], // per-bureau
+            complex: ["cx_j1", "cx_j2", "cx_j3"],
             liabilityIds: ["CL_001", "CL_002", "CL_003"],
         }),
-        ...stack({
-            creditor: "CAPITAL ONE",
-            acct: "517805******9999",
-            opened: "2021-07-01",
-            arrayId: "arr_bbb",
-            simpleHash: "simple_bbb",
-            complexHash: ["cx_j4", "cx_j5", "cx_j6"],
+        ...account({
+            ...CAPONE,
+            accountId: "arr_cap1",
+            simple: ["tl_cap1_tu", "tl_cap1_exp", "tl_cap1_eqf"],
+            complex: ["cx_j4", "cx_j5", "cx_j6"],
             liabilityIds: ["CL_004", "CL_005", "CL_006"],
         }),
     ],
 };
 
-// ---- Report 2 (July) -------------------------------------------------------
-// Same two accounts. Balances moved, so the COMPLEX hash regenerated.
-// A new account appeared FIRST in the list, shifting every CreditLiabilityID —
-// so CL_001 now refers to a DIFFERENT account than it did in June.
+// July: same two accounts. Balances moved -> complex hash regenerated.
+// A NEW account appears first, shifting every CreditLiabilityID -- so CL_001
+// now names a DIFFERENT account than it did in June.
 const july = {
-    CREDIT_LIABILITIES: [
-        ...stack({
-            creditor: "DISCOVER",
-            acct: "601100******5555",
+    LIABILITIES: [
+        ...account({
+            names: ["DISCOVER BANK", "DISCOVER", "DISCOVER FIN SVCS"],
+            acct: ["****5555", "5555XXXXXXXX", "XXXX5555"],
             opened: "2026-06-02",
-            arrayId: "arr_ccc",
-            simpleHash: "simple_ccc",
-            complexHash: ["cx_k1", "cx_k2", "cx_k3"],
-            liabilityIds: ["CL_001", "CL_002", "CL_003"], // <-- REUSED IDs
+            accountId: "arr_disc",
+            simple: ["tl_disc_tu", "tl_disc_exp", "tl_disc_eqf"],
+            complex: ["cx_k1", "cx_k2", "cx_k3"],
+            liabilityIds: ["CL_001", "CL_002", "CL_003"], // <-- REUSED
         }),
-        ...stack({
-            creditor: "CHASE BANK USA NA",
-            acct: "411111******1234",
-            opened: "2019-03-14",
-            arrayId: "arr_aaa",          // stable
-            simpleHash: "simple_aaa",    // stable
-            complexHash: ["cx_k4", "cx_k5", "cx_k6"], // REGENERATED
-            liabilityIds: ["CL_004", "CL_005", "CL_006"], // shifted
+        ...account({
+            ...NAVY,
+            accountId: "arr_navy",                                // stable
+            simple: ["tl_navy_tu", "tl_navy_exp", "tl_navy_eqf"], // stable
+            complex: ["cx_k4", "cx_k5", "cx_k6"],                 // REGENERATED
+            liabilityIds: ["CL_004", "CL_005", "CL_006"],         // shifted
         }),
-        ...stack({
-            creditor: "CAPITAL ONE",
-            acct: "517805******9999",
-            opened: "2021-07-01",
-            arrayId: "arr_bbb",
-            simpleHash: "simple_bbb",
-            complexHash: ["cx_k7", "cx_k8", "cx_k9"],
+        ...account({
+            ...CAPONE,
+            accountId: "arr_cap1",
+            simple: ["tl_cap1_tu", "tl_cap1_exp", "tl_cap1_eqf"],
+            complex: ["cx_k7", "cx_k8", "cx_k9"],
             liabilityIds: ["CL_007", "CL_008", "CL_009"],
         }),
     ],
 };
 
-console.log("\n=== Extraction ===\n");
-
 const juneRecords = extractTradelineRecords(june);
 const julyRecords = extractTradelineRecords(july);
 
-check("June: 2 accounts x 3 bureaus = 6 records", juneRecords.length, 6);
-check("July: 3 accounts x 3 bureaus = 9 records", julyRecords.length, 9);
-check("bureau attribution resolved", juneRecords[0].bureau, "transunion");
-check("ArrayAccountIdentifier extracted", juneRecords[0].identifiers.ArrayAccountIdentifier, "arr_aaa");
+console.log("\n=== Extraction: bureau tradelines stay INDEPENDENT ===\n");
 
-const vk0 = validationKey(juneRecords[0]);
-const vk1 = validationKey(juneRecords[1]);
+check("June: 2 accounts x 3 bureaus = 6 bureau tradelines", juneRecords.length, 6);
+check("July: 3 accounts x 3 bureaus = 9 bureau tradelines", julyRecords.length, 9);
+check("bureau attributed", juneRecords[0].bureau, "transunion");
+check("furnisher preserved per bureau (TU)", juneRecords[0].validation.creditor, "NAVY FEDERAL CR UNION");
+check("furnisher preserved per bureau (EXP)", juneRecords[1].validation.creditor, "NAVY FCU");
+check("masking preserved per bureau (EXP)", juneRecords[1].validation.account_number, "6095XXXXXXXX");
+check("bureau-invariant evidence derived", juneRecords[1].evidence.last4, "6095");
 
-// NOTE: asserting non-null FIRST. A previous version of this test compared
-// vk0 === vk1 and passed while both were null — a test that passed precisely
-// because extraction was broken. Never assert equality without asserting
-// existence.
-check("validation key is derived (not null)", vk0 !== null, true);
-check("validation key groups the same account", vk0 !== null && vk0 === vk1, true);
+console.log("\n=== THE NAVY FEDERAL CASE: names differ, account is the SAME ===\n");
 
-console.log("\n=== Analysis ===\n");
+const tu = juneRecords[0];  // NAVY FEDERAL CR UNION | ****6095
+const exp = juneRecords[1]; // NAVY FCU              | 6095XXXXXXXX
+
+check("NOT demonstrably different (names differ, digits agree)", demonstrablyDifferentAccounts(tu, exp), false);
+check("sameAccount() joins them", sameAccount(tu, exp), true);
+
+const juneAccounts = clusterIntoAccounts(juneRecords);
+
+check("June clusters to 2 underlying accounts (not 6)", juneAccounts.size, 2);
+check("July clusters to 3 underlying accounts (not 9)", clusterIntoAccounts(julyRecords).size, 3);
+
+const navyCluster = [...juneAccounts.values()].find((g) => g.some((r) => r.evidence.last4 === "6095"));
+check("Navy account holds all 3 bureau tradelines", navyCluster.length, 3);
+
+console.log("\n=== Different trailing digits ARE demonstrably different ===\n");
+
+const capOne = juneRecords[3];
+
+check("Navy vs Capital One -> demonstrably different", demonstrablyDifferentAccounts(tu, capOne), true);
+check("...and are not clustered together", sameAccount(tu, capOne), false);
+
+console.log("\n=== Analysis across two DISTINCT report dates ===\n");
 
 const analysis = analyzeIdentifiers([
     { report_date: "2026-06-10", records: juneRecords },
     { report_date: "2026-07-10", records: julyRecords },
 ]);
 
+check("two distinct reports recognised", analysis.two_distinct_reports_captured, true);
+check("recommendation issued", analysis.recommendation.status, "PROPOSED");
+
 const ids = analysis.identifiers;
 
-console.log("--- ArrayAccountIdentifier (expected: the good one) ---");
-check("  cross-time", ids.ArrayAccountIdentifier.cross_time.verdict.split(" ")[0], "STABLE");
-check("  cross-bureau", ids.ArrayAccountIdentifier.cross_bureau.verdict.split(" ")[0], "GROUPS");
-check("  collisions", ids.ArrayAccountIdentifier.collisions.length, 0);
+console.log("\n--- ArrayAccountIdentifier: expect GROUPS + STABLE + NO collision ---");
+check("  cross-bureau", ids.ArrayAccountIdentifier.cross_bureau_correlation.verdict.split(" ")[0], "GROUPS");
+check("  cross-time", ids.ArrayAccountIdentifier.cross_time_stability.verdict.split(" ")[0], "STABLE");
+check("  NO false collision (THE OLD BUG)", ids.ArrayAccountIdentifier.collisions.length, 0);
 
-console.log("\n--- TradelineHashSimple (expected: stable) ---");
-check("  cross-time", ids.TradelineHashSimple.cross_time.verdict.split(" ")[0], "STABLE");
-check("  cross-bureau", ids.TradelineHashSimple.cross_bureau.verdict.split(" ")[0], "GROUPS");
+console.log("\n--- TradelineHashSimple: expect PER-BUREAU + STABLE ---");
+check("  cross-bureau", ids.TradelineHashSimple.cross_bureau_correlation.verdict.split(" ")[0], "PER-BUREAU");
+check("  cross-time", ids.TradelineHashSimple.cross_time_stability.verdict.split(" ")[0], "STABLE");
+check("  no collisions", ids.TradelineHashSimple.collisions.length, 0);
 
-console.log("\n--- TradelineHashComplex (expected: REGENERATED — the trap) ---");
-check("  cross-time", ids.TradelineHashComplex.cross_time.verdict.split(" ")[0], "REGENERATED");
+console.log("\n--- TradelineHashComplex: expect REGENERATED ---");
+check("  cross-time", ids.TradelineHashComplex.cross_time_stability.verdict.split(" ")[0], "REGENERATED");
+
+console.log("\n--- CreditLiabilityID: expect TRUE collision (CL_001 reused) ---");
+check("  TRUE collision detected", ids.CreditLiabilityID.collisions.length > 0, true);
 check(
-    "  per-bureau (does not group)",
-    ids.TradelineHashComplex.cross_bureau.verdict.split(" ")[0],
-    "PER-BUREAU"
+    "  proven by digits, not by naming",
+    ids.CreditLiabilityID.collisions[0].proof,
+    "different masked account trailing digits"
 );
 
-console.log("\n--- CreditLiabilityID (expected: collides — document-local) ---");
-check(
-    "  COLLIDES across accounts",
-    ids.CreditLiabilityID.collisions.length > 0,
-    true
-);
-check("  cross-time", ids.CreditLiabilityID.cross_time.verdict.split(" ")[0], "REGENERATED");
-
-console.log("\n=== Recommendation ===\n");
+console.log("\n=== Recommendation: TWO separate tier lists ===\n");
 
 const rec = analysis.recommendation;
-const proposedIds = rec.proposed_tiers.map((t) => t.identifier);
-const rejectedIds = rec.rejected.map((r) => r.identifier);
+const grouping = rec.account_grouping_tiers.map((t) => t.identifier);
+const tradeline = rec.tradeline_identity_tiers.map((t) => t.identifier);
+const rejected = rec.rejected.map((r) => r.identifier);
 
-check("proposes ArrayAccountIdentifier", proposedIds.includes("ArrayAccountIdentifier"), true);
-check("proposes TradelineHashSimple", proposedIds.includes("TradelineHashSimple"), true);
-check("REJECTS TradelineHashComplex", rejectedIds.includes("TradelineHashComplex"), true);
-check("REJECTS CreditLiabilityID", rejectedIds.includes("CreditLiabilityID"), true);
+check("ArrayAccountIdentifier -> ACCOUNT GROUPING tier", grouping.includes("ArrayAccountIdentifier"), true);
+check("TradelineHashSimple -> TRADELINE IDENTITY tier", tradeline.includes("TradelineHashSimple"), true);
+check("TradelineHashComplex REJECTED", rejected.includes("TradelineHashComplex"), true);
+check("CreditLiabilityID REJECTED", rejected.includes("CreditLiabilityID"), true);
 
-console.log("\n=== The trap: a complex hash that HAPPENS to look stable ===\n");
+console.log("\n=== Gate: no recommendation without two distinct dates ===\n");
+
+const single = analyzeIdentifiers([{ report_date: "2026-06-10", records: juneRecords }]);
+
+check("single report -> WITHHELD", single.recommendation.status, "WITHHELD");
+check(
+    "single report -> cross-time NOT EVALUATED",
+    single.identifiers.ArrayAccountIdentifier.cross_time_stability.verdict.split(" ")[0],
+    "NOT"
+);
+
+// The same report captured twice under the SAME date: every identifier would
+// trivially "match itself" and look STABLE. That is an artefact, not evidence.
+const duped = analyzeIdentifiers([
+    { report_date: "2026-06-10", records: juneRecords },
+    { report_date: "2026-06-10", records: juneRecords },
+]);
+
+check("same date twice -> still WITHHELD", duped.recommendation.status, "WITHHELD");
+
+console.log("\n=== Frozen ruling overrides evidence ===\n");
 
 // Nothing changed between reports, so the change-hash coincidentally matches.
-// The frozen ruling must reject it ANYWAY — stability by coincidence is not
-// stability by design.
-const quietJuly = JSON.parse(JSON.stringify(june));
 const quiet = analyzeIdentifiers([
-    { report_date: "2026-06-10", records: extractTradelineRecords(june) },
-    { report_date: "2026-07-10", records: extractTradelineRecords(quietJuly) },
+    { report_date: "2026-06-10", records: juneRecords },
+    { report_date: "2026-07-10", records: extractTradelineRecords(JSON.parse(JSON.stringify(june))) },
 ]);
 
 check(
-    "  complex hash LOOKS stable here",
-    quiet.identifiers.TradelineHashComplex.cross_time.verdict.split(" ")[0],
+    "complex hash LOOKS stable in a quiet month",
+    quiet.identifiers.TradelineHashComplex.cross_time_stability.verdict.split(" ")[0],
     "STABLE"
 );
 check(
-    "  ...and is STILL rejected (frozen ruling overrides evidence)",
+    "...and is STILL rejected",
     quiet.recommendation.rejected.map((r) => r.identifier).includes("TradelineHashComplex"),
     true
 );
