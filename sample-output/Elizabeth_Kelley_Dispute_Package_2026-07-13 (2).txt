@@ -1,0 +1,243 @@
+##############################################################################
+## SYNTHETIC FIXTURE — NOT A REAL CREDIT REPORT.
+## Every tradeline here was hand-authored in demoDisputePackage.js.
+##############################################################################
+
+PIPELINE RECONCILIATION — every negative tradeline accounted for
+==============================================================================
+
+Extracted tradelines: 10   Negative: 7   Disputed: 6
+RECONCILES: YES — nothing disappeared
+
+------------------------------------------------------------------------------
+EQUIFAX
+------------------------------------------------------------------------------
+  Negative tradelines detected : 3
+    -> Disputed                : 2
+    -> Excluded (Constitution) : 0
+    -> Withheld (unsendable)   : 0
+    -> No findings             : 1
+    -> Other exit              : 0
+    ACCOUNTED FOR              : 3 / 3  BALANCES
+
+  Every negative tradeline NOT disputed, and why:
+    SYNCHRONY BANK (Charge-off)
+      exited at ANALYZED: No findings. Nothing inaccurate was detected on this tradeline.
+
+------------------------------------------------------------------------------
+EXPERIAN
+------------------------------------------------------------------------------
+  Negative tradelines detected : 0
+    -> Disputed                : 0
+    -> Excluded (Constitution) : 0
+    -> Withheld (unsendable)   : 0
+    -> No findings             : 0
+    -> Other exit              : 0
+    ACCOUNTED FOR              : 0 / 0  BALANCES
+
+------------------------------------------------------------------------------
+TRANSUNION
+------------------------------------------------------------------------------
+  Negative tradelines detected : 4
+    -> Disputed                : 3
+    -> Excluded (Constitution) : 1
+    -> Withheld (unsendable)   : 0
+    -> No findings             : 0
+    -> Other exit              : 0
+    ACCOUNTED FOR              : 4 / 4  BALANCES
+
+  Every negative tradeline NOT disputed, and why:
+    SPOUSE VISA (Charge-off)
+      exited at DECIDED: EXCLUDED — CONSTITUTION_NEVER_DISPUTE_AUTHORIZED_USER: Reported responsibility is "Authorized User". The Project Constitution forbids disputing authorized user accounts. Disputing it risks removing beneficial history that is not the consumer's to dispute.
+
+
+==============================================================================
+IDENTITY SOURCE:  crc_client_profile
+CRC CLIENT ID:    15
+LEAK CHECK:       PASS
+LETTERS:          3 (one per bureau)
+==============================================================================
+
+==============================================================================
+EQUIFAX — 2 account(s), highest round 1
+Review required: false
+==============================================================================
+
+Elizabeth Kelley
+5084 Louvinia Dr
+Tallahassee, FL 32311
+
+2026-07-13
+
+Equifax Information Services LLC
+P.O. Box 740256
+Atlanta, GA 30374-0256
+
+Re: Dispute — Elizabeth Kelley
+
+I am disputing the accuracy of the following information on my credit file. Please reinvestigate each item identified below.
+
+---
+
+MIDLAND CREDIT
+Account Number: XXXX3311
+
+Reported as a collection with no original creditor identified.
+Reported as first delinquent on 2021-05-01, before the account opened date of 2021-08-01.
+
+A collection that does not identify the original creditor cannot be verified.
+An account cannot become delinquent before it exists. The reporting is internally inconsistent.
+
+FCRA § 607(b) (15 U.S.C. § 1681e(b)) — reasonable procedures to assure maximum possible accuracy.
+
+Requested action: Provide validation of this debt, or delete it.
+
+---
+
+CAP ONE BANK USA NA
+Account Number: XXXX4412
+
+Reported with a date of first delinquency of 2016-02-01. The permissible reporting period has elapsed.
+
+Obsolete information may not be reported.
+
+FCRA § 605 (15 U.S.C. § 1681c) — obsolete information may not be reported.
+
+Requested action: Delete this account from my credit file.
+
+---
+
+Please provide the results of your investigation in writing.
+
+Sincerely,
+
+Elizabeth Kelley
+
+
+==============================================================================
+EXPERIAN — 1 account(s), highest round 1
+Review required: false
+==============================================================================
+
+Elizabeth Kelley
+5084 Louvinia Dr
+Tallahassee, FL 32311
+
+2026-07-13
+
+Experian
+P.O. Box 4500
+Allen, TX 75013
+
+Re: Dispute — Elizabeth Kelley
+
+I am disputing the accuracy of the following information on my credit file. Please reinvestigate each item identified below.
+
+---
+
+NAVY FCU
+Account Number: 6095XXXXXXXX
+
+I dispute the accuracy of the balance, past-due amount and status reported for this account. They cannot be verified as accurate.
+
+FCRA § 611 (15 U.S.C. § 1681i) — reinvestigation of disputed information.
+
+Requested action: Reinvestigate this account and delete it if it cannot be verified.
+
+---
+
+Please provide the results of your investigation in writing.
+
+Sincerely,
+
+Elizabeth Kelley
+
+
+==============================================================================
+TRANSUNION — 3 account(s), highest round 2
+Review required: true
+==============================================================================
+
+Elizabeth Kelley
+5084 Louvinia Dr
+Tallahassee, FL 32311
+
+2026-07-13
+
+TransUnion Consumer Solutions
+P.O. Box 2000
+Chester, PA 19016-2000
+
+Re: Dispute — Elizabeth Kelley
+
+I am disputing the accuracy of the following information on my credit file. Please reinvestigate each item identified below.
+
+---
+
+MIDLAND CREDIT MGMT
+Account Number: ****3311
+
+Reported as a collection with no original creditor identified.
+Reported as first delinquent on 2021-05-01, before the account opened date of 2021-08-01.
+
+A collection that does not identify the original creditor cannot be verified.
+An account cannot become delinquent before it exists. The reporting is internally inconsistent.
+
+FCRA § 607(b) (15 U.S.C. § 1681e(b)) — reasonable procedures to assure maximum possible accuracy.
+
+Requested action: Provide validation of this debt, or delete it.
+
+---
+
+NAVY FEDERAL CR UNION
+Account Number: ****6095
+
+Previously disputed. The information remains on my file and was not corrected.
+
+Reported with a status of "Charge-off" and no date of first delinquency.
+Reported with a past-due amount of $4,200 and a balance of $0.
+I dispute the accuracy of the balance, past-due amount and status reported for this account. They cannot be verified as accurate.
+
+A derogatory account must carry a date of first delinquency. Without it, the permissible reporting period cannot be determined.
+An account with no balance cannot carry an amount past due. The reporting is internally inconsistent.
+
+FCRA § 605(c) (15 U.S.C. § 1681c(c)) — the reporting period runs from the date of first delinquency.
+
+Requested action: Provide the method of verification used, including the name and address of the furnisher contacted and the procedure used to verify this account. If it cannot be verified, delete it.
+
+---
+
+CAPITAL ONE
+Account Number: ****4412
+
+Reported with a date of first delinquency of 2016-02-01. The permissible reporting period has elapsed.
+
+Obsolete information may not be reported.
+
+FCRA § 605 (15 U.S.C. § 1681c) — obsolete information may not be reported.
+
+Requested action: Delete this account from my credit file.
+
+---
+
+Please provide the results of your investigation in writing.
+
+Sincerely,
+
+Elizabeth Kelley
+
+==============================================================================
+STATUS: AWAITING HUMAN REVIEW. Nothing has been sent.
+==============================================================================
+
+OPEN GAP — NO CRC PROFILE READER EXISTS.
+
+openClient.js returns clientName and crcClientId. It does NOT return an address.
+No module in this system reads the CRC client profile. The identity above was
+constructed by hand through fromCrcProfile() to simulate one.
+
+In production, generateLetters() will REFUSE to run until a real CRC profile
+reader supplies identity with source="crc_client_profile". That refusal is now
+enforced, not merely documented. Building the reader needs a CRC DOM discovery
+spike — no selectors will be guessed.
+
