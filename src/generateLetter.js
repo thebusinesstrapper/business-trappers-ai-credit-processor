@@ -61,7 +61,9 @@
  * ---------------------------------------------------------------------------
  */
 
-export const LETTER_SCHEMA_VERSION = "BT-LETTER-2.0";
+import { verifyIdentity, formatAddress } from "./clientIdentity.js";
+
+export const LETTER_SCHEMA_VERSION = "BT-LETTER-3.0";
 
 const BUREAU_NAMES = {
     transunion: "TransUnion",
@@ -102,11 +104,9 @@ const AUTH = {
 // does not become a stronger one by also invoking accuracy and reinvestigation.
 const AUTHORITY_PRIORITY = [AUTH.OBSOLETE, AUTH.DOFD, AUTH.ACCURACY, AUTH.REINVESTIGATION];
 
-const DELETE = "Delete this account from my credit file.";
-const DELETE_OR_CORRECT = "Delete this account, or correct the reporting, as the investigation requires.";
-const CORRECT = "Correct the reporting for this account.";
-const DELETE_INQUIRY = "Delete this inquiry from my credit file.";
-const DELETE_DUPLICATE = "Delete the duplicate entry.";
+// NOTE: the Letter Engine no longer chooses the remedy. The STRATEGY chooses it,
+// and it arrives on the chain item as `requestedRemedy`. A letter that picks its
+// own remedy is a letter arguing with its own strategy.
 
 /**
  * Each finding -> the four lines the bureau needs.
@@ -124,7 +124,6 @@ const SPEC = {
         defect: (e) => `Reported with a past-due amount of ${money(e.past_due)} and a balance of $0.`,
         standard: "An account with no balance cannot carry an amount past due. The reporting is internally inconsistent.",
         authority: AUTH.ACCURACY,
-        remedy: DELETE_OR_CORRECT,
     },
 
     TL_PAST_DUE_EXCEEDS_BALANCE: {
@@ -132,7 +131,6 @@ const SPEC = {
         defect: (e) => `Reported with a past-due amount of ${money(e.past_due)}, exceeding the reported balance of ${money(e.balance)}.`,
         standard: "A past-due amount cannot exceed the balance owed. The reporting is internally inconsistent.",
         authority: AUTH.ACCURACY,
-        remedy: DELETE_OR_CORRECT,
     },
 
     TL_DEROGATORY_WITHOUT_DOFD: {
@@ -140,7 +138,6 @@ const SPEC = {
         defect: (e) => `Reported with a status of "${e.status}" and no date of first delinquency.`,
         standard: "A derogatory account must carry a date of first delinquency. Without it, the permissible reporting period cannot be determined.",
         authority: AUTH.DOFD,
-        remedy: DELETE_OR_CORRECT,
     },
 
     TL_DOFD_BEFORE_OPENED: {
@@ -148,7 +145,6 @@ const SPEC = {
         defect: (e) => `Reported as first delinquent on ${e.date_of_first_delinquency}, before the account opened date of ${e.date_opened}.`,
         standard: "An account cannot become delinquent before it exists. The reporting is internally inconsistent.",
         authority: AUTH.ACCURACY,
-        remedy: DELETE_OR_CORRECT,
     },
 
     TL_BEYOND_REPORTING_PERIOD: {
@@ -156,7 +152,6 @@ const SPEC = {
         defect: (e) => `Reported with a date of first delinquency of ${e.date_of_first_delinquency}. The permissible reporting period has elapsed.`,
         standard: "Obsolete information may not be reported.",
         authority: AUTH.OBSOLETE,
-        remedy: DELETE,
     },
 
     TL_CLOSED_WITH_ACTIVE_STATUS: {
@@ -164,7 +159,6 @@ const SPEC = {
         defect: () => `Reported as both closed and active.`,
         standard: "An account cannot be simultaneously closed and active. The reporting is internally inconsistent.",
         authority: AUTH.ACCURACY,
-        remedy: CORRECT,
     },
 
     TL_STATUS_CONFLICTS_WITH_PAYMENT_HISTORY: {
@@ -172,7 +166,6 @@ const SPEC = {
         defect: (e) => `Reported with a status of "${e.status}", while the payment history for the same account shows a recent late payment.`,
         standard: "The status and the payment history for one account must agree.",
         authority: AUTH.ACCURACY,
-        remedy: CORRECT,
     },
 
     TL_DUPLICATE_WITHIN_BUREAU: {
@@ -180,7 +173,6 @@ const SPEC = {
         defect: (e) => `Reported ${e.occurrences} times on my file.`,
         standard: "A single account may appear only once.",
         authority: AUTH.ACCURACY,
-        remedy: DELETE_DUPLICATE,
     },
 
     COL_MISSING_ORIGINAL_CREDITOR: {
@@ -188,7 +180,6 @@ const SPEC = {
         defect: () => `Reported as a collection with no original creditor identified.`,
         standard: "A collection that does not identify the original creditor cannot be verified.",
         authority: AUTH.REINVESTIGATION,
-        remedy: DELETE,
     },
 
     COL_DUPLICATE_COLLECTION: {
@@ -196,7 +187,6 @@ const SPEC = {
         defect: () => `The same debt is reported by more than one collection agency.`,
         standard: "One debt may be reported as owed to one collector.",
         authority: AUTH.ACCURACY,
-        remedy: DELETE_DUPLICATE,
     },
 
     HIST_RE_AGING_INDICATOR: {
@@ -204,7 +194,6 @@ const SPEC = {
         defect: (e) => `The date of first delinquency was previously reported as ${e.previous_dofd} and is now reported as ${e.current_dofd}.`,
         standard: "A date of first delinquency is a historical fact and does not change. Moving it forward extends the reporting period.",
         authority: AUTH.DOFD,
-        remedy: DELETE,
     },
 
     HIST_BALANCE_INCREASED_ON_CHARGED_OFF: {
@@ -212,7 +201,6 @@ const SPEC = {
         defect: (e) => `The balance on this charged-off account increased from ${money(e.previous)} to ${money(e.current)}.`,
         standard: "A charged-off balance does not increase.",
         authority: AUTH.ACCURACY,
-        remedy: CORRECT,
     },
 
     // ---- CROSS-BUREAU: DISPUTED, NEVER ASSERTED --------------------------
@@ -226,7 +214,6 @@ const SPEC = {
         defect: (e) => `The account status is reported as ${e.this_bureau?.value ?? "shown"}. I dispute the accuracy of this status.`,
         standard: "The reported status cannot be verified as accurate.",
         authority: AUTH.REINVESTIGATION,
-        remedy: DELETE_OR_CORRECT,
     },
 
     TL_XB_BALANCE_INCONSISTENT: {
@@ -234,7 +221,6 @@ const SPEC = {
         defect: () => `I dispute the accuracy of the balance reported for this account.`,
         standard: "The reported balance cannot be verified as accurate.",
         authority: AUTH.REINVESTIGATION,
-        remedy: DELETE_OR_CORRECT,
     },
 
     TL_XB_PAST_DUE_INCONSISTENT: {
@@ -242,7 +228,6 @@ const SPEC = {
         defect: () => `I dispute the accuracy of the past-due amount reported for this account.`,
         standard: "The reported past-due amount cannot be verified as accurate.",
         authority: AUTH.REINVESTIGATION,
-        remedy: DELETE_OR_CORRECT,
     },
 
     TL_XB_DOFD_INCONSISTENT: {
@@ -250,7 +235,6 @@ const SPEC = {
         defect: (e) => `I dispute the accuracy of the date of first delinquency reported for this account.`,
         standard: "This date determines the permissible reporting period and cannot be verified as accurate.",
         authority: AUTH.DOFD,
-        remedy: DELETE_OR_CORRECT,
     },
 
     COL_XB_BALANCE_INCONSISTENT: {
@@ -258,7 +242,6 @@ const SPEC = {
         defect: () => `I dispute the accuracy of the balance reported for this collection.`,
         standard: "The reported balance cannot be verified as accurate.",
         authority: AUTH.REINVESTIGATION,
-        remedy: DELETE_OR_CORRECT,
     },
 
     // ---- COMPLIANCE-GATED (BT-DM-0052) -----------------------------------
@@ -270,7 +253,6 @@ const SPEC = {
         defect: (e) => `This inquiry is dated ${e.inquiry_date} and is more than two years old.`,
         standard: "I request confirmation that this inquiry remains properly reportable.",
         authority: AUTH.REINVESTIGATION,
-        remedy: DELETE_INQUIRY,
     },
 
     INQ_DUPLICATE: {
@@ -278,7 +260,6 @@ const SPEC = {
         defect: (e) => `This furnisher is reported as having made ${e.occurrences} inquiries within a short period.`,
         standard: "A single authorization supports a single inquiry.",
         authority: AUTH.REINVESTIGATION,
-        remedy: DELETE_INQUIRY,
     },
 };
 
@@ -296,24 +277,30 @@ export async function generateLetters(chain, analysis, context = {}) {
         return { schemaVersion: LETTER_SCHEMA_VERSION, lettersOk: false, errors: ["Chain incomplete."], letters: [], withheld: [] };
     }
 
-    // Identity is NOT optional and has NO fallback.
+    // ---- IDENTITY PROVENANCE — VERIFIED, NOT ASSERTED ---------------------
     //
-    // The report contains names, and it would be trivial to use one. That is
-    // precisely the failure Extraction Decision 3 exists to prevent: on a mixed
-    // file the report's name may belong to somebody else, and we would sign the
-    // client's dispute with a stranger's identity.
-    if (!clientIdentity?.name || !clientIdentity?.address) {
+    // This engine previously accepted any object with a name and an address, and
+    // then PRINTED "IDENTITY SOURCE: CRC client profile (authoritative)" beneath
+    // it. That line was a string literal. A fabricated demo address passed
+    // straight through onto a dispute letter, and the package certified itself.
+    //
+    // A guarantee that is asserted rather than enforced is worse than none,
+    // because it stops people looking. Identity now carries PROVENANCE and is
+    // CHECKED. No fallback. If CRC cannot be read, no letter is written.
+    const verified = verifyIdentity(clientIdentity);
+
+    if (!verified.ok) {
         return {
             schemaVersion: LETTER_SCHEMA_VERSION,
             lettersOk: false,
-            errors: [
-                "No CRC client identity supplied. Identity comes from the CRC client profile and " +
-                "nowhere else — the credit report is evidence, never identity.",
-            ],
+            errors: verified.errors,
             letters: [],
             withheld: [],
         };
     }
+
+    const identity = verified.identity;
+    const mailingAddress = formatAddress(identity);
 
     const findingsByItem = new Map();
 
@@ -339,30 +326,34 @@ export async function generateLetters(chain, analysis, context = {}) {
         }
     }
 
-    // ONE LETTER PER BUREAU PER ESCALATION POSTURE.
+    // ONE LETTER PER BUREAU. Business Trappers sends one letter per bureau,
+    // containing every disputed tradeline for that bureau.
     //
-    // Bureau alone is not fine enough. An escalation letter opens "I am following
-    // up on a previous dispute" — an assertion about EVERY account in it. Batch a
-    // fresh round-1 account into it and the consumer has signed a claim about
-    // correspondence that never happened for that account.
-    const byGroup = new Map();
+    // Splitting on escalation posture was my earlier fix for a real bug: an
+    // escalation opening ("I previously disputed the accounts below") is an
+    // assertion about EVERY account in the letter, and a fresh round-1 account
+    // swept into it would have the consumer claiming correspondence that never
+    // happened.
+    //
+    // The correct fix is not two letters. It is an opening that ASSERTS NOTHING
+    // ABOUT HISTORY. Round and escalation belong to the ACCOUNT SECTION, where
+    // they are true of that account specifically — not to the letter, where they
+    // would be claimed of all of them.
+    const byBureau = new Map();
     const withheld = [];
 
     for (const item of chain.items) {
         if (!item.chainComplete || !item.bureau) continue;
 
-        const key = `${item.bureau}|${item.escalated ? "escalation" : "initial"}`;
-
-        if (!byGroup.has(key)) byGroup.set(key, []);
-        byGroup.get(key).push(item);
+        if (!byBureau.has(item.bureau)) byBureau.set(item.bureau, []);
+        byBureau.get(item.bureau).push(item);
     }
 
     const letters = [];
 
-    for (const [key, items] of [...byGroup.entries()].sort()) {
-        const bureau = key.split("|")[0];
+    for (const [bureau, items] of [...byBureau.entries()].sort()) {
         const bureauName = BUREAU_NAMES[bureau] ?? bureau;
-        const escalated = items[0].escalated;
+        const escalated = items.some((i) => i.escalated);
         const round = Math.max(...items.map((i) => i.round ?? 1));
 
         const sections = [];
@@ -458,20 +449,38 @@ export async function generateLetters(chain, analysis, context = {}) {
                 AUTHORITY_PRIORITY.find((a) => specced.some((x) => x.spec.authority === a)) ??
                 AUTH.REINVESTIGATION;
 
-            // Strongest supported remedy. Deletion where supported; correction
-            // otherwise (Legal Remedy Standards, remedy priority).
-            const remedies = specced.map((x) => x.spec.remedy);
-            const remedy =
-                remedies.find((r) => r === DELETE) ??
-                remedies.find((r) => r === DELETE_INQUIRY) ??
-                remedies.find((r) => r === DELETE_DUPLICATE) ??
-                remedies.find((r) => r === DELETE_OR_CORRECT) ??
-                remedies[0];
+            // THE REMEDY COMES FROM THE STRATEGY. The letter does not choose it.
+            //
+            // A Failure to Investigate escalation asks for the METHOD OF
+            // VERIFICATION — not another round of the same investigation, because
+            // the point at issue is HOW the bureau reached its conclusion. Only
+            // the Strategy Engine knows that; the letter must not second-guess it.
+            const remedy = item.requestedRemedy;
+
+            if (!remedy) {
+                withheld.push({
+                    stableItemKey: item.stableItemKey,
+                    bureau,
+                    furnisher: item.furnisher,
+                    reason:
+                        "The Strategy Engine supplied no requested remedy for this item. A dispute " +
+                        "that asks for nothing is not sent.",
+                });
+                continue;
+            }
+
+            // Creditor / Account number / Defect / Authority / Remedy. Nothing more.
+            // History belongs to the ACCOUNT, never to the letter.
+            const historyLine = item.escalated
+                ? [`Previously disputed. The information remains on my file and was not corrected.`]
+                : [];
 
             const lines = [
                 `${item.furnisher ?? "Account"}`,
                 `Account Number: ${masked}`,
                 ``,
+                ...historyLine,
+                ...(historyLine.length ? [``] : []),
                 ...defects,
                 ...(standards.length ? [``, ...standards] : []),
                 ``,
@@ -485,6 +494,10 @@ export async function generateLetters(chain, analysis, context = {}) {
                 stableAccountKey: item.stableAccountKey,
                 furnisher: item.furnisher,
                 maskedAccount: masked,
+                round: item.round,          // belongs to the ACCOUNT, not the letter
+                escalated: item.escalated,  // ditto
+                requestedRemedy: remedy,
+                strategy: item.strategy?.strategy ?? null,
                 decisionRecord: item.decisionRecord,
                 reason: item.reason.reason,
                 instruction: item.instruction.instruction,
@@ -497,19 +510,25 @@ export async function generateLetters(chain, analysis, context = {}) {
 
         if (sections.length === 0) continue;
 
-        const opening = escalated
-            ? `I previously disputed the accounts identified below. The information remains on my file and the response I received did not resolve it. I am requesting reinvestigation.`
-            : `I am disputing the accuracy of the following information on my credit file and requesting reinvestigation.`;
+        // A NEUTRAL OPENING.
+        //
+        // It must be true of EVERY account in the letter — first-round and
+        // escalated alike. So it asserts nothing about dispute history. Anything
+        // that IS history-specific ("I previously disputed this") belongs in the
+        // account section, where it is true of that account and only that account.
+        const opening =
+            `I am disputing the accuracy of the following information on my credit file. ` +
+            `Please reinvestigate each item identified below.`;
 
         const body = [
-            clientIdentity.name,
-            clientIdentity.address,
+            identity.name,
+            mailingAddress,
             "",
             letterDate.toISOString().slice(0, 10),
             "",
             BUREAU_ADDRESSES[bureau] ?? bureauName,
             "",
-            `Re: Dispute — ${clientIdentity.name}`,
+            `Re: Dispute — ${identity.name}`,
             "",
             opening,
             "",
@@ -523,7 +542,7 @@ export async function generateLetters(chain, analysis, context = {}) {
             "",
             "Sincerely,",
             "",
-            clientIdentity.name,
+            identity.name,
         ].join("\n");
 
         letters.push({
@@ -576,7 +595,9 @@ export async function generateLetters(chain, analysis, context = {}) {
             lettersGenerated: letters.length,
             bureaus: letters.map((l) => l.bureauName),
             itemsWithheld: withheld.length,
-            identitySource: "CRC client profile (authoritative). NOT the credit report.",
+            identitySource: identity.source,
+            identityCrcClientId: identity.crcClientId,
+            identityRetrievedAt: identity.retrievedAt,
             crossBureauLeakCheck: leaks.length === 0 ? "PASS" : "FAIL",
         },
     };
