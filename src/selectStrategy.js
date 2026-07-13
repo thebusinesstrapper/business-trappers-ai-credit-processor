@@ -84,6 +84,83 @@ const DECISION_TO_STRATEGY = Object.freeze({
 const STRATEGY_NO_FURTHER_ACTION = { strategy: "BT-ST-0016", name: "No Further Action" };
 
 /**
+ * THE REQUESTED REMEDY IS A PROPERTY OF THE STRATEGY, NOT THE LETTER.
+ *
+ * The Letter Engine used to default everything to "delete or correct as the
+ * investigation requires" — a hedge that asks for nothing in particular and
+ * reads like a form. It is also strategically wrong: a Failure to Investigate
+ * escalation does not want a re-run of the same investigation; it wants the
+ * METHOD OF VERIFICATION, because the point at issue is HOW the bureau reached
+ * its conclusion.
+ *
+ * Remedy priority follows the Legal Remedy Standards: deletion whenever legally
+ * supported; correction where deletion is not the appropriate remedy.
+ */
+export const REMEDY = Object.freeze({
+    DELETE: "Delete this account from my credit file.",
+    DELETE_INQUIRY: "Delete this inquiry from my credit file.",
+    DELETE_DUPLICATE: "Delete the duplicate entry.",
+    CORRECT: "Correct the reporting for this account.",
+    REINVESTIGATE: "Reinvestigate this account and delete it if it cannot be verified.",
+    VALIDATE: "Provide validation of this debt, or delete it.",
+    METHOD_OF_VERIFICATION:
+        "Provide the method of verification used, including the name and address of the furnisher " +
+        "contacted and the procedure used to verify this account. If it cannot be verified, delete it.",
+    UPDATE: "Update the reporting to reflect the correction you previously confirmed.",
+    DELETE_AND_NOTIFY: "Delete this account and confirm in writing that it will not be reinserted.",
+});
+
+const REMEDY_BY_STRATEGY = Object.freeze({
+    "BT-ST-0001": REMEDY.REINVESTIGATE,          // Bureau Investigation
+    "BT-ST-0002": REMEDY.REINVESTIGATE,          // Furnisher Investigation
+    "BT-ST-0003": REMEDY.CORRECT,                // Personal Information
+    "BT-ST-0004": REMEDY.DELETE_INQUIRY,         // Inquiry
+    "BT-ST-0005": REMEDY.VALIDATE,               // Collection Validation
+    "BT-ST-0006": REMEDY.DELETE,                 // Charge-Off Investigation
+    "BT-ST-0007": REMEDY.CORRECT,                // Payment History
+    "BT-ST-0009": REMEDY.DELETE,                 // Mixed File
+    "BT-ST-0010": REMEDY.DELETE,                 // Metro 2 — an inconsistent record is unverifiable
+    "BT-ST-0011": REMEDY.METHOD_OF_VERIFICATION, // Failure to Investigate — HOW did you verify it?
+    "BT-ST-0012": REMEDY.UPDATE,                 // Failure to Update
+    "BT-ST-0013": REMEDY.DELETE_AND_NOTIFY,      // Notice & Cure (reinsertion)
+    "BT-ST-0016": null,                          // No Further Action
+});
+
+/**
+ * DECISION-LEVEL REMEDY OVERRIDES. These take precedence over the strategy.
+ *
+ * Strategy alone is too coarse. An OBSOLETE account and a garden-variety
+ * cross-bureau variance both route to BT-ST-0001 (Bureau Investigation), but
+ * they want completely different things:
+ *
+ *   - A variance wants REINVESTIGATION: check it, delete if unverifiable.
+ *   - An obsolete account wants DELETION, FULL STOP. It is past its reporting
+ *     period. Verifying it changes NOTHING — an accurate obsolete item is still
+ *     an obsolete item, and asking the bureau to "delete it if it cannot be
+ *     verified" invites the answer "we verified it; it stays." We would have
+ *     handed them the escape hatch ourselves.
+ */
+const REMEDY_BY_DECISION = Object.freeze({
+    "BT-DM-0051": REMEDY.DELETE,           // Obsolete — deletion is not conditional on accuracy
+    "BT-DM-0018": REMEDY.DELETE_DUPLICATE, // Duplicate tradeline
+    "BT-DM-0010": REMEDY.DELETE_DUPLICATE, // Duplicate collection
+
+    // COMPLIANCE-GATED (BT-DM-0052). The gate forbids asserting that deletion is
+    // legally REQUIRED on the basis of age alone. We may ask them to confirm the
+    // inquiry is still properly reportable, and to remove it if it is not — a
+    // request, conditioned on their own verification, asserting no legal duty.
+    "BT-DM-0052": "Confirm that this inquiry remains properly reportable and, if it does not, remove it.",
+});
+
+export function remedyFor(strategyId, decisionRecord) {
+    return (
+        REMEDY_BY_DECISION[decisionRecord] ??
+        REMEDY_BY_STRATEGY[strategyId] ??
+        REMEDY.REINVESTIGATE
+    );
+}
+
+/**
  * Escalation strategies. Reached ONLY by earning them.
  */
 const ESCALATION = Object.freeze({
@@ -399,6 +476,7 @@ export async function selectStrategy(decisions, context = {}) {
         return {
             ...base,
             strategy: selected,
+            requestedRemedy: remedyFor(selected.strategy, decision.primaryDecision?.record),
             round: nextRound,
             escalated: escalation.escalate,
             escalationGrounds: escalation.escalate ? escalation.grounds : null,
