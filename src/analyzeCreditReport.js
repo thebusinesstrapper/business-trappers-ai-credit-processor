@@ -69,6 +69,26 @@ const DEROGATORY_OBSOLETE_YEARS = DEROGATORY_REPORTING_YEARS + OBSOLESCENCE_GRAC
 const BANKRUPTCY_REPORTING_YEARS = 10;
 const BANKRUPTCY_PATTERN = /bankrupt|chapter\s*(7|11|13)/i;
 
+// BT-DM-0051 GUARDRAIL: obsolescence may be asserted ONLY when the item's
+// CATEGORY is POSITIVELY IDENTIFIED. Different categories run different clocks,
+// so an unrecognised status means we cannot know which clock applies.
+//
+// "Derogatory" is not a category. "Charge-off" is.
+const OBSOLESCENCE_CATEGORIES = [
+    { category: "charge_off",   pattern: /charge.?off|written.?off|profit\s*and\s*loss/i },
+    { category: "collection",   pattern: /collection/i },
+    { category: "repossession", pattern: /repossess/i },
+    { category: "foreclosure",  pattern: /foreclos/i },
+    { category: "settled",      pattern: /settled|settlement/i },
+    { category: "default",      pattern: /default/i },
+    { category: "late_payment", pattern: /late|delinquen/i },
+];
+
+function identifyObsolescenceCategory(status) {
+    if (!status) return null;
+    return OBSOLESCENCE_CATEGORIES.find((c) => c.pattern.test(String(status))) ?? null;
+}
+
 // Hard inquiries are generally removed at two years by bureau practice. NOTE:
 // this is a weaker basis than §605 obsolescence — see BT-DM-0052. Detection
 // stays here; the strength of the claim is the Decision Engine's problem.
@@ -142,7 +162,7 @@ function finding(code, explanation, evidence = null) {
 // the strongest facts obtainable from one report.
 // ---------------------------------------------------------------------------
 
-function detectInternalInconsistencies(tradeline, asOf) {
+function detectInternalInconsistencies(tradeline, asOf, dofdContested = false) {
     const findings = [];
     const obs = tradeline.observation ?? {};
 
@@ -195,7 +215,53 @@ function detectInternalInconsistencies(tradeline, asOf) {
         );
     }
 
-    if (dofd) {
+    // ---- BT-DM-0051 GUARDRAIL ---------------------------------------------
+    //
+    // Obsolescence is asserted ONLY when ALL FOUR hold:
+    //   1. the item CATEGORY is positively identified,
+    //   2. the controlling date is PRESENT and READABLE,
+    //   3. the category-specific period is therefore CALCULABLE,
+    //   4. and expiry has INDISPUTABLY passed.
+    //
+    // The contested-DOFD case is the one that matters most. If TransUnion says
+    // 2015 and Equifax says 2021, an obsolescence claim built on the 2015 date
+    // is built on a date WE ARE OURSELVES DISPUTING elsewhere in the same
+    // letter. That is self-defeating, and it asserts an expiry we cannot prove.
+    //
+    // Where any condition fails we emit INDETERMINATE — which means "WE CANNOT
+    // TELL", not "the item is fine" — and a human decides.
+    const obsolescenceCategory = identifyObsolescenceCategory(status);
+
+    // An unrecognised status word must not let a derogatory item slip through the
+    // gate unexamined. A past-due balance is itself a derogatory signal, even when
+    // the status string is one we do not know — and an item we cannot categorise
+    // is precisely the item we must NOT assert obsolescence about.
+    const looksDerogatory = isDerogatory(status) || !!obsolescenceCategory || (pastDue !== null && pastDue > 0);
+
+    if (looksDerogatory) {
+        const blockers = [];
+
+        if (!obsolescenceCategory) blockers.push(`the item category cannot be identified from status "${obs.status}"`);
+        if (!dofd) blockers.push("no Date of First Delinquency is reported");
+        if (dofdContested) blockers.push("the Date of First Delinquency is disputed across bureaus");
+
+        if (blockers.length > 0) {
+            findings.push(
+                finding(
+                    "TL_OBSOLESCENCE_INDETERMINATE",
+                    `This item may be beyond its reporting period, but that cannot be computed: ` +
+                        `${blockers.join("; ")}. No obsolescence claim is made.`,
+                    {
+                        blockers,
+                        status: obs.status ?? null,
+                        date_of_first_delinquency: obs.date_of_first_delinquency ?? null,
+                    }
+                )
+            );
+        }
+    }
+
+    if (dofd && !dofdContested && obsolescenceCategory) {
         const age = yearsBetween(dofd, asOf);
 
         // Conservative by design: 7 years PLUS the §605(c) 180-day grace.
@@ -210,6 +276,7 @@ function detectInternalInconsistencies(tradeline, asOf) {
                         date_of_first_delinquency: obs.date_of_first_delinquency,
                         age_years: Number(age.toFixed(2)),
                         obsolete_after_years: Number(DEROGATORY_OBSOLETE_YEARS.toFixed(2)),
+                        category: obsolescenceCategory.category,
                     }
                 )
             );
@@ -790,18 +857,54 @@ function detectPublicRecordFindings(report, asOf) {
             bureau_tradelines: record.bureau_tradelines ?? [],
         });
 
+        // BT-DM-0053 GUARDRAIL: record type drives BOTH the reporting period and
+        // the legal treatment. Bankruptcy is 10 years and has its own verification
+        // path; a judgment or lien is a different animal entirely. Without the
+        // type we cannot say ANYTHING about the record's lawfulness.
+        const recordTypeKnown = !!(record.record_type && String(record.record_type).trim());
+
         for (const tradeline of record.bureau_tradelines ?? []) {
             const findings = [];
             const obs = tradeline.observation ?? {};
             const filed = toDate(obs.filing_date ?? obs.date_filed);
 
+            if (!recordTypeKnown) {
+                findings.push(
+                    finding(
+                        "PR_RECORD_TYPE_UNKNOWN",
+                        `${tradeline.bureau} reports a public record whose type cannot be identified. ` +
+                            `Reporting period and legal treatment both depend on the type, so nothing ` +
+                            `is asserted about this record.`,
+                        { filing_date: obs.filing_date ?? obs.date_filed ?? null }
+                    )
+                );
+            }
+
             if (!filed) {
                 findings.push(
-                    finding("PR_MISSING_FILING_DATE", `${tradeline.bureau} reports this public record with no filing date.`, {
-                        record_type: record.record_type,
-                    })
+                    finding(
+                        "PR_MISSING_FILING_DATE",
+                        `${tradeline.bureau} reports this public record with no filing date, so its ` +
+                            `reporting period cannot be computed.`,
+                        { record_type: record.record_type ?? null }
+                    )
                 );
-            } else {
+            }
+
+            if (!filed || !recordTypeKnown) {
+                findings.push(
+                    finding(
+                        "PR_OBSOLESCENCE_INDETERMINATE",
+                        `Obsolescence cannot be calculated for this public record: ` +
+                            `${!recordTypeKnown ? "the record type is unknown" : ""}` +
+                            `${!recordTypeKnown && !filed ? " and " : ""}` +
+                            `${!filed ? "the filing date is missing" : ""}. No obsolescence claim is made.`,
+                        { record_type: record.record_type ?? null, filing_date: obs.filing_date ?? obs.date_filed ?? null }
+                    )
+                );
+            }
+
+            if (filed && recordTypeKnown) {
                 const age = yearsBetween(filed, asOf);
 
                 // Bankruptcies run TEN years. Everything else, seven. Applying
@@ -996,8 +1099,15 @@ export async function analyzeCreditReport(report, context = {}) {
         const crossBureau = detectCrossBureauInconsistencies(account);
 
         for (const tradeline of account.bureau_tradelines ?? []) {
+            // A DOFD contested across bureaus poisons any obsolescence claim
+            // built on it — we would be asserting an expiry from a date we are
+            // simultaneously disputing.
+            const dofdContested = (crossBureau.get(tradeline.stable_item_key) ?? []).some(
+                (f) => f.code === "TL_XB_DOFD_INCONSISTENT"
+            );
+
             const findings = [
-                ...detectInternalInconsistencies(tradeline, asOf),
+                ...detectInternalInconsistencies(tradeline, asOf, dofdContested),
                 ...(crossBureau.get(tradeline.stable_item_key) ?? []),
                 ...(duplicateFindings.get(tradeline.stable_item_key) ?? []),
                 ...detectHistoricalFindings(tradeline, previousIndex),
@@ -1036,8 +1146,12 @@ export async function analyzeCreditReport(report, context = {}) {
                     : f
             );
 
+            const dofdContested = (crossBureau.get(tradeline.stable_item_key) ?? []).some(
+                (f) => f.code === "TL_XB_DOFD_INCONSISTENT"
+            );
+
             const findings = [
-                ...detectInternalInconsistencies(tradeline, asOf),
+                ...detectInternalInconsistencies(tradeline, asOf, dofdContested),
                 ...xb,
                 ...(collectionFindings.get(tradeline.stable_item_key) ?? []),
                 ...detectHistoricalFindings(tradeline, previousIndex),
