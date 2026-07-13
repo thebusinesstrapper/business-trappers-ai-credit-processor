@@ -49,7 +49,29 @@ export const ANALYSIS_SCHEMA_VERSION = "BT-INTEL-1.0";
 // Tolerances. Named, not scattered as magic numbers.
 const BALANCE_TOLERANCE_DOLLARS = 50; // bureaus report on different cycle dates
 const DUPLICATE_INQUIRY_WINDOW_DAYS = 30;
+// FCRA §605(c): the seven-year period runs from 180 DAYS AFTER the Date of
+// First Delinquency — not from the DOFD itself. The practical obsolescence date
+// is therefore ~7 years + 180 days.
+//
+// THIS 180 DAYS IS NOT A DETAIL. An item between 7y and 7y+180d is STILL
+// LAWFULLY REPORTABLE. Flagging it as obsolete would put a false assertion into
+// a letter signed by the consumer — the bureau would reject it, correctly, and
+// we would have burned a dispute round asserting something untrue.
+//
+// We are deliberately CONSERVATIVE here: we would rather miss an obsolete item
+// for six months than assert obsolescence that has not yet arrived.
 const DEROGATORY_REPORTING_YEARS = 7;
+const OBSOLESCENCE_GRACE_DAYS = 180;
+const DEROGATORY_OBSOLETE_YEARS = DEROGATORY_REPORTING_YEARS + OBSOLESCENCE_GRACE_DAYS / 365.25;
+
+// Bankruptcies report for TEN years, not seven. Treating every public record as
+// a seven-year item would flag a lawful eight-year-old bankruptcy as obsolete.
+const BANKRUPTCY_REPORTING_YEARS = 10;
+const BANKRUPTCY_PATTERN = /bankrupt|chapter\s*(7|11|13)/i;
+
+// Hard inquiries are generally removed at two years by bureau practice. NOTE:
+// this is a weaker basis than §605 obsolescence — see BT-DM-0052. Detection
+// stays here; the strength of the claim is the Decision Engine's problem.
 const INQUIRY_REPORTING_YEARS = 2;
 
 const DEROGATORY_STATUS = /charge.?off|collection|repossession|foreclosure|settled|default|written.?off/i;
@@ -176,14 +198,19 @@ function detectInternalInconsistencies(tradeline, asOf) {
     if (dofd) {
         const age = yearsBetween(dofd, asOf);
 
-        if (age > DEROGATORY_REPORTING_YEARS) {
+        // Conservative by design: 7 years PLUS the §605(c) 180-day grace.
+        if (age > DEROGATORY_OBSOLETE_YEARS) {
             findings.push(
                 finding(
                     "TL_BEYOND_REPORTING_PERIOD",
                     `The Date of First Delinquency (${obs.date_of_first_delinquency}) is ` +
-                        `${age.toFixed(1)} years old, which exceeds the ${DEROGATORY_REPORTING_YEARS}-year ` +
-                        `reporting period, yet the item is still reported.`,
-                    { date_of_first_delinquency: obs.date_of_first_delinquency, age_years: Number(age.toFixed(2)) }
+                        `${age.toFixed(1)} years old. The reporting period runs seven years from ` +
+                        `180 days after the DOFD, which has now elapsed, yet the item is still reported.`,
+                    {
+                        date_of_first_delinquency: obs.date_of_first_delinquency,
+                        age_years: Number(age.toFixed(2)),
+                        obsolete_after_years: Number(DEROGATORY_OBSOLETE_YEARS.toFixed(2)),
+                    }
                 )
             );
         }
@@ -777,13 +804,25 @@ function detectPublicRecordFindings(report, asOf) {
             } else {
                 const age = yearsBetween(filed, asOf);
 
-                if (age > DEROGATORY_REPORTING_YEARS) {
+                // Bankruptcies run TEN years. Everything else, seven. Applying
+                // seven to a bankruptcy would flag a lawful 8-year-old filing as
+                // obsolete — a false assertion.
+                const isBankruptcy = BANKRUPTCY_PATTERN.test(String(record.record_type ?? ""));
+                const limit = isBankruptcy ? BANKRUPTCY_REPORTING_YEARS : DEROGATORY_REPORTING_YEARS;
+
+                if (age > limit) {
                     findings.push(
                         finding(
                             "PR_BEYOND_REPORTING_PERIOD",
-                            `This public record was filed ${age.toFixed(1)} years ago, exceeding the ` +
-                                `${DEROGATORY_REPORTING_YEARS}-year reporting period, yet it is still reported.`,
-                            { filing_date: obs.filing_date ?? obs.date_filed, age_years: Number(age.toFixed(2)) }
+                            `This ${record.record_type ?? "public record"} was filed ${age.toFixed(1)} years ago, ` +
+                                `exceeding the ${limit}-year reporting period for this record type, yet it is ` +
+                                `still reported.`,
+                            {
+                                filing_date: obs.filing_date ?? obs.date_filed,
+                                age_years: Number(age.toFixed(2)),
+                                record_type: record.record_type ?? null,
+                                limit_years: limit,
+                            }
                         )
                     );
                 }
