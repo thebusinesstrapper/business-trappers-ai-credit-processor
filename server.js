@@ -8,6 +8,7 @@ import { runMilestone5 } from "./src/milestone5.js";
 import { runCreditHeroSpike } from "./src/spikeCreditHeroRun.js";
 import { runOrderPageSpike } from "./src/spikeOrderPageRun.js";
 import { runReportJsonSpike } from "./src/spikeReportJsonRun.js";
+import { runIdentifierSpike } from "./src/spikeIdentifiersRun.js";
 
 dotenv.config();
 
@@ -178,6 +179,27 @@ app.post("/spike-report-json", async (req, res) => {
     try {
 
         const result = await runReportJsonSpike(req.body);
+
+        res.json(result);
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+
+    }
+
+});
+
+app.post("/spike-identifiers", async (req, res) => {
+
+    try {
+
+        const result = await runIdentifierSpike(req.body);
 
         res.json(result);
 
