@@ -3,40 +3,65 @@
  *
  * LETTER GENERATION ENGINE.
  *
- * Assembles one dispute letter PER BUREAU from the completed reasoning chain.
+ * ---------------------------------------------------------------------------
+ * THE ANALYSIS ENGINE EXPLAINS. THE LETTER ENGINE ASSERTS.
+ *
+ * The bureau does not need our reasoning. It needs the dispute:
+ *
+ *     Creditor
+ *     Account number — EXACTLY as THIS bureau reports it
+ *     The reporting defect
+ *     The standard or law it fails
+ *     The requested remedy
+ *
+ * Nothing else. No narration, no explanation of how we found it, no argument.
  *
  * ---------------------------------------------------------------------------
- * NO GPT. DETERMINISTIC. AND THAT IS A FEATURE.
+ * RULE 1 — CROSS-BUREAU EVIDENCE IS INTERNAL ONLY.
  *
- * Every sentence in the output traces to a specific finding produced by the
- * Analysis Engine. There is no step at which a model could introduce a fact
- * nobody verified. The Letter Generation Engine's first Never Rule is NEVER
- * INVENT FACTS — the cheapest way to guarantee that is to make invention
- * structurally impossible.
+ * A letter to TransUnion NEVER mentions Experian or Equifax. Cross-bureau
+ * findings drive STRATEGY; they never appear in correspondence.
  *
- * Wording is VARIED, not random: phrasing is selected by a deterministic hash of
- * stable_item_key + round, so two letters differ but the SAME letter regenerates
- * identically. That satisfies the Anti-Boilerplate standard without making the
- * output irreproducible — a letter we cannot regenerate is a letter we cannot
- * defend later.
+ * This has a consequence that must not be papered over:
+ *
+ *   A cross-bureau conflict proves ONE bureau is wrong. It does NOT prove WHICH.
+ *
+ * So the engine holds a hard line in its own wording:
+ *
+ *   SELF-EVIDENT defect (the bureau's record contradicts ITSELF)
+ *       -> ASSERT.  "This account is reported with a past-due amount of $4,200
+ *                    and a balance of $0."
+ *
+ *   CROSS-BUREAU conflict (someone else disagrees)
+ *       -> DISPUTE. "I dispute the accuracy of the status reported for this
+ *                    account and request reinvestigation."
+ *
+ * The consumer genuinely DOES dispute it — that is true, and she may say so
+ * under FCRA §611 without proving anything. What she may NOT say is that THIS
+ * bureau is the wrong one, because we do not know that. Writing "Experian
+ * reports this inaccurately" on cross-bureau evidence alone would invent a fact.
  *
  * ---------------------------------------------------------------------------
- * TWO HARD RULES THIS MODULE ENFORCES
+ * RULE 2 — THE ACCOUNT NUMBER IS THE BUREAU'S OWN.
  *
- * 1. IDENTITY COMES FROM CRC. NEVER FROM THE REPORT.
- *    Extraction Decision 3: reported_personal_information is EVIDENCE, never
- *    identity. Populating a letter header from the report would restate the
- *    bureau's own (possibly wrong) data back at it — and on a mixed file, would
- *    address the letter as though the wrong person's data were the client's.
+ * The bureau tradeline is the legal unit of dispute, so the dispute must carry
+ * THAT BUREAU'S masked account number, verbatim. TransUnion's "****6095" and
+ * Experian's "6095XXXXXXXX" are the same account and DIFFERENT strings. Sending
+ * a bureau a format it does not use invites "unable to locate".
  *
- * 2. COMPLIANCE GATES ARE OBEYED.
- *    A gated Decision Record may be described FACTUALLY but its legal conclusion
- *    may NOT be asserted. This engine refuses to write the forbidden sentence.
- *    A human reviewer approving the letter does not clear the gate.
+ * An account we cannot identify to the bureau is an account we do not dispute.
+ * No account number -> the item is withheld and routed to a human, never sent
+ * unidentifiable.
+ *
+ * ---------------------------------------------------------------------------
+ * NO GPT. DETERMINISTIC. Every sentence traces to a finding the Analysis Engine
+ * observed. Invention is structurally impossible, and the same letter
+ * regenerates byte-identically — a letter we cannot reproduce is a letter we
+ * cannot defend later.
  * ---------------------------------------------------------------------------
  */
 
-export const LETTER_SCHEMA_VERSION = "BT-LETTER-1.0";
+export const LETTER_SCHEMA_VERSION = "BT-LETTER-2.0";
 
 const BUREAU_NAMES = {
     transunion: "TransUnion",
@@ -50,101 +75,216 @@ const BUREAU_ADDRESSES = {
     equifax: "Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374-0256",
 };
 
-/** Deterministic selector. Same item + round -> same phrasing, always. */
-function pick(options, seed) {
-    let hash = 0;
-
-    for (let i = 0; i < seed.length; i++) {
-        hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
-    }
-
-    return options[hash % options.length];
+// Authorities. ONE per defect — the STRONGEST applicable, never a stack.
+// (Consumer Law Reference: "Apply the strongest applicable authority — not the
+// greatest number of authorities." "Do not cite laws to intimidate.")
+// Money as the bureau writes it.
+function money(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? `$${n.toLocaleString("en-US")}` : `$${v}`;
 }
 
-const OPENINGS = [
-    "I am writing to request an investigation into information appearing on my credit file.",
-    "I have reviewed my credit report and am requesting an investigation into the entries described below.",
-    "I am contacting you regarding information on my credit file that I believe is inaccurate or cannot be verified.",
-];
+const AUTH = {
+    ACCURACY: "FCRA § 607(b) (15 U.S.C. § 1681e(b)) — reasonable procedures to assure maximum possible accuracy.",
+    REINVESTIGATION: "FCRA § 611 (15 U.S.C. § 1681i) — reinvestigation of disputed information.",
+    OBSOLETE: "FCRA § 605 (15 U.S.C. § 1681c) — obsolete information may not be reported.",
+    DOFD: "FCRA § 605(c) (15 U.S.C. § 1681c(c)) — the reporting period runs from the date of first delinquency.",
+};
 
-const ESCALATION_OPENINGS = [
-    "I previously disputed information on my credit file. The response I received does not resolve the matter, and I am writing again.",
-    "I am following up on a previous dispute. The information at issue remains on my file, and the response I received does not address the problem I identified.",
-];
+// STRONGEST FIRST. Exactly ONE authority is cited per account.
+//
+// Consumer Law Reference: "Apply the strongest applicable authority — not the
+// greatest number of authorities." "Do not stack statutes unnecessarily."
+// "Do not cite laws to intimidate."
+//
+// Stacking three statutes on one tradeline reads as intimidation, and it dilutes
+// the one that actually governs. An obsolete account is an obsolescence case; it
+// does not become a stronger one by also invoking accuracy and reinvestigation.
+const AUTHORITY_PRIORITY = [AUTH.OBSOLETE, AUTH.DOFD, AUTH.ACCURACY, AUTH.REINVESTIGATION];
 
-const REQUESTS = [
-    "Please conduct a reasonable investigation and delete or correct the reporting as required by applicable law.",
-    "Please investigate this entry and, if it cannot be verified as accurate and complete, delete or correct it.",
-    "I ask that you reinvestigate this entry and remove or correct it if it cannot be verified.",
-];
+const DELETE = "Delete this account from my credit file.";
+const DELETE_OR_CORRECT = "Delete this account, or correct the reporting, as the investigation requires.";
+const CORRECT = "Correct the reporting for this account.";
+const DELETE_INQUIRY = "Delete this inquiry from my credit file.";
+const DELETE_DUPLICATE = "Delete the duplicate entry.";
 
 /**
- * Turn ONE finding into ONE factual sentence in the consumer's voice.
+ * Each finding -> the four lines the bureau needs.
  *
- * Every sentence here is a restatement of something the Analysis Engine
- * OBSERVED. Nothing is characterised, inferred, or embellished.
+ * `bureauLocal: false` marks a CROSS-BUREAU finding. It is still allowed into
+ * the letter, but ONLY in disputed form and ONLY describing this bureau's own
+ * value. It never names another bureau.
+ *
+ * A finding with no entry here produces NO letter text and the item is escalated
+ * to human review — see `withheld`. It is never silently dropped.
  */
-function sentenceFor(finding, furnisher) {
-    const e = finding.evidence ?? {};
+const SPEC = {
+    TL_PAST_DUE_ON_ZERO_BALANCE: {
+        bureauLocal: true,
+        defect: (e) => `Reported with a past-due amount of ${money(e.past_due)} and a balance of $0.`,
+        standard: "An account with no balance cannot carry an amount past due. The reporting is internally inconsistent.",
+        authority: AUTH.ACCURACY,
+        remedy: DELETE_OR_CORRECT,
+    },
 
-    switch (finding.code) {
-        case "TL_PAST_DUE_ON_ZERO_BALANCE":
-            return `This account is reported with a past-due amount of $${e.past_due} while the balance is reported as $0. An account with no balance cannot have an amount past due.`;
+    TL_PAST_DUE_EXCEEDS_BALANCE: {
+        bureauLocal: true,
+        defect: (e) => `Reported with a past-due amount of ${money(e.past_due)}, exceeding the reported balance of ${money(e.balance)}.`,
+        standard: "A past-due amount cannot exceed the balance owed. The reporting is internally inconsistent.",
+        authority: AUTH.ACCURACY,
+        remedy: DELETE_OR_CORRECT,
+    },
 
-        case "TL_PAST_DUE_EXCEEDS_BALANCE":
-            return `This account is reported with a past-due amount of $${e.past_due}, which exceeds the reported balance of $${e.balance}.`;
+    TL_DEROGATORY_WITHOUT_DOFD: {
+        bureauLocal: true,
+        defect: (e) => `Reported with a status of "${e.status}" and no date of first delinquency.`,
+        standard: "A derogatory account must carry a date of first delinquency. Without it, the permissible reporting period cannot be determined.",
+        authority: AUTH.DOFD,
+        remedy: DELETE_OR_CORRECT,
+    },
 
-        case "TL_DEROGATORY_WITHOUT_DOFD":
-            return `This account is reported with a status of "${e.status}" but with no Date of First Delinquency. Without that date, the period for which this account may be reported cannot be determined.`;
+    TL_DOFD_BEFORE_OPENED: {
+        bureauLocal: true,
+        defect: (e) => `Reported as first delinquent on ${e.date_of_first_delinquency}, before the account opened date of ${e.date_opened}.`,
+        standard: "An account cannot become delinquent before it exists. The reporting is internally inconsistent.",
+        authority: AUTH.ACCURACY,
+        remedy: DELETE_OR_CORRECT,
+    },
 
-        case "TL_DOFD_BEFORE_OPENED":
-            return `This account is reported as first delinquent on ${e.date_of_first_delinquency}, which is before the account opened date of ${e.date_opened}.`;
+    TL_BEYOND_REPORTING_PERIOD: {
+        bureauLocal: true,
+        defect: (e) => `Reported with a date of first delinquency of ${e.date_of_first_delinquency}. The permissible reporting period has elapsed.`,
+        standard: "Obsolete information may not be reported.",
+        authority: AUTH.OBSOLETE,
+        remedy: DELETE,
+    },
 
-        case "TL_BEYOND_REPORTING_PERIOD":
-            return `This account is reported with a Date of First Delinquency of ${e.date_of_first_delinquency}. The period during which this information may be reported has elapsed.`;
+    TL_CLOSED_WITH_ACTIVE_STATUS: {
+        bureauLocal: true,
+        defect: () => `Reported as both closed and active.`,
+        standard: "An account cannot be simultaneously closed and active. The reporting is internally inconsistent.",
+        authority: AUTH.ACCURACY,
+        remedy: CORRECT,
+    },
 
-        case "TL_XB_STATUS_INCONSISTENT":
-            return `${BUREAU_NAMES[e.this_bureau?.bureau] ?? "This bureau"} reports the status of this account as ${e.this_bureau?.value}, while ${e.other_bureaus?.map((b) => `${BUREAU_NAMES[b.bureau]} reports ${b.value}`).join(" and ")}. These cannot all be accurate.`;
+    TL_STATUS_CONFLICTS_WITH_PAYMENT_HISTORY: {
+        bureauLocal: true,
+        defect: (e) => `Reported with a status of "${e.status}", while the payment history for the same account shows a recent late payment.`,
+        standard: "The status and the payment history for one account must agree.",
+        authority: AUTH.ACCURACY,
+        remedy: CORRECT,
+    },
 
-        case "TL_XB_BALANCE_INCONSISTENT":
-            return `The balance reported for this account differs from the balance reported by other credit reporting agencies for the same account.`;
+    TL_DUPLICATE_WITHIN_BUREAU: {
+        bureauLocal: true,
+        defect: (e) => `Reported ${e.occurrences} times on my file.`,
+        standard: "A single account may appear only once.",
+        authority: AUTH.ACCURACY,
+        remedy: DELETE_DUPLICATE,
+    },
 
-        case "TL_XB_DOFD_INCONSISTENT":
-            return `The Date of First Delinquency reported for this account differs from the date reported by other credit reporting agencies. This date determines how long the account may be reported.`;
+    COL_MISSING_ORIGINAL_CREDITOR: {
+        bureauLocal: true,
+        defect: () => `Reported as a collection with no original creditor identified.`,
+        standard: "A collection that does not identify the original creditor cannot be verified.",
+        authority: AUTH.REINVESTIGATION,
+        remedy: DELETE,
+    },
 
-        case "TL_DUPLICATE_WITHIN_BUREAU":
-            return `This account appears ${e.occurrences} times on my file. It is a single account and should appear once.`;
+    COL_DUPLICATE_COLLECTION: {
+        bureauLocal: true,
+        defect: () => `The same debt is reported by more than one collection agency.`,
+        standard: "One debt may be reported as owed to one collector.",
+        authority: AUTH.ACCURACY,
+        remedy: DELETE_DUPLICATE,
+    },
 
-        case "COL_MISSING_ORIGINAL_CREDITOR":
-            return `This collection is reported without identifying the original creditor. I cannot verify a debt when the original creditor is not stated.`;
+    HIST_RE_AGING_INDICATOR: {
+        bureauLocal: true,
+        defect: (e) => `The date of first delinquency was previously reported as ${e.previous_dofd} and is now reported as ${e.current_dofd}.`,
+        standard: "A date of first delinquency is a historical fact and does not change. Moving it forward extends the reporting period.",
+        authority: AUTH.DOFD,
+        remedy: DELETE,
+    },
 
-        case "COL_DUPLICATE_COLLECTION":
-            return `More than one collection agency is reporting the same debt on my file.`;
+    HIST_BALANCE_INCREASED_ON_CHARGED_OFF: {
+        bureauLocal: true,
+        defect: (e) => `The balance on this charged-off account increased from ${money(e.previous)} to ${money(e.current)}.`,
+        standard: "A charged-off balance does not increase.",
+        authority: AUTH.ACCURACY,
+        remedy: CORRECT,
+    },
 
-        case "HIST_RE_AGING_INDICATOR":
-            return `The Date of First Delinquency for this account was previously reported as ${e.previous_dofd} and is now reported as ${e.current_dofd}. A date of first delinquency is a historical fact and does not change.`;
+    // ---- CROSS-BUREAU: DISPUTED, NEVER ASSERTED --------------------------
+    //
+    // We know SOMEONE is wrong. We do not know it is THIS bureau. So the letter
+    // records a dispute and requests reinvestigation — it does not claim this
+    // bureau's value is false, and it names no other bureau.
 
-        case "HIST_BALANCE_INCREASED_ON_CHARGED_OFF":
-            return `The balance on this charged-off account has increased from $${e.previous} to $${e.current}.`;
+    TL_XB_STATUS_INCONSISTENT: {
+        bureauLocal: false,
+        defect: (e) => `The account status is reported as ${e.this_bureau?.value ?? "shown"}. I dispute the accuracy of this status.`,
+        standard: "The reported status cannot be verified as accurate.",
+        authority: AUTH.REINVESTIGATION,
+        remedy: DELETE_OR_CORRECT,
+    },
 
-        case "TL_STATUS_CONFLICTS_WITH_PAYMENT_HISTORY":
-            return `This account is reported as "${e.status}", but the payment history shown for the same account reflects a recent late payment.`;
+    TL_XB_BALANCE_INCONSISTENT: {
+        bureauLocal: false,
+        defect: () => `I dispute the accuracy of the balance reported for this account.`,
+        standard: "The reported balance cannot be verified as accurate.",
+        authority: AUTH.REINVESTIGATION,
+        remedy: DELETE_OR_CORRECT,
+    },
 
-        case "TL_CLOSED_WITH_ACTIVE_STATUS":
-            return `This account is reported as both closed and active.`;
+    TL_XB_PAST_DUE_INCONSISTENT: {
+        bureauLocal: false,
+        defect: () => `I dispute the accuracy of the past-due amount reported for this account.`,
+        standard: "The reported past-due amount cannot be verified as accurate.",
+        authority: AUTH.REINVESTIGATION,
+        remedy: DELETE_OR_CORRECT,
+    },
 
-        // COMPLIANCE-GATED. State the FACT (the age). Assert no legal conclusion.
-        case "INQ_BEYOND_REPORTING_PERIOD":
-            return `This inquiry is dated ${e.inquiry_date} and is more than two years old. I ask that you confirm it remains properly reportable.`;
+    TL_XB_DOFD_INCONSISTENT: {
+        bureauLocal: false,
+        defect: (e) => `I dispute the accuracy of the date of first delinquency reported for this account.`,
+        standard: "This date determines the permissible reporting period and cannot be verified as accurate.",
+        authority: AUTH.DOFD,
+        remedy: DELETE_OR_CORRECT,
+    },
 
-        default:
-            return null; // We do not write a sentence we have not carefully authored.
-    }
-}
+    COL_XB_BALANCE_INCONSISTENT: {
+        bureauLocal: false,
+        defect: () => `I dispute the accuracy of the balance reported for this collection.`,
+        standard: "The reported balance cannot be verified as accurate.",
+        authority: AUTH.REINVESTIGATION,
+        remedy: DELETE_OR_CORRECT,
+    },
+
+    // ---- COMPLIANCE-GATED (BT-DM-0052) -----------------------------------
+    // States the AGE, which is a fact. Asserts NO illegality and NO required
+    // deletion — the gate forbids both until the legal basis is reviewed.
+    INQ_BEYOND_REPORTING_PERIOD: {
+        bureauLocal: true,
+        complianceGated: true,
+        defect: (e) => `This inquiry is dated ${e.inquiry_date} and is more than two years old.`,
+        standard: "I request confirmation that this inquiry remains properly reportable.",
+        authority: AUTH.REINVESTIGATION,
+        remedy: DELETE_INQUIRY,
+    },
+
+    INQ_DUPLICATE: {
+        bureauLocal: true,
+        defect: (e) => `This furnisher is reported as having made ${e.occurrences} inquiries within a short period.`,
+        standard: "A single authorization supports a single inquiry.",
+        authority: AUTH.REINVESTIGATION,
+        remedy: DELETE_INQUIRY,
+    },
+};
 
 /**
- * @param {object} chain     output of buildDisputeChain()
- * @param {object} analysis  output of analyzeCreditReport()
+ * @param {object} chain     buildDisputeChain() output
+ * @param {object} analysis  analyzeCreditReport() output
  * @param {object} context
  * @param {object} context.clientIdentity  CRC PROFILE — the ONLY source of identity.
  */
@@ -153,55 +293,63 @@ export async function generateLetters(chain, analysis, context = {}) {
     const { clientIdentity, letterDate = new Date() } = context;
 
     if (!chain?.chainOk) {
-        return { schemaVersion: LETTER_SCHEMA_VERSION, lettersOk: false, errors: ["Chain incomplete."], letters: [] };
+        return { schemaVersion: LETTER_SCHEMA_VERSION, lettersOk: false, errors: ["Chain incomplete."], letters: [], withheld: [] };
     }
 
     // Identity is NOT optional and has NO fallback.
     //
-    // The report contains names. It would be trivially easy to use one. That is
-    // exactly the failure Extraction Decision 3 exists to prevent: on a mixed
-    // file, the report's name may belong to somebody else, and we would be
-    // signing the client's dispute with a stranger's identity.
+    // The report contains names, and it would be trivial to use one. That is
+    // precisely the failure Extraction Decision 3 exists to prevent: on a mixed
+    // file the report's name may belong to somebody else, and we would sign the
+    // client's dispute with a stranger's identity.
     if (!clientIdentity?.name || !clientIdentity?.address) {
         return {
             schemaVersion: LETTER_SCHEMA_VERSION,
             lettersOk: false,
             errors: [
                 "No CRC client identity supplied. Identity comes from the CRC client profile and " +
-                "from nowhere else — the credit report is evidence, never identity. No letter is " +
-                "generated without it.",
+                "nowhere else — the credit report is evidence, never identity.",
             ],
             letters: [],
+            withheld: [],
         };
     }
 
-    // Find the analysis findings for an item, so the letter states FACTS, not
-    // codes. The letter is built from what we observed — never re-derived here.
     const findingsByItem = new Map();
 
-    for (const item of [...(analysis.tradelines ?? []), ...(analysis.collections ?? []), ...(analysis.inquiries ?? []), ...(analysis.publicRecords ?? [])]) {
+    for (const item of [
+        ...(analysis.tradelines ?? []),
+        ...(analysis.collections ?? []),
+        ...(analysis.inquiries ?? []),
+        ...(analysis.publicRecords ?? []),
+    ]) {
         findingsByItem.set(item.stableItemKey, item);
     }
 
-    // ONE LETTER PER BUREAU **PER ESCALATION POSTURE**.
+    // The bureau's OWN masked account number, per tradeline. Never another
+    // bureau's, never a normalised one.
+    const maskedByItem = new Map();
+    const report = context.report ?? null;
+
+    if (report) {
+        for (const account of [...(report.accounts ?? []), ...(report.collections ?? []), ...(report.public_records ?? [])]) {
+            for (const tradeline of account.bureau_tradelines ?? []) {
+                maskedByItem.set(tradeline.stable_item_key, tradeline.masked_account ?? null);
+            }
+        }
+    }
+
+    // ONE LETTER PER BUREAU PER ESCALATION POSTURE.
     //
-    // Each bureau is a separate legal proceeding, so a letter to TransUnion
-    // speaks only to TransUnion's reporting. But bureau alone is NOT a fine
-    // enough grouping, and getting this wrong produces a FALSE STATEMENT:
-    //
-    //   An escalation letter opens "I am following up on a previous dispute."
-    //   That sentence is an assertion about EVERY ACCOUNT IN THE LETTER. Batch a
-    //   brand-new round-1 account into an escalation letter and the consumer has
-    //   just signed a claim about correspondence that never happened for that
-    //   account.
-    //
-    // The opening characterises the whole letter, so the whole letter must share
-    // one posture. A bureau with both new and escalated items gets TWO letters.
+    // Bureau alone is not fine enough. An escalation letter opens "I am following
+    // up on a previous dispute" — an assertion about EVERY account in it. Batch a
+    // fresh round-1 account into it and the consumer has signed a claim about
+    // correspondence that never happened for that account.
     const byGroup = new Map();
+    const withheld = [];
 
     for (const item of chain.items) {
-        if (!item.chainComplete) continue;
-        if (!item.bureau) continue;
+        if (!item.chainComplete || !item.bureau) continue;
 
         const key = `${item.bureau}|${item.escalated ? "escalation" : "initial"}`;
 
@@ -213,49 +361,145 @@ export async function generateLetters(chain, analysis, context = {}) {
 
     for (const [key, items] of [...byGroup.entries()].sort()) {
         const bureau = key.split("|")[0];
-
-        // Every item in the group shares a posture — that is what the group IS.
+        const bureauName = BUREAU_NAMES[bureau] ?? bureau;
         const escalated = items[0].escalated;
         const round = Math.max(...items.map((i) => i.round ?? 1));
-        const seed = `${bureau}|${round}|${items[0].stableItemKey}`;
 
-        const gates = items.flatMap((i) =>
-            (i.humanReviewReasons ?? []).filter((r) => r.startsWith("COMPLIANCE GATE"))
-        );
-
-        const accountSections = [];
+        const sections = [];
 
         for (const item of items) {
             const source = findingsByItem.get(item.stableItemKey);
             if (!source) continue;
 
-            const sentences = source.findings
-                .map((f) => sentenceFor(f, item.furnisher))
-                .filter(Boolean);
+            const masked = maskedByItem.get(item.stableItemKey);
 
-            if (sentences.length === 0) continue;
+            // AN ACCOUNT WE CANNOT IDENTIFY TO THE BUREAU IS AN ACCOUNT WE DO NOT
+            // DISPUTE. Sending a dispute with no account number invites "unable to
+            // locate" — and burns a round.
+            if (!masked) {
+                withheld.push({
+                    stableItemKey: item.stableItemKey,
+                    bureau,
+                    furnisher: item.furnisher,
+                    reason:
+                        "No masked account number is reported by this bureau for this tradeline. The " +
+                        "dispute cannot identify the account, so it is withheld rather than sent " +
+                        "unidentifiable.",
+                });
+                continue;
+            }
 
-            accountSections.push({
+            const specced = source.findings
+                .map((f) => ({ finding: f, spec: SPEC[f.code] }))
+                .filter((x) => x.spec);
+
+            const unspecced = source.findings.filter((f) => !SPEC[f.code]);
+
+            if (specced.length === 0) {
+                withheld.push({
+                    stableItemKey: item.stableItemKey,
+                    bureau,
+                    furnisher: item.furnisher,
+                    reason:
+                        `No approved letter wording exists for the findings on this item ` +
+                        `(${source.findings.map((f) => f.code).join(", ")}). Withheld for human review ` +
+                        `rather than dropped.`,
+                });
+                continue;
+            }
+
+            // Deterministic, and self-evident assertions lead. Cross-bureau
+            // disputes are weaker and follow.
+            specced.sort((a, b) => {
+                const rank = Number(b.spec.bureauLocal) - Number(a.spec.bureauLocal);
+                return rank !== 0 ? rank : a.finding.code.localeCompare(b.finding.code);
+            });
+
+            // Bureau-local defects are ASSERTED, each on its own line.
+            const local = specced.filter((x) => x.spec.bureauLocal);
+
+            // Cross-bureau findings are DISPUTED, and collapse into ONE sentence.
+            //
+            // Three consecutive lines of "I dispute the accuracy of X." is exactly
+            // the repeated sentence structure the Writing Style Guide forbids, and
+            // it reads as padding. One sentence naming the disputed fields says the
+            // same thing and sounds like a person wrote it.
+            const crossBureau = specced.filter((x) => !x.spec.bureauLocal);
+
+            const CROSS_FIELD = {
+                TL_XB_STATUS_INCONSISTENT: "status",
+                TL_XB_BALANCE_INCONSISTENT: "balance",
+                TL_XB_PAST_DUE_INCONSISTENT: "past-due amount",
+                TL_XB_DOFD_INCONSISTENT: "date of first delinquency",
+                COL_XB_BALANCE_INCONSISTENT: "balance",
+            };
+
+            const disputedFields = [...new Set(crossBureau.map((x) => CROSS_FIELD[x.finding.code]).filter(Boolean))];
+
+            const defects = [
+                ...local.map((x) => x.spec.defect(x.finding.evidence ?? {})),
+                ...(disputedFields.length
+                    ? [
+                          `I dispute the accuracy of the ${
+                              disputedFields.length === 1
+                                  ? disputedFields[0]
+                                  : `${disputedFields.slice(0, -1).join(", ")} and ${disputedFields.slice(-1)}`
+                          } reported for this account. ${
+                              disputedFields.length === 1 ? "It cannot" : "They cannot"
+                          } be verified as accurate.`,
+                      ]
+                    : []),
+            ];
+
+            const standards = [...new Set(local.map((x) => x.spec.standard))];
+
+            // ONE authority. The strongest that applies.
+            const authority =
+                AUTHORITY_PRIORITY.find((a) => specced.some((x) => x.spec.authority === a)) ??
+                AUTH.REINVESTIGATION;
+
+            // Strongest supported remedy. Deletion where supported; correction
+            // otherwise (Legal Remedy Standards, remedy priority).
+            const remedies = specced.map((x) => x.spec.remedy);
+            const remedy =
+                remedies.find((r) => r === DELETE) ??
+                remedies.find((r) => r === DELETE_INQUIRY) ??
+                remedies.find((r) => r === DELETE_DUPLICATE) ??
+                remedies.find((r) => r === DELETE_OR_CORRECT) ??
+                remedies[0];
+
+            const lines = [
+                `${item.furnisher ?? "Account"}`,
+                `Account Number: ${masked}`,
+                ``,
+                ...defects,
+                ...(standards.length ? [``, ...standards] : []),
+                ``,
+                authority,
+                ``,
+                `Requested action: ${remedy}`,
+            ];
+
+            sections.push({
                 stableItemKey: item.stableItemKey,
                 stableAccountKey: item.stableAccountKey,
                 furnisher: item.furnisher,
+                maskedAccount: masked,
                 decisionRecord: item.decisionRecord,
                 reason: item.reason.reason,
                 instruction: item.instruction.instruction,
                 blueprint: item.blueprint.blueprint,
-                text: [
-                    `**${item.furnisher ?? "Account"}**`,
-                    ...sentences,
-                    pick(REQUESTS, `${seed}|${item.stableItemKey}`),
-                ].join("\n\n"),
+                complianceGated: specced.some((x) => x.spec.complianceGated),
+                unspeccedFindings: unspecced.map((f) => f.code),
+                text: lines.join("\n"),
             });
         }
 
-        if (accountSections.length === 0) continue;
+        if (sections.length === 0) continue;
 
         const opening = escalated
-            ? pick(ESCALATION_OPENINGS, seed)
-            : pick(OPENINGS, seed);
+            ? `I previously disputed the accounts identified below. The information remains on my file and the response I received did not resolve it. I am requesting reinvestigation.`
+            : `I am disputing the accuracy of the following information on my credit file and requesting reinvestigation.`;
 
         const body = [
             clientIdentity.name,
@@ -263,17 +507,19 @@ export async function generateLetters(chain, analysis, context = {}) {
             "",
             letterDate.toISOString().slice(0, 10),
             "",
-            BUREAU_ADDRESSES[bureau] ?? BUREAU_NAMES[bureau],
+            BUREAU_ADDRESSES[bureau] ?? bureauName,
             "",
-            `Re: Request for investigation — ${clientIdentity.name}`,
+            `Re: Dispute — ${clientIdentity.name}`,
             "",
             opening,
             "",
-            accountSections.map((s) => s.text).join("\n\n"),
+            "---",
+            "",
+            sections.map((s) => s.text).join("\n\n---\n\n"),
+            "",
+            "---",
             "",
             "Please provide the results of your investigation in writing.",
-            "",
-            "Thank you for your prompt attention to this matter.",
             "",
             "Sincerely,",
             "",
@@ -282,18 +528,18 @@ export async function generateLetters(chain, analysis, context = {}) {
 
         letters.push({
             bureau,
-            bureauName: BUREAU_NAMES[bureau] ?? bureau,
+            bureauName,
             round,
             escalated,
-            itemCount: accountSections.length,
-            stableItemKeys: accountSections.map((s) => s.stableItemKey),
-            accountSections,
+            itemCount: sections.length,
+            stableItemKeys: sections.map((s) => s.stableItemKey),
+            accountSections: sections,
             body,
 
             requiresHumanReview: items.some((i) => i.humanReview),
-            complianceGates: gates,
+            complianceGated: sections.some((s) => s.complianceGated),
 
-            // Kris reads this next to the letter.
+            // NOT part of the letter. Kris reads this beside it.
             reasoningTrace: items.map((i) => ({
                 stableItemKey: i.stableItemKey,
                 furnisher: i.furnisher,
@@ -302,16 +548,36 @@ export async function generateLetters(chain, analysis, context = {}) {
         });
     }
 
+    // A letter must never name a bureau other than its recipient. This is checked
+    // against the OUTPUT, not merely intended in the input — an assertion about
+    // what we built, not about what we meant to build.
+    const leaks = [];
+
+    for (const letter of letters) {
+        for (const [bureauKey, name] of Object.entries(BUREAU_NAMES)) {
+            if (bureauKey === letter.bureau) continue;
+            if (letter.body.includes(name)) {
+                leaks.push({ letter: letter.bureauName, leaked: name });
+            }
+        }
+    }
+
     return {
         schemaVersion: LETTER_SCHEMA_VERSION,
-        lettersOk: true,
-        errors: [],
+        lettersOk: leaks.length === 0,
+        errors: leaks.length
+            ? [`CROSS-BUREAU LEAK: a letter referenced another bureau. ${JSON.stringify(leaks)}`]
+            : [],
+
         letters,
+        withheld,
+
         summary: {
             lettersGenerated: letters.length,
             bureaus: letters.map((l) => l.bureauName),
+            itemsWithheld: withheld.length,
             identitySource: "CRC client profile (authoritative). NOT the credit report.",
-            allRequireReview: letters.every((l) => l.requiresHumanReview),
+            crossBureauLeakCheck: leaks.length === 0 ? "PASS" : "FAIL",
         },
     };
 }
