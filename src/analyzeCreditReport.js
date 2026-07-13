@@ -904,10 +904,10 @@ export async function analyzeCreditReport(report, context = {}) {
             inquiries: [],
             publicRecords: [],
             accountFindings: [],
-            recommendedActions: [],
+            itemsRequiringReview: [],
             overallPriority: [],
             notEvaluated: [],
-            readyForLetterGeneration: false,
+            analysisReadyForDecision: false,
         };
     }
 
@@ -1048,21 +1048,20 @@ export async function analyzeCreditReport(report, context = {}) {
         comparedAgainstClientIdentity: !!clientIdentity,
     };
 
-    // ---- recommendedActions / overallPriority ------------------------------
+    // ---- itemsRequiringReview / overallPriority ------------------------------
     //
     // THESE ARE INDEXES, NOT PLANS.
     //
-    // "recommendedActions" is the milestone's name for it, but this engine
-    // selects no strategy, no law, no reason, and no instruction. What it
-    // produces is a PRIORITIZED INDEX of items that carry findings, so the
-    // Decision Engine knows where to look without re-discovering facts.
+    // This engine selects no strategy, no law, no reason, and no instruction.
+    // What it produces is a PRIORITIZED INDEX of items that carry findings, so
+    // the Decision Engine knows where to look without re-discovering facts.
     //
     // "Which items have findings, worst first" is a fact.
     // "What to do about them" is the Decision Engine's job, and this engine
-    // deliberately expresses no opinion on it.
+    // deliberately expresses no opinion on it. Nothing here approves an action.
     const itemsWithFindings = sortItems(allItems.filter((i) => i.findings.length > 0));
 
-    const recommendedActions = itemsWithFindings
+    const itemsRequiringReview = itemsWithFindings
         .map((item) => ({
             stableItemKey: item.stableItemKey,
             stableAccountKey: item.stableAccountKey,
@@ -1076,7 +1075,7 @@ export async function analyzeCreditReport(report, context = {}) {
             return rank !== 0 ? rank : String(a.stableItemKey).localeCompare(String(b.stableItemKey));
         });
 
-    const overallPriority = recommendedActions.map((a, i) => ({
+    const overallPriority = itemsRequiringReview.map((a, i) => ({
         rank: i + 1,
         stableItemKey: a.stableItemKey,
         stableAccountKey: a.stableAccountKey,
@@ -1084,17 +1083,17 @@ export async function analyzeCreditReport(report, context = {}) {
         topSeverity: a.topSeverity,
     }));
 
-    // ---- readyForLetterGeneration ------------------------------------------
+    // ---- analysisReadyForDecision ------------------------------------------
     //
-    // A DATA-READINESS FLAG. NOT A DECISION TO DISPUTE.
+    // A DATA-READINESS FLAG. NOT AN APPROVAL.
     //
     // True means only: "the analysis completed against a trustworthy report and
-    // produced findings, so downstream engines have something to consume."
+    // produced findings, so the DECISION ENGINE has something to consume."
     //
     // It does NOT mean a letter should be sent, that any finding is disputable,
     // or that a strategy exists. Those judgements belong to the Decision,
     // Strategy, and Letter engines, and this engine must not pre-empt them.
-    const readyForLetterGeneration = allFindings.length > 0;
+    const analysisReadyForDecision = allFindings.length > 0;
 
     return {
         schemaVersion: ANALYSIS_SCHEMA_VERSION,
@@ -1111,10 +1110,10 @@ export async function analyzeCreditReport(report, context = {}) {
             String(a.stableAccountKey).localeCompare(String(b.stableAccountKey))
         ),
 
-        recommendedActions,
+        itemsRequiringReview,
         overallPriority,
         notEvaluated,
 
-        readyForLetterGeneration,
+        analysisReadyForDecision,
     };
 }
