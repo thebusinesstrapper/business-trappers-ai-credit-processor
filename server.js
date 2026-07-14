@@ -12,6 +12,7 @@ import { runIdentifierSpike } from "./src/spikeIdentifiersRun.js";
 import { runClientProfileSpike } from "./src/spikeClientProfileRun.js";
 import { runProfileRead } from "./src/milestoneProfile.js";
 import { runMilestone6 } from "./src/milestone6.js";
+import { extractSkeletonNode } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
 
 dotenv.config();
 
@@ -320,6 +321,79 @@ app.post("/milestone-6", async (req, res) => {
  *
  * Registered LAST so that it sees every route registered above it.
  */
+/**
+ * =========================================================================
+ * TEMPORARY — SCHEMA DISCOVERY ONLY. DELETE WHEN M7 IS COMPLETE.
+ *
+ * POST /debug/skeleton-node
+ *   header: x-debug-token: <DEBUG_TOKEN>
+ *   body:   { "path": "CREDIT_RESPONSE.CREDIT_LIABILITY.element.CREDIT_REPOSITORY",
+ *             "clientName": "Elizabeth Kelley" }
+ *
+ * Runs the EXISTING M6 capture — it does not reimplement any browser step, does
+ * not click anything M6 would not click, and spends nothing — then returns the
+ * requested skeleton node as a STRING.
+ *
+ * The string is the whole point. n8n's JSON viewer collapses nested objects to
+ * {...} and its Table view shows only top-level fields, so a deep skeleton node
+ * cannot be read out of an M6 response by eye. n8n cannot collapse a string.
+ *
+ * FAILS CLOSED: with no DEBUG_TOKEN configured, this route returns 404 — it does
+ * not exist. 404 rather than 403, so its existence is not disclosed to an
+ * unauthenticated caller.
+ * =========================================================================
+ */
+app.post("/debug/skeleton-node", async (req, res) => {
+
+    const token = process.env.DEBUG_TOKEN;
+
+    if (!token || req.get("x-debug-token") !== token) {
+        return res.status(404).json({ error: "Not found" });
+    }
+
+    const path = req.body?.path;
+
+    if (!path) {
+        return res.status(400).json({
+            error: 'Supply a "path", e.g. "CREDIT_RESPONSE.CREDIT_LIABILITY.element.CREDIT_REPOSITORY". ' +
+                   'Omit it entirely (empty string) to list the root keys.'
+        });
+    }
+
+    try {
+
+        // Reuse M6 as-is. No duplicated navigation, no duplicated capture.
+        const result = await runMilestone6(req.body);
+
+        if (!result.success) {
+            return res.json({
+                ok: false,
+                reason: "The M6 capture did not succeed, so there is no skeleton to read.",
+                milestone_error: result
+            });
+        }
+
+        const skeleton = result.capturedPayload?.skeleton;
+
+        if (!skeleton) {
+            return res.json({
+                ok: false,
+                reason: "M6 succeeded but returned no capturedPayload.skeleton."
+            });
+        }
+
+        return res.json(extractSkeletonNode(skeleton, path));
+
+    } catch (error) {
+
+        console.error(error);
+
+        return res.status(500).json({ ok: false, error: error.message });
+
+    }
+
+});
+
 app.get("/debug/routes", (req, res) => {
 
     const token = process.env.DEBUG_TOKEN;
