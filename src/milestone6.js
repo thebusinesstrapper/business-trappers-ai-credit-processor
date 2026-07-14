@@ -87,7 +87,20 @@ export async function runMilestone6(data = {}) {
         if (!profile.ok) {
             return errorResponse(profile.error_code,
                 `Identity could not be established: ${profile.error} ` +
-                    `Extraction does not proceed without a verified CRC identity.`, { milestone: "M6_CAPTURE" });
+                    `Extraction does not proceed without a verified CRC identity.`,
+                {
+                    milestone: "M6_CAPTURE",
+
+                    // M6 was swallowing these. Without them, "required fields missing"
+                    // says nothing about WHICH fields, or what was actually read — which
+                    // is why this failure looked like an architectural problem rather
+                    // than a race we could see.
+                    missing: profile.missing ?? null,
+                    partial: profile.partial ?? null,
+
+                    cancelAttempts: profile.cancelAttempts ?? null,
+                    modalHeaderHtml: profile.modalHeaderHtml ?? null,
+                });
         }
 
         const identityCheck = verifyIdentity(profile.identity);
@@ -97,7 +110,19 @@ export async function runMilestone6(data = {}) {
                 `The CRC profile was read but did not pass verification: ${identityCheck.errors.join(" ")}`, { milestone: "M6_CAPTURE" });
         }
 
-        console.log(`Identity verified: ${profile.identity.name} (CRC ${client.crcClientId})`);
+        // ---- FREEZE THE VERIFIED IDENTITY ----------------------------------
+        //
+        // Identity is established ONCE per processing cycle and is not re-read. It
+        // is a PREREQUISITE to report acquisition, not a part of it, and reopening
+        // the profile after leaving the dashboard would risk a second read
+        // disagreeing with the first — at which point we would not know which one
+        // signs the letter.
+        //
+        // Object.freeze makes that structural rather than merely intended: nothing
+        // downstream can mutate the identity that goes on a bureau letter.
+        const identity = Object.freeze({ ...profile.identity });
+
+        console.log(`Identity verified and FROZEN: ${identity.name} (CRC ${client.crcClientId})`);
 
         // ---- 2. ATTACH THE PASSIVE LISTENER *BEFORE* NAVIGATING ------------
         //
@@ -265,7 +290,7 @@ export async function runMilestone6(data = {}) {
             result: "CAPTURED",
 
             crcClientId: client.crcClientId,
-            identity: profile.identity,
+            identity,
             identityVerified: true,
 
             reportSelected: {
