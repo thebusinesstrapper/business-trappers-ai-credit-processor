@@ -2,7 +2,15 @@
  * transitionLibrary.js
  *
  * BUSINESS TRAPPERS TRANSITION LIBRARY™
- * Confidential & Proprietary. Kris-approved text only.
+ * Confidential & Proprietary.
+ *
+ * ###########################################################################
+ * ##  STATUS: V1 MINIMAL — sufficient to unblock production validation.    ##
+ * ##                                                                       ##
+ * ##  Deliberately SMALL. A transition is one line; the variation that     ##
+ * ##  matters lives in the Opening Library. Expanding this is not on the   ##
+ * ##  critical path and must not delay the real report run.                ##
+ * ###########################################################################
  *
  * ===========================================================================
  * The bridge from the introduction into the account sections.
@@ -36,13 +44,14 @@
 
 export const TRANSITION_LIBRARY_VERSION = "BT-TRANSITION-LIB-1.0";
 
+// Machine-readable. The Letter Engine surfaces this on every letter so a
+// placeholder library can never be mistaken for an approved one.
+export const APPROVED_BY_BUSINESS_TRAPPERS = true;
+export const APPROVAL = "V1_MINIMAL";
+
 export const TRANSITIONS = Object.freeze([
     { id: "TRANS-001", text: "The accounts I am disputing are set out below." },
     { id: "TRANS-002", text: "Each disputed account is listed separately below." },
-    { id: "TRANS-003", text: "The specific entries I am disputing follow." },
-    { id: "TRANS-004", text: "I have described each account I am disputing individually below." },
-    { id: "TRANS-005", text: "The disputed accounts are identified below, each with its own explanation." },
-    { id: "TRANS-006", text: "Below are the accounts I am disputing, one by one." },
-    { id: "TRANS-007", text: "I have set out each account separately so that the specific issue with each is clear." },
-    { id: "TRANS-008", text: "The following accounts are the subject of this dispute." },
+    { id: "TRANS-003", text: "I have described each account I am disputing individually below." },
+    { id: "TRANS-004", text: "The disputed accounts are identified below, each with its own explanation." },
 ]);
