@@ -99,7 +99,7 @@ const BUREAU_BY_SOURCE_TYPE = Object.freeze({
  * is recorded in completeness.warnings — so "the bureau does not report this"
  * (data) is never confused with "we failed to read it" (a bug).
  */
-const FIELD = Object.freeze({
+export const FIELD = Object.freeze({
     // CONFIRMED present in the run #83 liability key list.
     balance: ["@_UnpaidBalanceAmount"],
     past_due: ["@_PastDueAmount"],
