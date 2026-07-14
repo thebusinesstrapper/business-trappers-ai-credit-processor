@@ -9,6 +9,7 @@ import { runCreditHeroSpike } from "./src/spikeCreditHeroRun.js";
 import { runOrderPageSpike } from "./src/spikeOrderPageRun.js";
 import { runReportJsonSpike } from "./src/spikeReportJsonRun.js";
 import { runIdentifierSpike } from "./src/spikeIdentifiersRun.js";
+import { runClientProfileSpike } from "./src/spikeClientProfileRun.js";
 
 dotenv.config();
 
@@ -213,6 +214,67 @@ app.post("/spike-identifiers", async (req, res) => {
         });
 
     }
+
+});
+
+/**
+ * CRC client profile DOM discovery spike.
+ *
+ * READ-ONLY. Logs in, opens the client, navigates to the profile, and
+ * inventories the DOM. It writes nothing and it guesses no selectors.
+ *
+ * Body: { "clientName": "Elizabeth Kelley" }
+ */
+app.post("/spike-client-profile", async (req, res) => {
+
+    try {
+
+        const result = await runClientProfileSpike(req.body);
+
+        res.json(result);
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+
+    }
+
+});
+
+/**
+ * Deployment verification only. Lists the routes the RUNNING build actually has.
+ *
+ * Deliberately NOT on the root endpoint: a public route table advertises every
+ * spike and milestone endpoint on this service, which is a map of the attack
+ * surface. Gated behind a token so it is useless to anyone without access.
+ *
+ * Returns 404 — not 403 — when the token is missing or wrong. A 403 would
+ * CONFIRM the endpoint exists. A 404 tells a probe nothing.
+ *
+ * Registered LAST so that it sees every route registered above it.
+ */
+app.get("/debug/routes", (req, res) => {
+
+    const token = process.env.DEBUG_TOKEN;
+
+    // Fail closed. With no token configured, this route does not exist.
+    if (!token || req.get("x-debug-token") !== token) {
+        return res.status(404).json({ error: "Not found" });
+    }
+
+    const routes = app._router.stack
+        .filter((layer) => layer.route)
+        .map((layer) => ({
+            method: Object.keys(layer.route.methods)[0].toUpperCase(),
+            path: layer.route.path
+        }));
+
+    res.json({ count: routes.length, routes });
 
 });
 
