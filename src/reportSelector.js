@@ -90,21 +90,118 @@ export async function findReportSelector(page) {
     return null;
 }
 
-/** Read the selector's current state. Pure read; touches nothing. */
+// How long CreditHero may take to POPULATE the report dropdown over XHR.
+// Deliberately NOT the same constant as SELECTOR_TIMEOUT (line 37), which bounds
+// how long an ACTION may take. A discovery window and an action timeout are
+// different things, and sharing a name would couple them by accident.
+const SELECTOR_DISCOVERY_TIMEOUT = 20000;
+
+/**
+ * Read the selector's current state. Pure read; touches nothing.
+ *
+ * ===========================================================================
+ * THE SELECTOR EXISTING IS NOT THE SELECTOR BEING POPULATED.
+ *
+ * findReportSelector() takes a SINGLE SNAPSHOT of document.querySelectorAll
+ * ("select"). It has no wait of any kind. CreditHero fetches the report history
+ * over XHR after the page load event, so a snapshot taken the moment the page
+ * settles sees either no <select> at all, or one with no options yet — and we
+ * report REPORT_SELECTOR_UNREADABLE on a page whose selector is perfectly fine
+ * and arrives half a second later.
+ *
+ * This is the SAME bug as the Edit Profile modal: we queried for state that
+ * arrives asynchronously, exactly once, with no wait. It passes when we win the
+ * race and fails when we lose it — which is precisely why the standalone spike
+ * found the dates and this run did not.
+ *
+ * We poll for the real end-state rather than sleeping. The reader stays the
+ * single authoritative implementation; only its patience changes.
+ * ===========================================================================
+ */
 export async function readReportSelector(page) {
-    const found = await findReportSelector(page);
+    const deadline = Date.now() + SELECTOR_DISCOVERY_TIMEOUT;
+
+    let found = null;
+
+    while (Date.now() < deadline) {
+        found = await findReportSelector(page);
+
+        if (found) break;
+
+        await page.waitForTimeout(500);
+    }
 
     if (!found) {
+        // ---- REPORT WHAT WE ACTUALLY SAW -----------------------------------
+        //
+        // "Could not locate a report selector" cannot distinguish TWO completely
+        // different failures:
+        //
+        //   ZERO selects on the page        -> we are on the wrong page, or it
+        //                                      never loaded.
+        //   Selects present, but their
+        //   options are not report dates    -> we are on the right page but the
+        //                                      dropdown is empty, or CreditHero
+        //                                      changed its markup.
+        //
+        // Those need opposite fixes, and the old message pointed at neither.
+        const seen = await snapshotSelects(page);
+
         return {
             ok: false,
             error:
-                "Could not locate a report selector containing recognisable report dates. No selector " +
-                "is guessed. Processing stops rather than reading an unidentified control.",
+                `Could not locate a report selector containing recognisable report dates after ` +
+                `${SELECTOR_DISCOVERY_TIMEOUT / 1000}s. No selector is guessed — processing stops rather than ` +
+                `reading an unidentified control. ` +
+                (seen.length === 0
+                    ? `NO <select> elements were visible on this page at all, which suggests we are ` +
+                      `not on the report page, or it never finished loading.`
+                    : `${seen.length} visible <select> element(s) were found, but none carried options ` +
+                      `that parse as report dates. See selectsSeen.`),
             selector: null,
+            selectsSeen: seen,
+            currentUrl: page.url(),
         };
     }
 
     return { ok: true, selector: found.parsed, raw: found.select };
+}
+
+/**
+ * Every visible <select> on the page, with its options. Diagnostic only.
+ *
+ * Read-only. Touches nothing. Exists so a failed read produces EVIDENCE rather
+ * than another round of guessing at what CreditHero rendered.
+ */
+async function snapshotSelects(page) {
+    const seen = [];
+
+    for (const frame of page.frames()) {
+        try {
+            const selects = await frame.evaluate(() => {
+                const visible = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const s = window.getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
+                };
+
+                return Array.from(document.querySelectorAll("select"))
+                    .filter(visible)
+                    .map((sel) => ({
+                        id: sel.id || null,
+                        name: sel.getAttribute("name"),
+                        optionCount: sel.options.length,
+                        options: Array.from(sel.options).slice(0, 12).map((o) => (o.text || "").trim()),
+                    }));
+            });
+
+            seen.push(...selects);
+        } catch {
+            // detached or cross-origin frame
+        }
+    }
+
+    return seen;
 }
 
 /**
