@@ -50,7 +50,7 @@
 import {
     KEY_PREFIX, mintKey, resolveKey, buildRegistry, RESOLUTION,
     accountSignatures, tradelineSignatures, inquirySignatures,
-    readVendorIdentifiers,
+    readVendorIdentifiers, acctLast4, furnisherNorm,
 } from "./itemKey.js";
 
 export const MODEL_VERSION = "BT-CRM-1.1";
@@ -322,6 +322,117 @@ function normalizeBureau(sourceType) {
  * `basis` records whether this liability spoke for one bureau or several. It is
  * the difference between a fact we may assert and a fact we may only dispute.
  */
+/**
+ * ===========================================================================
+ * IDENTITY OF A BUREAU TRADELINE — for FOLDING within one report.
+ *
+ * The legal unit is the BUREAU TRADELINE: "Navy Federal on TransUnion". That is
+ * what a bureau reinvestigates, so that is what we dispute.
+ *
+ * Array's ROW STRUCTURE is not the business model. It may serialise one bureau
+ * tradeline as a merged {TU, EXP} row AND a separate {TU} row in the same report.
+ * Both are describing the SAME TransUnion tradeline. They are not a collision to
+ * reject — they are two observations to fold.
+ *
+ * IDENTITY IS DELIBERATELY NARROW AND STABLE:
+ *   bureau + masked-account-last-4 + normalized furnisher.
+ *
+ * NOT in identity, ON PURPOSE:
+ *   - Balance, status, dates, payment history — these are MUTABLE. A value
+ *     mismatch between two observations of the same tradeline is expected, and
+ *     must never split one tradeline into two.
+ *   - Tradeline hash — CHANGE DETECTION ONLY (§7.4). It incorporates mutable data
+ *     by design, so hash drift is expected on the same tradeline. Letting it into
+ *     identity would fail closed on tradelines that are unambiguously the same.
+ *
+ * We fold when identity matches. We fail closed ONLY when identity itself cannot
+ * be established as the same — a different masked account or a different furnisher.
+ * ===========================================================================
+ */
+function tradelineIdentity(bureau, maskedAccount, furnisher) {
+    return {
+        bureau,
+        last4: acctLast4(maskedAccount),
+        // The SAME normalization the key cascade uses (itemKey.furnisherNorm),
+        // including its alias table — so a tradeline's fold identity and its key
+        // identity can never disagree about who the furnisher is.
+        furnisher_norm: furnisherNorm(furnisher),
+    };
+}
+
+/**
+ * Do two identities denote the SAME bureau tradeline?
+ *
+ * Same bureau is a precondition (we only ever compare within one bureau slot).
+ * Then: the masked-account last-4 must match, and the normalized furnisher must
+ * match. A null on EITHER side of a field is NOT a match — we do not fold on
+ * absence, because "we could not read the account number" is not evidence that
+ * two tradelines are the same.
+ */
+function sameTradelineIdentity(a, b) {
+    if (a.bureau !== b.bureau) return false;
+
+    // last-4 must be present on both and equal. Absence never confirms identity.
+    if (a.last4 === null || b.last4 === null || a.last4 !== b.last4) return false;
+
+    // furnisher must be present on both and equal.
+    if (a.furnisher_norm === null || b.furnisher_norm === null) return false;
+    if (a.furnisher_norm !== b.furnisher_norm) return false;
+
+    return true;
+}
+
+/**
+ * Fold a NEW observation into an EXISTING bureau tradeline of the same identity.
+ *
+ *   - BUREAU-SPECIFIC WINS. A row naming only this bureau is that bureau's own
+ *     reporting; a merged row's value is SHARED across bureaus and less
+ *     specifically attributable. When both exist, the bureau-specific one is the
+ *     tradeline's observation.
+ *   - THE LOSER IS NOT DISCARDED. It is preserved under folded_observations, so a
+ *     value the winner overrode — a status the merged row disagreed on — remains
+ *     available to the Intelligence Engine as evidence. It is NEVER asserted in a
+ *     letter; it is retained, not used.
+ *
+ * This function decides ONLY which observation is primary and records the other.
+ * It never invents a value and never blends two observations into a third.
+ */
+function foldInto(existing, incoming) {
+    const existingSpecific = existing.observation.basis === BASIS.BUREAU_SPECIFIC;
+    const incomingSpecific = incoming.observation.basis === BASIS.BUREAU_SPECIFIC;
+
+    // Default: keep existing as primary, record incoming as folded-away.
+    let primary = existing;
+    let secondary = incoming;
+
+    // Bureau-specific beats shared. If the incoming one is specific and the
+    // current primary is not, promote the incoming observation.
+    if (incomingSpecific && !existingSpecific) {
+        primary = incoming;
+        secondary = existing;
+    }
+
+    const folded = primary.folded_observations ?? [];
+
+    folded.push({
+        from_row: secondary.source_row_index,
+        basis: secondary.observation.basis,
+        observation: secondary.observation,
+        vendor_identifiers: secondary.vendor_identifiers,
+        note:
+            "Folded away: a second observation of the SAME bureau tradeline. The " +
+            "bureau-specific observation is primary. Retained as evidence for the " +
+            "Intelligence Engine; never asserted in a letter.",
+    });
+
+    // Carry any folded history the secondary itself accumulated.
+    for (const f of secondary.folded_observations ?? []) folded.push(f);
+
+    primary.folded_observations = folded;
+
+    return primary;
+}
+
 function buildObservation(liability, basis, sharedWith, track) {
     return {
         basis,
@@ -550,42 +661,82 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
             for (const bureau of bureaus) {
                 const sharedWith = bureaus.filter((b) => b !== bureau);
 
-                // ---- (ACCOUNT, BUREAU) COLLISION -> FAIL CLOSED ---------------
+                const furnisher = readCreditor(liability);
+                const maskedAccount = readField(liability, "masked_account", track);
+                const observation = buildObservation(liability, basis, sharedWith, track);
+
+                const candidateTradeline = {
+                    bureau,
+                    furnisher,
+                    masked_account: maskedAccount,
+                    observation,
+                    vendor_identifiers: readVendorIdentifiers(liability),
+                    source_row_index: index,
+                    identity: tradelineIdentity(bureau, maskedAccount, furnisher),
+                    raw: liability,
+                };
+
+                // ---- COLLISION IS THE NORMAL CASE. FOLD, DON'T REJECT. --------
                 //
-                // Both shapes coexist in this payload. One bureau can therefore
-                // report one account through TWO liabilities — a merged {TU, EXP}
-                // row AND a separate {TU} row.
-                //
-                // That yields TWO TransUnion tradelines for one account: two
-                // letters about the same item, or a reconciliation that
-                // double-counts. WE DO NOT MERGE THEM AND WE DO NOT PICK ONE.
-                // A wrong key is worse than no key (§7.6).
+                // The legal unit is the BUREAU TRADELINE, not Array's row. Array
+                // may describe one TransUnion tradeline as a merged {TU, EXP} row
+                // AND a separate {TU} row in the same report. Both observe the SAME
+                // tradeline; they are folded, not treated as two.
                 if (byBureau.has(bureau)) {
                     const existing = byBureau.get(bureau);
 
-                    errors.push(
-                        `(account, bureau) COLLISION: account ${stableAccountKey} is reported by ` +
-                        `${bureau} through TWO liability rows (${existing.source_row_index} and ${index}). ` +
-                        `Array's merge behaviour is inconsistent and we cannot tell which row is ` +
-                        `authoritative. Routing to manual review rather than merging or choosing.`
-                    );
+                    // FAIL CLOSED ONLY ON A GENUINE IDENTITY CONFLICT.
+                    //
+                    // Identity = bureau + masked-last-4 + normalized furnisher. If
+                    // these do not match, Array has put two DIFFERENT tradelines on
+                    // the same account+bureau slot, and folding would force us to
+                    // pick a masked account or a furnisher — fabrication. That still
+                    // routes to manual review.
+                    if (!sameTradelineIdentity(existing.identity, candidateTradeline.identity)) {
+                        errors.push(
+                            `(account, bureau) IDENTITY CONFLICT: account ${stableAccountKey}, ` +
+                            `bureau ${bureau}, rows ${existing.source_row_index} and ${index} share an ` +
+                            `Array account id and bureau but differ in tradeline IDENTITY ` +
+                            `(masked account or furnisher). These are not the same tradeline and we ` +
+                            `will not choose between them. Manual review.`
+                        );
 
-                    keyResolution.tradelines.ambiguous.push({
-                        stable_account_key: stableAccountKey,
-                        bureau,
-                        rows: [existing.source_row_index, index],
+                        keyResolution.tradelines.ambiguous.push({
+                            stable_account_key: stableAccountKey,
+                            bureau,
+                            rows: [existing.source_row_index, index],
+                            existing_identity: existing.identity,
+                            conflicting_identity: candidateTradeline.identity,
+                        });
+
+                        continue;
+                    }
+
+                    // Same identity -> fold. Bureau-specific wins; the other is kept
+                    // as folded-away evidence, never discarded, never asserted.
+                    const folded = foldInto(existing, candidateTradeline);
+
+                    // The folded tradeline keeps the existing key (identity is
+                    // unchanged), but adopts the winning observation and notes.
+                    byBureau.set(bureau, {
+                        ...existing,
+                        observation: folded.observation,
+                        vendor_identifiers: folded.vendor_identifiers,
+                        source_row_index: folded.source_row_index,
+                        folded_observations: folded.folded_observations,
                     });
+
+                    keyResolution.tradelines.folded =
+                        (keyResolution.tradelines.folded ?? 0) + 1;
 
                     continue;
                 }
 
-                const observation = buildObservation(liability, basis, sharedWith, track);
-
                 const tlSigs = tradelineSignatures(
                     {
                         "@TradelineHashSimple": liability["@TradelineHashSimple"] ?? null,
-                        masked_account: readField(liability, "masked_account", track),
-                        furnisher: readCreditor(liability),
+                        masked_account: maskedAccount,
+                        furnisher,
                         bureau,
                     },
                     stableAccountKey
@@ -608,14 +759,8 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
 
                 byBureau.set(bureau, {
                     stable_item_key: tlResolved.key,
-                    bureau,
-                    furnisher: readCreditor(liability),
-                    masked_account: readField(liability, "masked_account", track),
-                    observation,
+                    ...candidateTradeline,
                     signatures: tlSigs.map((s) => s.value),
-                    vendor_identifiers: readVendorIdentifiers(liability),
-                    source_row_index: index,
-                    raw: liability,
                 });
             }
         }
