@@ -291,12 +291,38 @@ function toBool(value) {
     return null;
 }
 
+/**
+ * Coerce a reported date string to ISO YYYY-MM-DD for REASONING.
+ *
+ * The reported string is preserved untouched in Layer 2; this is Layer 1 only.
+ *
+ * Handles the formats a credit report actually uses: ISO (2022-05-01) and US
+ * (05/01/2022). A value we CANNOT parse returns null — never a guess. That matters:
+ * a normalized DOFD feeds the obsolescence guardrail (BT-DM-0051) and DOFD-conflict
+ * (BT-DM-0034), and a silently-null date would make obsolescence INDETERMINATE
+ * rather than computed — the guardrail would never fire, with no error. The exact
+ * date FORMAT in the payload is not yet confirmed from production, so we parse the
+ * plausible ones and return null (not a guess) for anything else.
+ */
 function toDate(value) {
     if (!value) return null;
 
-    const m = String(value).match(/(\d{4})-(\d{2})-(\d{2})/);
+    const str = String(value).trim();
 
-    return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+    // ISO: 2022-05-01
+    let m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+
+    // US: 05/01/2022  or  5/1/2022
+    m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (m) {
+        const mm = m[1].padStart(2, "0");
+        const dd = m[2].padStart(2, "0");
+        return `${m[3]}-${mm}-${dd}`;
+    }
+
+    // Anything else -> null. NOT a guess. The reported string still holds the truth.
+    return null;
 }
 
 function toArray(v) {
@@ -433,63 +459,151 @@ function foldInto(existing, incoming) {
     return primary;
 }
 
+/**
+ * ===========================================================================
+ * TWO LAYERS, PER THE BUREAU FIDELITY STANDARD™.
+ *
+ *   reported{}   — LAYER 2. Every value EXACTLY as the bureau wrote it, as a
+ *                  STRING. "$4,200.00" stays "$4,200.00". A date stays in the
+ *                  bureau's own format. This is authoritative for anything a
+ *                  human outside the AI ever sees — above all, letters.
+ *
+ *   normalized{} — Coerced values for the Intelligence Engine to REASON with:
+ *                  4200 (number), "2022-05-01" (ISO date). Internal only. Never
+ *                  the source of anything printed.
+ *
+ * Each raw string is read ONCE, then kept in `reported` AND coerced into
+ * `normalized`. The original is never thrown away — which was the latent
+ * violation before this refactor: toNumber/toDate/toBool discarded the bureau's
+ * own formatting, so a faithful letter could not have been generated from the
+ * model even though the model claimed to hold the data.
+ *
+ * `basis` travels alongside (§3.3): a SHARED value is preserved verbatim but is
+ * not individually attributed to this bureau.
+ * ===========================================================================
+ */
 function buildObservation(liability, basis, sharedWith, track) {
+    // Read every field ONCE, as the raw string the bureau wrote.
+    const raw = {
+        balance: readField(liability, "balance", track),
+        past_due: readField(liability, "past_due", track),
+        monthly_payment: readField(liability, "monthly_payment", track),
+        credit_limit: readField(liability, "credit_limit", track),
+        high_balance: readField(liability, "high_balance", track),
+
+        date_opened: readField(liability, "date_opened", track),
+        date_reported: readField(liability, "date_reported", track),
+        date_closed: readField(liability, "date_closed", track),
+        dofd: readField(liability, "dofd", track),
+        last_payment_date: readField(liability, "last_payment_date", track),
+
+        account_status: readField(liability, "raw_account_status", track),
+        account_type: readField(liability, "raw_account_type", track),
+        industry: readField(liability, "raw_industry_text", track),
+        account_status_type: readField(liability, "account_status_type", track),
+        responsibility: readField(liability, "responsibility", track),
+
+        months_reviewed: readField(liability, "months_reviewed", track),
+        terms_months: readField(liability, "terms_months", track),
+
+        is_closed: readField(liability, "is_closed", track),
+        is_chargeoff: readField(liability, "is_chargeoff", track),
+        is_collection: readField(liability, "is_collection", track),
+        is_mortgage: readField(liability, "is_mortgage", track),
+        is_secured: readField(liability, "is_secured", track),
+        is_student_loan: readField(liability, "is_student_loan", track),
+        is_fed_guaranteed_student_loan: readField(liability, "is_fed_guaranteed_student_loan", track),
+        consumer_disputed: readField(liability, "consumer_disputed", track),
+        derogatory: readField(liability, "derogatory", track),
+    };
+
+    const paymentHistory = readPaymentPattern(liability);
+    const lateCounts = readLateCounts(liability);
+    const remarks = readComments(liability);
+
     return {
         basis,
         shared_with: sharedWith.length ? sharedWith : null,
 
-        balance: toNumber(readField(liability, "balance", track)),
-        past_due: toNumber(readField(liability, "past_due", track)),
-        monthly_payment: toNumber(readField(liability, "monthly_payment", track)),
-        credit_limit: toNumber(readField(liability, "credit_limit", track)),
-        high_balance: toNumber(readField(liability, "high_balance", track)),
+        // ---- LAYER 2: exactly as the bureau reported it. Strings, verbatim. ----
+        reported: {
+            balance: raw.balance,
+            past_due: raw.past_due,
+            monthly_payment: raw.monthly_payment,
+            credit_limit: raw.credit_limit,
+            high_balance: raw.high_balance,
 
-        date_opened: toDate(readField(liability, "date_opened", track)),
-        date_reported: toDate(readField(liability, "date_reported", track)),
-        date_closed: toDate(readField(liability, "date_closed", track)),
-        date_of_first_delinquency: toDate(readField(liability, "dofd", track)),
-        last_payment_date: toDate(readField(liability, "last_payment_date", track)),
+            date_opened: raw.date_opened,
+            date_reported: raw.date_reported,
+            date_closed: raw.date_closed,
+            dofd: raw.dofd,
+            last_payment_date: raw.last_payment_date,
 
-        // Verbatim. We do not map raw status codes to meanings we have not verified.
-        account_status_raw: readField(liability, "raw_account_status", track),
-        account_type_raw: readField(liability, "raw_account_type", track),
-        industry_raw: readField(liability, "raw_industry_text", track),
+            account_status: raw.account_status,
+            account_type: raw.account_type,
+            account_status_type: raw.account_status_type,
+            industry: raw.industry,
+            responsibility: raw.responsibility,
 
-        // OBJECTIVE INDICATORS. Facts. The Strategy Engine decides what they mean.
-        is_closed: toBool(readField(liability, "is_closed", track)),
-        is_chargeoff: toBool(readField(liability, "is_chargeoff", track)),
-        is_collection: toBool(readField(liability, "is_collection", track)),
-        is_mortgage: toBool(readField(liability, "is_mortgage", track)),
-        is_secured: toBool(readField(liability, "is_secured", track)),
-        is_student_loan: toBool(readField(liability, "is_student_loan", track)),
-        is_fed_guaranteed_student_loan: toBool(
-            readField(liability, "is_fed_guaranteed_student_loan", track)
-        ),
+            months_reviewed: raw.months_reviewed,
+            terms_months: raw.terms_months,
 
-        // Constitution: authorized-user accounts are never disputed. Captured
-        // VERBATIM and NOT interpreted here.
-        //
-        // We do NOT map this to a boolean is_authorized_user, because we have not
-        // yet seen the VALUE VOCABULARY — "AuthorizedUser" / "Authorized User" /
-        // "A" / "3" are all plausible, and a wrong guess would not fail loudly. It
-        // would silently dispute exactly the accounts the Constitution protects.
-        //
-        // The Decision Engine interprets it, against a vocabulary read off the real
-        // data (see POST /debug/field-map).
-        responsibility: readField(liability, "responsibility", track),
+            is_closed: raw.is_closed,
+            is_chargeoff: raw.is_chargeoff,
+            is_collection: raw.is_collection,
+            is_mortgage: raw.is_mortgage,
+            is_secured: raw.is_secured,
+            is_student_loan: raw.is_student_loan,
+            is_fed_guaranteed_student_loan: raw.is_fed_guaranteed_student_loan,
+            consumer_disputed: raw.consumer_disputed,
+            derogatory: raw.derogatory,
 
-        account_status_type: readField(liability, "account_status_type", track),
+            payment_history: paymentHistory?.data ?? null,
+            remarks,
+        },
 
-        // Facts. The Strategy Engine decides what they mean.
-        consumer_disputed: toBool(readField(liability, "consumer_disputed", track)),
-        derogatory: toBool(readField(liability, "derogatory", track)),
+        // ---- NORMALIZED: for AI reasoning only. Never printed. ----------------
+        normalized: {
+            balance: toNumber(raw.balance),
+            past_due: toNumber(raw.past_due),
+            monthly_payment: toNumber(raw.monthly_payment),
+            credit_limit: toNumber(raw.credit_limit),
+            high_balance: toNumber(raw.high_balance),
 
-        months_reviewed: toNumber(readField(liability, "months_reviewed", track)),
-        terms_months: toNumber(readField(liability, "terms_months", track)),
+            date_opened: toDate(raw.date_opened),
+            date_reported: toDate(raw.date_reported),
+            date_closed: toDate(raw.date_closed),
+            date_of_first_delinquency: toDate(raw.dofd),
+            last_payment_date: toDate(raw.last_payment_date),
 
-        payment_history: readPaymentPattern(liability),
-        late_counts: readLateCounts(liability),
-        remarks: readComments(liability),
+            is_closed: toBool(raw.is_closed),
+            is_chargeoff: toBool(raw.is_chargeoff),
+            is_collection: toBool(raw.is_collection),
+            is_mortgage: toBool(raw.is_mortgage),
+            is_secured: toBool(raw.is_secured),
+            is_student_loan: toBool(raw.is_student_loan),
+            is_fed_guaranteed_student_loan: toBool(raw.is_fed_guaranteed_student_loan),
+            consumer_disputed: toBool(raw.consumer_disputed),
+            derogatory: toBool(raw.derogatory),
+
+            months_reviewed: toNumber(raw.months_reviewed),
+            terms_months: toNumber(raw.terms_months),
+
+            // A normalized STATUS for reasoning. The Intelligence Engine classifies
+            // on this; letters use reported.account_status (Layer 2) verbatim. Kept
+            // as the raw string here — normalizeStatus() in the analyzer maps it —
+            // so the two layers never share a coercion the letter could inherit.
+            status: raw.account_status,
+            account_status_type: raw.account_status_type,
+
+            // Responsibility is NOT coerced — the Decision Engine interprets it
+            // against a vocabulary read from real data. We keep the string in both
+            // layers deliberately.
+            responsibility: raw.responsibility,
+
+            payment_history: paymentHistory,
+            late_counts: lateCounts,
+        },
     };
 }
 
