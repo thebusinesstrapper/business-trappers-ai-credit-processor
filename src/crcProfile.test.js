@@ -21,7 +21,7 @@
 import { readFileSync } from "fs";
 import { PROTECTED_FIELDS, WRITABLE_FIELDS } from "./crcClientStatus.js";
 import { FIELD_LABELS, REQUIRED_FIELDS } from "./crcClientProfile.js";
-import { verifyIdentity, IDENTITY_SOURCE } from "./intelligence/clientIdentity.js";
+import { verifyIdentity, IDENTITY_SOURCE, normalizeIdentity, canonicalState } from "./intelligence/clientIdentity.js";
 
 let passed = 0, failed = 0;
 const check = (n, a, e) => {
@@ -57,7 +57,11 @@ for (const [name, pattern] of WRITE_APIS) {
     check(`reader contains no ${name}`, pattern.test(readerCode), false);
 }
 
-check("reader never clicks Save", /save/i.test(readerCode), false);
+// NOT /save/i — that matches "unSAVEd changes" in the error text. Same class of
+// false positive as /sue/ matching "isSUE". A guardrail that fires on innocent
+// text is one people learn to override, and then it protects nothing.
+check("reader never clicks a Save button", /getByRole\(\s*"button"\s*,\s*\{\s*name:\s*\/\^?save/i.test(readerCode), false);
+check("reader has no Save locator at all", /\bSave\b(?![a-z-])/.test(readerCode.replace(/unsaved/gi, "")), false);
 check("reader declares fieldsModified: 0", /fieldsModified:\s*0/.test(readerCode), true);
 
 console.log("\n--- The read-only ROUTE cannot reach the writer ---");
@@ -123,7 +127,8 @@ console.log("\n=== THE PRODUCED IDENTITY PASSES THE LETTER ENGINE'S GATE ===\n")
 
 // The real check: what the reader builds must satisfy verifyIdentity(), or the
 // Letter Engine will reject it and we would only discover that at letter time.
-const identity = {
+// Built exactly as the reader builds it: normalized at capture.
+const identity = normalizeIdentity({
     source: IDENTITY_SOURCE.CRC_CLIENT_PROFILE,
     crcClientId: "15",
     retrievedAt: "2026-07-13T00:00:00Z",
@@ -137,7 +142,7 @@ const identity = {
     postal_code: "32311",
     email: "e@example.com",
     phone: "555-0100",
-};
+});
 
 const verified = verifyIdentity(identity);
 
@@ -154,6 +159,115 @@ check("no CRC client id -> REFUSED", noClientId.ok, false);
 
 const noAddress = verifyIdentity({ ...identity, address_line_1: null });
 check("no address -> REFUSED", noAddress.ok, false);
+
+console.log("\n=== NORMALIZATION AT CAPTURE ===\n");
+
+// The DOM gives us whatever CRC's form holds. Those strings go on a legal
+// document AND are the values we compare — so an un-normalized identity produces
+// two bugs: a double space printed on a bureau letter, and a false mismatch in
+// the status writer's protected-field check that looks exactly like corruption.
+const messy = normalizeIdentity({
+    source: IDENTITY_SOURCE.CRC_CLIENT_PROFILE,
+    crcClientId: "15",
+    firstName: "  Elizabeth ",
+    middleName: "Suzanne",
+    lastName: " Kelley  ",
+    name: "  Elizabeth   Suzanne  Kelley ",
+    address_line_1: "5084  Louvinia   Dr\n",
+    city: " Tallahassee ",
+    state: "Florida",
+    postal_code: " 32311 ",
+    email: "  e@example.com ",
+    phone: " 555-0100 ",
+});
+
+check("collapses repeated whitespace", messy.name, "Elizabeth Suzanne Kelley");
+check("trims the address", messy.address_line_1, "5084 Louvinia Dr");
+check("trims the city", messy.city, "Tallahassee");
+check("trims the ZIP", messy.postal_code, "32311");
+check("marks itself normalized", messy.normalized, true);
+
+console.log("\n--- State canonicalization ---");
+
+check("Florida -> FL", canonicalState("Florida"), "FL");
+check("florida -> FL", canonicalState("florida"), "FL");
+check("FL -> FL", canonicalState("FL"), "FL");
+check("fl -> FL", canonicalState("fl"), "FL");
+check("Fla. -> FL", canonicalState("Fla."), "FL");
+check("New York -> NY", canonicalState("New York"), "NY");
+check("normalized identity carries FL", messy.state, "FL");
+
+// An unrecognised state FAILS CLOSED. Guessing is how "FL" becomes "FI", and a
+// letter addressed to an unparseable state does not arrive.
+check("unrecognised state -> null (never a guess)", canonicalState("Flrida"), null);
+check("empty state -> null", canonicalState(""), null);
+
+console.log("\n--- Normalization is CONSERVATIVE, not cleanup ---");
+
+// We are not the authority on her address. CRC is. We collapse whitespace and
+// canonicalize the state — we do NOT rewrite what CRC holds.
+const conservative = normalizeIdentity({
+    source: IDENTITY_SOURCE.CRC_CLIENT_PROFILE,
+    crcClientId: "15",
+    name: "Elizabeth Kelley",
+    address_line_1: "5084 Louvinia Dr",
+    city: "Tallahassee",
+    state: "FL",
+    postal_code: "32311-1234",
+});
+
+check("does NOT expand 'Dr' to 'Drive'", conservative.address_line_1, "5084 Louvinia Dr");
+check("does NOT reformat a ZIP+4", conservative.postal_code, "32311-1234");
+
+console.log("\n--- Raw strings are preserved for audit, and read by nobody ---");
+
+check("raw is retained", messy.raw.state, "Florida");
+check("raw address retained verbatim", messy.raw.address_line_1, "5084  Louvinia   Dr\n");
+
+console.log("\n=== VERIFICATION COMPARES NORMALIZED VALUES ===\n");
+
+check("normalized identity VERIFIES", verifyIdentity(messy).ok, true);
+
+// Raw DOM strings must never reach letter generation. We REFUSE them rather than
+// normalizing on the fly — a silent fix here would mean the raw string is what
+// actually flowed downstream, and the letter would still print the double space.
+const unnormalized = {
+    source: IDENTITY_SOURCE.CRC_CLIENT_PROFILE,
+    crcClientId: "15",
+    name: "Elizabeth  Kelley",
+    address_line_1: "5084 Louvinia Dr ",
+    city: "Tallahassee",
+    state: "Florida",
+    postal_code: "32311",
+};
+
+const rawResult = verifyIdentity(unnormalized);
+check("un-normalized identity is REFUSED", rawResult.ok, false);
+check("...flagged as not normalized", rawResult.errors.some((e) => /has not been normalized/i.test(e)), true);
+
+const badState = verifyIdentity({ ...messy, state: "Florida" });
+check("non-canonical state is REFUSED", badState.ok, false);
+check("...even though everything else is fine", badState.errors.some((e) => /canonical two-letter code/i.test(e)), true);
+
+const doubleSpace = verifyIdentity({ ...messy, address_line_1: "5084  Louvinia Dr" });
+check("double space in address is REFUSED", doubleSpace.ok, false);
+
+console.log("\n=== FAILURE TO CLOSE THE MODAL IS A FAILED NAVIGATION ===\n");
+
+const readerSrc = readFileSync(new URL("./crcClientProfile.js", import.meta.url), "utf-8");
+
+check("MODAL_NOT_CLOSED is a returned error code", /error_code:\s*"MODAL_NOT_CLOSED"/.test(readerSrc), true);
+check("...it sets ok: false", /ok: false,\s*\n\s*error_code: "MODAL_NOT_CLOSED"/.test(readerSrc), true);
+check("...and supplies NO identity downstream", /identityRead: identity,\s*\/\/ diagnostic only/.test(readerSrc), true);
+check("...and routes to a human", /error_code: "MODAL_NOT_CLOSED",[\s\S]{0,900}requiresHumanReview: true/.test(readerSrc), true);
+check("no longer a silent warning", /WARNING: could not close/.test(readerSrc), false);
+
+// READ MODE changed nothing, so a modal that refuses to close is not a benign UI
+// hiccup — an unsaved-changes prompt would prove a field WAS modified.
+check("names the unsaved-changes implication", /unsaved-changes prompt is blocking it, a field WAS/i.test(readerSrc), true);
+check("retries the close once before failing", /MAX_ATTEMPTS = 2/.test(readerSrc), true);
+
+check("state that will not canonicalize STOPS the run", /error_code: "STATE_NOT_CANONICAL"/.test(readerSrc), true);
 
 console.log(`\n${passed} passed, ${failed} failed.\n`);
 if (failed > 0) process.exit(1);
