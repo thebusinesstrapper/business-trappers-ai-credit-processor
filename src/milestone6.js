@@ -185,8 +185,20 @@ export async function runMilestone6(data = {}) {
 
         if (!selector.ok) {
             return errorResponse("REPORT_SELECTOR_UNREADABLE",
-                `Could not read the report selector: ${selector.error}. Freshness is read from the ` +
-                    `selector and never inferred, so this is a hard stop.`, { milestone: "M6_CAPTURE" });
+                `Could not read the report selector: ${selector.error} Freshness is read from the ` +
+                    `selector and never inferred, so this is a hard stop.`,
+                {
+                    milestone: "M6_CAPTURE",
+
+                    // EVERY visible <select> we saw, with its options. This is what
+                    // separates "we are on the wrong page" (zero selects) from "we are
+                    // on the right page but the dropdown had not populated" (selects
+                    // present, options not report dates). The old error pointed at
+                    // neither, which is why a timing race looked like a broken reader.
+                    selectsSeen: selector.selectsSeen ?? null,
+                    creditHeroUrl: selector.currentUrl ?? chPage.url(),
+                    openedInNewTab: creditHero.openedInNewTab,
+                });
         }
 
         const parsed = selector.selector; // { reports, rejected, newest, count }
