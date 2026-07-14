@@ -321,6 +321,60 @@ app.post("/milestone-6", async (req, res) => {
  *
  * Registered LAST so that it sees every route registered above it.
  */
+
+/**
+ * Shared gate for the /debug routes.
+ *
+ * ---------------------------------------------------------------------------
+ * IT RETURNS 404, NOT 403 — DELIBERATELY. A 403 confirms to an unauthenticated
+ * caller that the endpoint exists.
+ *
+ * THE COST OF THAT CHOICE: from the outside, "route not deployed" and "wrong
+ * token" look IDENTICAL. That is fine for an attacker and terrible for us — it
+ * already sent us hunting a deploy problem that did not exist.
+ *
+ * So the REASON is logged SERVER-SIDE, where only Railway's log viewer can see
+ * it. The caller still learns nothing. We learn everything.
+ * ---------------------------------------------------------------------------
+ */
+function debugGateOpen(req, res, routeName) {
+    // Trim both sides. A token pasted into a Railway env var very often carries a
+    // trailing newline, and `"abc\n" !== "abc"` fails a comparison that is, to
+    // every human looking at it, obviously equal.
+    const expected = (process.env.DEBUG_TOKEN ?? "").trim();
+    const supplied = (req.get("x-debug-token") ?? "").trim();
+
+    if (!expected) {
+        console.error(
+            `[${routeName}] REFUSED: DEBUG_TOKEN is not set on this server. ` +
+            `The route IS deployed — set DEBUG_TOKEN in Railway and redeploy.`
+        );
+
+        res.status(404).json({ error: "Not found" });
+        return false;
+    }
+
+    if (!supplied) {
+        console.error(`[${routeName}] REFUSED: no x-debug-token header was supplied.`);
+
+        res.status(404).json({ error: "Not found" });
+        return false;
+    }
+
+    if (supplied !== expected) {
+        console.error(
+            `[${routeName}] REFUSED: x-debug-token did not match. ` +
+            `Supplied ${supplied.length} chars, expected ${expected.length}. ` +
+            `(Lengths are logged, values are NOT.)`
+        );
+
+        res.status(404).json({ error: "Not found" });
+        return false;
+    }
+
+    return true;
+}
+
 /**
  * =========================================================================
  * TEMPORARY — SCHEMA DISCOVERY ONLY. DELETE WHEN M7 IS COMPLETE.
@@ -345,11 +399,7 @@ app.post("/milestone-6", async (req, res) => {
  */
 app.post("/debug/skeleton-node", async (req, res) => {
 
-    const token = process.env.DEBUG_TOKEN;
-
-    if (!token || req.get("x-debug-token") !== token) {
-        return res.status(404).json({ error: "Not found" });
-    }
+    if (!debugGateOpen(req, res, "/debug/skeleton-node")) return;
 
     const path = req.body?.path;
 
@@ -396,12 +446,7 @@ app.post("/debug/skeleton-node", async (req, res) => {
 
 app.get("/debug/routes", (req, res) => {
 
-    const token = process.env.DEBUG_TOKEN;
-
-    // Fail closed. With no token configured, this route does not exist.
-    if (!token || req.get("x-debug-token") !== token) {
-        return res.status(404).json({ error: "Not found" });
-    }
+    if (!debugGateOpen(req, res, "/debug/routes")) return;
 
     const routes = app._router.stack
         .filter((layer) => layer.route)
@@ -417,5 +462,13 @@ app.get("/debug/routes", (req, res) => {
 app.listen(PORT, () => {
 
     console.log(`Business Trappers AI Credit Processor listening on port ${PORT}`);
+
+    // State it at boot. A 404 from a debug route is ambiguous by design; this line
+    // removes the ambiguity from the one place we can read without leaking it.
+    console.log(
+        process.env.DEBUG_TOKEN
+            ? "Debug routes: REGISTERED and DEBUG_TOKEN is set (/debug/routes, /debug/skeleton-node)."
+            : "Debug routes: REGISTERED but DEBUG_TOKEN is NOT SET — they will return 404 to every caller."
+    );
 
 });
