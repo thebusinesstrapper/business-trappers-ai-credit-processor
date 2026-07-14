@@ -223,23 +223,52 @@ export function reconcile({ report, analysis, decisions, strategies, letters }) 
     // ---- Per-bureau reconciliation ----------------------------------------
     const bureaus = [...new Set(extracted.map((e) => e.bureau).filter(Boolean))].sort();
 
-    const byBureau = bureaus.map((bureau) => {
-        const items = journeys.filter((j) => j.bureau === bureau);
-        const negatives = items.filter((j) => j.negative);
+    // Sections actually printed in each bureau's letter. THE GROUND TRUTH for
+    // what we are about to send.
+    const sectionsByBureau = new Map();
 
-        const disputed = negatives.filter((j) => j.disputed);
-        const excluded = negatives.filter((j) => j.exitReason?.startsWith("EXCLUDED"));
-        const heldBack = negatives.filter((j) => j.exitReason?.startsWith("WITHHELD"));
-        const noFindings = negatives.filter((j) => j.exitStage === "ANALYZED" && j.findingCount === 0);
-        const other = negatives.filter(
+    for (const letter of letters?.letters ?? []) {
+        sectionsByBureau.set(letter.bureau, (letter.accountSections ?? []).length);
+    }
+
+    const byBureau = bureaus.map((bureau) => {
+        const items = journeys.filter((j) => j.bureau === bureau && j.kind !== "INQUIRY");
+
+        // THE POPULATION IS EVERY TRADELINE — not just the negative ones.
+        //
+        // This was a real defect. Reconciling only negatives meant a DISPUTED
+        // tradeline that is not negative BY ITS OWN BUREAU'S DATA sat outside the
+        // population entirely, and could never fail to balance because it was
+        // never counted. Experian reporting an account as "Current" while
+        // TransUnion calls it a charge-off is exactly that case: disputable on
+        // cross-bureau variance, and invisible to a negatives-only count.
+        const negatives = items.filter((j) => j.negative);
+        const disputed = items.filter((j) => j.disputed);
+
+        const excluded = items.filter((j) => j.exitReason?.startsWith("EXCLUDED"));
+        const heldBack = items.filter((j) => j.exitReason?.startsWith("WITHHELD"));
+        const noFindings = items.filter((j) => j.exitStage === "ANALYZED" && j.findingCount === 0);
+        const other = items.filter(
             (j) => !j.disputed && !excluded.includes(j) && !heldBack.includes(j) && !noFindings.includes(j)
         );
 
-        const accountedFor = disputed.length + excluded.length + heldBack.length + noFindings.length + other.length;
+        const accountedFor =
+            disputed.length + excluded.length + heldBack.length + noFindings.length + other.length;
+
+        // ---- THE INVARIANT ------------------------------------------------
+        //
+        //   sum(letter account sections for this bureau) === disputed for this bureau
+        //
+        // A tradeline printed in a letter MUST exist in that bureau's population
+        // and MUST be counted as disputed. If these disagree, we are sending
+        // something reconciliation does not know about — which is precisely the
+        // condition reconciliation exists to make impossible.
+        const letterSections = sectionsByBureau.get(bureau) ?? 0;
+        const invariantHolds = letterSections === disputed.length;
 
         return {
             bureau,
-            totalTradelines: items.filter((j) => j.kind !== "INQUIRY").length,
+            totalTradelines: items.length,
             negativeTradelines: negatives.length,
 
             disputed: disputed.length,
@@ -248,16 +277,25 @@ export function reconcile({ report, analysis, decisions, strategies, letters }) 
             noFindings: noFindings.length,
             otherExit: other.length,
 
-            // THE CHECK. If this fails, an item vanished.
             accountedFor,
-            balances: accountedFor === negatives.length,
+            balances: accountedFor === items.length,
 
-            exits: negatives
+            letterAccountSections: letterSections,
+            invariantHolds,
+            invariantNote: invariantHolds
+                ? null
+                : `INVARIANT VIOLATED: the ${bureau} letter contains ${letterSections} account ` +
+                  `section(s), but reconciliation counts ${disputed.length} disputed tradeline(s). ` +
+                  `Every tradeline in a letter must be counted as disputed for that bureau. ` +
+                  `THE PACKAGE IS NOT CLIENT-READY.`,
+
+            exits: items
                 .filter((j) => !j.disputed)
                 .map((j) => ({
                     furnisher: j.furnisher,
                     stableItemKey: j.stableItemKey,
                     status: j.status,
+                    negative: j.negative,
                     exitStage: j.exitStage,
                     reason: j.exitReason,
                     bug: !!j.bug,
@@ -267,19 +305,23 @@ export function reconcile({ report, analysis, decisions, strategies, letters }) 
 
     const bugs = journeys.filter((j) => j.bug);
     const allBalance = byBureau.every((b) => b.balances);
+    const allInvariants = byBureau.every((b) => b.invariantHolds);
 
     return {
         schemaVersion: RECONCILE_SCHEMA_VERSION,
 
-        // The whole point. If this is false, do not trust the dispute package.
-        reconciles: allBalance && bugs.length === 0,
+        // The whole point. If this is false, THE PACKAGE IS NOT CLIENT-READY.
+        reconciles: allBalance && allInvariants && bugs.length === 0,
+        invariantsHold: allInvariants,
 
         totals: {
             extractedTradelines: extracted.filter((e) => e.kind !== "INQUIRY").length,
             extractedInquiries: extracted.filter((e) => e.kind === "INQUIRY").length,
             negativeTradelines: journeys.filter((j) => j.negative).length,
             disputed: journeys.filter((j) => j.disputed).length,
+            letterAccountSections: [...sectionsByBureau.values()].reduce((a, b) => a + b, 0),
             bugs: bugs.length,
+            invariantViolations: byBureau.filter((b) => !b.invariantHolds).length,
         },
 
         byBureau,
@@ -299,30 +341,40 @@ export function reconcile({ report, analysis, decisions, strategies, letters }) 
 export function formatReconciliation(r) {
     const out = [];
 
-    out.push("PIPELINE RECONCILIATION — every negative tradeline accounted for");
+    out.push("PIPELINE RECONCILIATION — every tradeline accounted for");
     out.push("=".repeat(78));
     out.push("");
-    out.push(`Extracted tradelines: ${r.totals.extractedTradelines}   Negative: ${r.totals.negativeTradelines}   Disputed: ${r.totals.disputed}`);
-    out.push(`RECONCILES: ${r.reconciles ? "YES — nothing disappeared" : "NO — SEE BUGS BELOW"}`);
+    out.push(`Tradelines captured: ${r.totals.extractedTradelines}   Negative: ${r.totals.negativeTradelines}   Disputed: ${r.totals.disputed}   Letter sections: ${r.totals.letterAccountSections}`);
+    out.push(`RECONCILES: ${r.reconciles ? "YES — nothing disappeared, every letter section is accounted for" : "NO — NOT CLIENT-READY. SEE BELOW."}`);
     out.push("");
 
     for (const b of r.byBureau) {
         out.push("-".repeat(78));
-        out.push(`${b.bureau.toUpperCase()}`);
+        out.push(b.bureau.toUpperCase());
         out.push("-".repeat(78));
-        out.push(`  Negative tradelines detected : ${b.negativeTradelines}`);
+        out.push(`  Total tradelines captured    : ${b.totalTradelines}`);
+        out.push(`  Of which negative/derogatory : ${b.negativeTradelines}`);
         out.push(`    -> Disputed                : ${b.disputed}`);
         out.push(`    -> Excluded (Constitution) : ${b.excluded}`);
         out.push(`    -> Withheld (unsendable)   : ${b.withheld}`);
-        out.push(`    -> No findings             : ${b.noFindings}`);
+        out.push(`    -> No action (no findings) : ${b.noFindings}`);
         out.push(`    -> Other exit              : ${b.otherExit}`);
-        out.push(`    ACCOUNTED FOR              : ${b.accountedFor} / ${b.negativeTradelines}  ${b.balances ? "BALANCES" : "*** DOES NOT BALANCE ***"}`);
+        out.push(`    ACCOUNTED FOR              : ${b.accountedFor} / ${b.totalTradelines}  ${b.balances ? "BALANCES" : "*** DOES NOT BALANCE ***"}`);
+        out.push("");
+        out.push(`  INVARIANT — letter sections == disputed`);
+        out.push(`    Letter account sections    : ${b.letterAccountSections}`);
+        out.push(`    Reconciled as disputed     : ${b.disputed}`);
+        out.push(`    ${b.invariantHolds ? "HOLDS" : "*** VIOLATED ***"}`);
+
+        if (!b.invariantHolds) {
+            out.push(`    ${b.invariantNote}`);
+        }
 
         if (b.exits.length) {
             out.push("");
-            out.push("  Every negative tradeline NOT disputed, and why:");
+            out.push("  Every tradeline NOT disputed, and why:");
             for (const e of b.exits) {
-                out.push(`    ${e.bug ? "[BUG] " : ""}${e.furnisher} (${e.status ?? "no status"})`);
+                out.push(`    ${e.bug ? "[BUG] " : ""}${e.furnisher} (${e.status ?? "no status"})${e.negative ? " [NEGATIVE]" : ""}`);
                 out.push(`      exited at ${e.exitStage}: ${e.reason}`);
             }
         }
