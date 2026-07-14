@@ -114,56 +114,225 @@ export function buildSkeleton(value, path = "$", depth = 0, nodes = { count: 0 }
 /**
  * Does this payload look like a complete credit report, and how is it shaped?
  *
- * Directly answers the Extraction System's open questions.
+ * ===========================================================================
+ * DIAGNOSTIC ONLY. THIS MUST NEVER GATE ANYTHING.
+ *
+ * It reports what was FOUND. It expresses no view on whether the report is
+ * trustworthy, whether a dispute is warranted, or whether extraction may proceed.
+ * Per Extraction System §5.2: COMPLETENESS IS NOT CONFIDENCE.
+ *
+ * `looks_like_complete_report` is precisely the field a future caller would be
+ * tempted to branch on — and a heuristic that becomes load-bearing is a heuristic
+ * that will one day silently drop a real report. If a gate is ever needed, it goes
+ * in the Normalization Engine, against the parsed model, not against a regex over
+ * a JSON string.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY IT REPORTED FALSE ON A PERFECTLY GOOD REPORT
+ *
+ * Every pattern anchored on a quote followed by a generic English word —
+ * `"tradelines"`, `"inquiry"`, `"scores"`. MISMO 2.4 names its containers
+ * `"CREDIT_LIABILITY"`, `"CREDIT_INQUIRY"`, `"CREDIT_SCORE"`. The quote is
+ * followed by `CREDIT_`, so every pattern missed, and the analyzer declared a
+ * complete tri-bureau MISMO report to be "not a report".
+ *
+ * The analyzer was written against an imagined schema. The payload is real.
+ * ===========================================================================
  */
+
+/**
+ * MISMO 2.4 container names, as emitted by Array.io.
+ *
+ * These are the names CONFIRMED present in the captured payload. Anything not
+ * confirmed is detected but never assumed.
+ */
+const MISMO_SECTIONS = Object.freeze({
+    tradelines:           ['"CREDIT_LIABILITY"'],
+    inquiries:            ['"CREDIT_INQUIRY"'],
+    scores:               ['"CREDIT_SCORE"'],
+    credit_files:         ['"CREDIT_FILE"'],
+    summary:              ['"CREDIT_SUMMARY"'],
+    public_records:       ['"CREDIT_PUBLIC_RECORD"'],
+    personal_information: ['"CREDIT_BORROWER"', '"BORROWER"', '"_RESIDENCE"'],
+    payment_history:      ['"_PAYMENT_PATTERN"', '"CREDIT_LIABILITY_PAYMENT_PATTERN"'],
+    repositories:         ['"CREDIT_REPOSITORY"', '"CREDIT_REPOSITORY_INCLUDED"'],
+});
+
+/**
+ * Generic (non-MISMO) shape. Retained so the analyzer still says something useful
+ * if Credit Hero ever serves a different payload.
+ */
+const GENERIC_SECTIONS = Object.freeze({
+    tradelines:           ['"trade"', '"tradeline"', '"tradelines"', '"accounts"'],
+    collections:          ['"collection"', '"collections"'],
+    inquiries:            ['"inquiry"', '"inquiries"'],
+    personal_information: ['"personal"', '"consumer"', '"identity"', '"names"', '"addresses"'],
+    public_records:       ['"public_records"', '"publicRecords"'],
+    payment_history:      ['"payment_history"', '"paymentHistory"'],
+    scores:               ['"score"', '"scores"'],
+});
+
+/**
+ * COLLECTIONS ARE NOT A SEPARATE MISMO SECTION.
+ *
+ * In MISMO 2.4 a collection is a CREDIT_LIABILITY carrying a collection marker —
+ * not a container of its own. Looking for a "collections" section and finding
+ * none does not mean the report has no collections; it means the schema does not
+ * work that way.
+ *
+ * The old analyzer would have reported `collections: false` on a report full of
+ * them, which is worse than reporting nothing at all.
+ */
+const MISMO_COLLECTION_MARKERS = [
+    '"IsCollectionIndicator"',
+    '"CollectionIndicator"',
+    '"_ACCOUNT_TYPE":"Collection"',
+    'Collection',
+];
+
+/** CREDIT_LIABILITY may be a single object or an array. Normalise to an array. */
+function asArray(v) {
+    if (v == null) return [];
+    return Array.isArray(v) ? v : [v];
+}
+
+/**
+ * THE §10.1 QUESTION — answered from STRUCTURE, not from a string match.
+ *
+ * Are the three bureaus nested BENEATH one tradeline (merged), or is there one
+ * tradeline per bureau (separate)?
+ *
+ * This determines whether the stable_account_key matching cascade (Extraction
+ * §7.5A) is load-bearing in full, or largely collapses because Array hands us the
+ * grouping already done.
+ *
+ * WE DO NOT GUESS. If the liabilities do not clearly show one shape or the other,
+ * this returns "unknown" and a human reads the skeleton. An analyzer that
+ * confidently reports the wrong nesting would send the entire identity-key design
+ * down the wrong path — and we would not find out until two bureaus' worth of one
+ * account were being treated as two unrelated accounts, or vice versa.
+ */
+function detectBureauNesting(json) {
+    const response = json?.CREDIT_RESPONSE ?? json;
+
+    const liabilities = asArray(response?.CREDIT_LIABILITY);
+
+    if (liabilities.length === 0) {
+        return "unknown — no CREDIT_LIABILITY entries to inspect";
+    }
+
+    let merged = 0;
+    let separate = 0;
+
+    for (const liability of liabilities) {
+        // MERGED: the liability owns CREDIT_REPOSITORY children, one per bureau.
+        const repositories = asArray(liability?.CREDIT_REPOSITORY);
+
+        // SEPARATE: the liability itself is stamped with exactly ONE bureau.
+        const ownSource =
+            liability?.CreditRepositorySourceType ??
+            liability?._CreditRepositorySourceType ??
+            null;
+
+        if (repositories.length > 0) merged++;
+        else if (ownSource) separate++;
+    }
+
+    if (merged > 0 && separate === 0) {
+        return `MERGED — CREDIT_REPOSITORY nested beneath CREDIT_LIABILITY (${merged}/${liabilities.length} liabilities)`;
+    }
+
+    if (separate > 0 && merged === 0) {
+        return `SEPARATE — each CREDIT_LIABILITY stamped with one bureau (${separate}/${liabilities.length} liabilities)`;
+    }
+
+    if (merged > 0 && separate > 0) {
+        return `MIXED — ${merged} merged, ${separate} separate. Inspect the skeleton; do not assume either.`;
+    }
+
+    return "unknown — liabilities carry neither CREDIT_REPOSITORY children nor a bureau source type";
+}
+
 export function analyzeReportShape(json) {
     const flat = JSON.stringify(json);
 
-    const has = (pattern) => new RegExp(pattern, "i").test(flat);
+    const hasAny = (needles) => needles.some((n) => flat.toLowerCase().includes(n.toLowerCase()));
 
-    const sections = {
-        tradelines: has('"(trade|tradelines?|accounts?)"'),
-        collections: has('"collections?"'),
-        inquiries: has('"inquir(y|ies)"'),
-        personal_information: has('"(personal|consumer|identity|names?|addresses)"'),
-        public_records: has('"public.?records?"'),
-        payment_history: has('"payment.?(history|pattern|grid)"'),
-        scores: has('"scores?"'),
-    };
+    // ---- WHICH SCHEMA ARE WE LOOKING AT? -----------------------------------
+    //
+    // Detected, not assumed. A payload that is neither is reported as "unknown"
+    // rather than forced into whichever map happens to match a stray key.
+    const isMismo =
+        flat.includes('"CREDIT_RESPONSE"') ||
+        flat.includes('"CREDIT_LIABILITY"') ||
+        flat.includes('"CREDIT_FILE"');
+
+    const schema = isMismo ? "MISMO_2_4" : "UNKNOWN";
+
+    const map = isMismo ? MISMO_SECTIONS : GENERIC_SECTIONS;
+
+    const sections = {};
+
+    for (const [name, needles] of Object.entries(map)) {
+        sections[name] = hasAny(needles);
+    }
+
+    // Collections, handled per schema (see above).
+    if (isMismo) {
+        sections.collections = hasAny(MISMO_COLLECTION_MARKERS);
+        sections.collections_note =
+            "In MISMO 2.4 a collection is a CREDIT_LIABILITY with a collection marker, not a separate section.";
+    }
+
+    // ---- BUREAUS ------------------------------------------------------------
+    const bureauNames = ["TransUnion", "Experian", "Equifax"];
+
+    const bureausFound = bureauNames.filter((b) =>
+        new RegExp(`\\b${b}\\b`, "i").test(flat)
+    );
 
     // ---- THE §10.1 QUESTION -------------------------------------------------
     //
-    // Are the three bureaus nested BENEATH a tradeline (merged), or are there
-    // three parallel per-bureau lists (separate)?
+    // Are the three bureaus nested BENEATH one tradeline (merged), or are there
+    // three parallel per-bureau lists (separate)? This determines whether the
+    // stable_account_key matching cascade (Extraction §7.5A) is load-bearing in
+    // full, or largely collapses because Credit Hero hands us the grouping.
     //
-    // This single question determines whether the stable_item_key matching
-    // cascade (Extraction §7.4) is load-bearing in full, or largely collapses
-    // because Credit Hero hands us the grouping.
+    // WE DO NOT GUESS THE ANSWER. The regexes below detect each shape; if neither
+    // or both match, we say "unknown" and the skeleton gets read by a human. An
+    // analyzer that confidently reports the wrong nesting would send the entire
+    // identity-key design down the wrong path.
+    // A regex over the flattened string CANNOT answer this. "CreditRepositorySourceType"
+    // appears all over a real payload — CREDIT_FILE carries one per bureau (there are
+    // three files), and so does CREDIT_SCORE. Matching it anywhere would report
+    // "separate" on every report ever captured, including merged ones.
+    //
+    // The question is specifically about how a CREDIT_LIABILITY carries its bureaus,
+    // so we inspect the liabilities themselves.
+    const bureau_nesting = isMismo ? detectBureauNesting(json) : "unknown — not a MISMO payload";
 
-    const bureauKeys = ["transunion", "experian", "equifax", "tui", "exp", "eqf"];
-
-    const bureauKeyHits = bureauKeys.filter((b) =>
-        new RegExp(`"${b}"\\s*:`, "i").test(flat)
-    );
-
-    // A merged shape looks like: tradelines[0].{transunion,experian,equifax}
-    // A separate shape looks like: {transunion:{tradelines:[]}, experian:{...}}
-    let bureau_nesting = "unknown";
-
-    const merged = /"(trade|tradelines?|accounts?)"\s*:\s*\[[^\]]{0,4000}?"(transunion|experian|equifax)"\s*:/i.test(flat);
-    const separate = /"(transunion|experian|equifax)"\s*:\s*\{[^}]{0,4000}?"(trade|tradelines?|accounts?)"\s*:/i.test(flat);
-
-    if (merged && !separate) bureau_nesting = "MERGED — bureaus nested beneath each tradeline";
-    else if (separate && !merged) bureau_nesting = "SEPARATE — parallel per-bureau lists";
-    else if (merged && separate) bureau_nesting = "BOTH patterns detected — inspect skeleton manually";
+    // ---- IS THIS A COMPLETE REPORT? -----------------------------------------
+    //
+    // A report needs tradelines, and it needs to name a bureau. Inquiries are NOT
+    // required: a consumer with no recent hard inquiries has a complete report
+    // with zero inquiries, and requiring them (as the old heuristic did) would
+    // classify her perfectly good report as incomplete.
+    const looks_like_complete_report = isMismo
+        ? sections.tradelines && bureausFound.length > 0
+        : sections.tradelines && bureausFound.length > 0;
 
     return {
+        schema,
         sections_present: sections,
-        bureau_keys_found: bureauKeyHits,
+        bureaus_found: bureausFound,
         bureau_nesting,
         payload_bytes: flat.length,
-        looks_like_complete_report:
-            sections.tradelines && sections.inquiries && bureauKeyHits.length > 0,
+        looks_like_complete_report,
+
+        // Say it in the payload, not just in a comment.
+        note:
+            "DIAGNOSTIC ONLY. Reports what was found. Never gates extraction — " +
+            "completeness is not confidence (Extraction System §5.2).",
     };
 }
 
