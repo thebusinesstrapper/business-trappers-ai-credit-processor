@@ -73,26 +73,22 @@ export async function runMilestone6(data = {}) {
         const client = await openClient(page, clientName);
 
         if (!client.clientFound || !client.clientOpened) {
-            return errorResponse("CLIENT_NOT_OPENED", `Could not open client "${clientName}".`);
+            return errorResponse("CLIENT_NOT_OPENED", `Could not open client "${clientName}".`, { milestone: "M6_CAPTURE" });
         }
 
         const profile = await readClientProfile(page, client.crcClientId);
 
         if (!profile.ok) {
-            return errorResponse(
-                profile.error_code,
+            return errorResponse(profile.error_code,
                 `Identity could not be established: ${profile.error} ` +
-                    `Extraction does not proceed without a verified CRC identity.`
-            );
+                    `Extraction does not proceed without a verified CRC identity.`, { milestone: "M6_CAPTURE" });
         }
 
         const identityCheck = verifyIdentity(profile.identity);
 
         if (!identityCheck.ok) {
-            return errorResponse(
-                "IDENTITY_VERIFICATION_FAILED",
-                `The CRC profile was read but did not pass verification: ${identityCheck.errors.join(" ")}`
-            );
+            return errorResponse("IDENTITY_VERIFICATION_FAILED",
+                `The CRC profile was read but did not pass verification: ${identityCheck.errors.join(" ")}`, { milestone: "M6_CAPTURE" });
         }
 
         console.log(`Identity verified: ${profile.identity.name} (CRC ${client.crcClientId})`);
@@ -113,10 +109,8 @@ export async function runMilestone6(data = {}) {
         const creditHero = await openCreditHero(page);
 
         if (!creditHero.ok) {
-            return errorResponse(
-                creditHero.error_code ?? "CREDIT_HERO_UNAVAILABLE",
-                creditHero.error ?? "Could not open Credit Hero."
-            );
+            return errorResponse(creditHero.error_code ?? "CREDIT_HERO_UNAVAILABLE",
+                creditHero.error ?? "Could not open Credit Hero.", { milestone: "M6_CAPTURE" });
         }
 
         // ---- 4. THE REPORT SELECTOR IS AUTHORITATIVE FOR FRESHNESS ---------
@@ -127,11 +121,9 @@ export async function runMilestone6(data = {}) {
         const selector = await readReportSelector(page);
 
         if (!selector.ok) {
-            return errorResponse(
-                "REPORT_SELECTOR_UNREADABLE",
+            return errorResponse("REPORT_SELECTOR_UNREADABLE",
                 `Could not read the report selector: ${selector.error}. Freshness is read from the ` +
-                    `selector and never inferred, so this is a hard stop.`
-            );
+                    `selector and never inferred, so this is a hard stop.`, { milestone: "M6_CAPTURE" });
         }
 
         const parsed = selector.selector; // { reports, rejected, newest, count }
@@ -153,7 +145,7 @@ export async function runMilestone6(data = {}) {
         console.log(`Freshness decision: ${freshness.action} — ${freshness.reason}`);
 
         if (freshness.action === ACTION.MANUAL_REVIEW) {
-            return errorResponse("FRESHNESS_MANUAL_REVIEW", freshness.reason);
+            return errorResponse("FRESHNESS_MANUAL_REVIEW", freshness.reason, { milestone: "M6_CAPTURE" });
         }
 
         // NO_ACTION_REQUIRED means memory has already analyzed this report. That is
@@ -184,10 +176,8 @@ export async function runMilestone6(data = {}) {
         const target = freshness.select;
 
         if (!target) {
-            return errorResponse(
-                "NO_REPORT_SELECTED",
-                `Freshness returned ${freshness.action} but supplied no report to select. ${freshness.reason}`
-            );
+            return errorResponse("NO_REPORT_SELECTED",
+                `Freshness returned ${freshness.action} but supplied no report to select. ${freshness.reason}`, { milestone: "M6_CAPTURE" });
         }
 
         console.log(`Selecting newest report: ${target.text} (${freshness.newestReportDate})`);
@@ -195,7 +185,7 @@ export async function runMilestone6(data = {}) {
         const selected = await selectReport(page, target);
 
         if (!selected.ok) {
-            return errorResponse("REPORT_SELECT_FAILED", selected.error);
+            return errorResponse("REPORT_SELECT_FAILED", selected.error, { milestone: "M6_CAPTURE" });
         }
 
         // ---- 6. VERIFY IT IS GENUINELY ACTIVE ------------------------------
@@ -207,12 +197,10 @@ export async function runMilestone6(data = {}) {
         const active = await verifyActiveReport(page, target);
 
         if (!active.ok) {
-            return errorResponse(
-                "REPORT_NOT_VERIFIED_ACTIVE",
+            return errorResponse("REPORT_NOT_VERIFIED_ACTIVE",
                 `The report was selected but could not be VERIFIED as active: ${active.error}. ` +
                     `Extraction is gated on verified activation — we do not parse a report we cannot ` +
-                    `confirm is the one on screen.`
-            );
+                    `confirm is the one on screen.`, { milestone: "M6_CAPTURE" });
         }
 
         console.log(`VERIFIED ACTIVE: ${target.text}`);
@@ -299,7 +287,7 @@ export async function runMilestone6(data = {}) {
 
     } catch (error) {
         console.error("Milestone 6 failed:", error);
-        return errorResponse("MILESTONE_6_ERROR", error.message);
+        return errorResponse("MILESTONE_6_ERROR", error.message, { milestone: "M6_CAPTURE" });
 
     } finally {
         if (browser) await browser.close();
