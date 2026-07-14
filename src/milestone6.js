@@ -50,6 +50,7 @@ import { readClientProfile } from "./crcClientProfile.js";
 import { verifyIdentity } from "./intelligence/clientIdentity.js";
 import { openCreditHero } from "./openCreditHero.js";
 import { openCreditReport } from "./openCreditReport.js";
+import { normalizeReport } from "./reportNormalize.js";
 import { readReportSelector, selectReport, verifyActiveReport } from "./reportSelector.js";
 import { decideFreshness, ACTION } from "./reportFreshness.js";
 import { analyzeReportShape, buildSkeleton } from "./spikeReportJson.js";
@@ -359,6 +360,49 @@ export async function runMilestone6(data = {}) {
 
         console.log(`Captured report payload: ${report.url.slice(0, 100)} (${report.size} bytes)`);
 
+        // ---- NORMALIZE: RAW MISMO -> BT CREDIT REPORT MODEL ------------------
+        //
+        // PURE. No browser. The normalizer emits FACTS and decides nothing —
+        // eligibility belongs to the Strategy Engine.
+        //
+        // previousReport is null on this run: no BT Credit Report Model has ever
+        // been persisted, so there is no key registry to match against and every
+        // key is a first sighting. That is correct, not a gap — but it means the
+        // CROSS-RUN identity guarantee (§7.5) is UNTESTED until a second run.
+        const normalized = normalizeReport(report.payload, {
+            crcClientId: client.crcClientId,
+            previousReport: null,
+        });
+
+        // ---- FAIL CLOSED ON PARTIAL EXTRACTION ------------------------------
+        //
+        // A partly-parsed report is MORE DANGEROUS than no report. The Intelligence
+        // Engine detects deletions BY ABSENCE — so a tradeline we merely failed to
+        // parse is indistinguishable from one the bureau DELETED. That produces a
+        // fabricated "deletion" which flows into strategy, and then into a letter.
+        //
+        // We refuse to hand Intelligence a report we do not fully trust.
+        if (!normalized.extraction_ok) {
+            return errorResponse("EXTRACTION_FAILED",
+                `The report was captured but could not be normalized with confidence. ` +
+                    `Nothing downstream runs on a report we do not fully trust.`,
+                {
+                    milestone: "M6_CAPTURE",
+                    extraction_errors: normalized.errors,
+                    key_resolution: normalized.key_resolution,
+                    completeness: normalized.completeness,
+                    counts: normalized.counts,
+                    requiresHumanReview: true,
+                });
+        }
+
+        console.log(
+            `Normalized: ${normalized.counts.raw_liability_rows} raw rows -> ` +
+            `${normalized.counts.unique_accounts} accounts -> ` +
+            `${normalized.counts.account_bureau_tradelines} bureau tradelines ` +
+            `(${normalized.counts.observations_shared} SHARED observations).`
+        );
+
         return successResponse({
             milestone: "M6_CAPTURE",
             result: "CAPTURED",
@@ -388,6 +432,30 @@ export async function runMilestone6(data = {}) {
                 analysis: report.analysis,
                 skeleton: report.skeleton,
             },
+
+            // ---- THE BT CREDIT REPORT MODEL --------------------------------
+            //
+            // FACTS ONLY. No eligibility, no "negative" classification, no dispute
+            // decision. The Strategy Engine determines those from these facts plus
+            // Business Trappers policy — which is why a closed account and a
+            // positively-reporting DoE student loan both survive to this point.
+            normalized: {
+                extraction_ok: normalized.extraction_ok,
+                model_version: normalized.report.model_version,
+                report_metadata: normalized.report.report_metadata,
+
+                // #1, #2, #3. Eligible-negative and excluded counts are ABSENT by
+                // design — they are the Strategy Engine's to produce, and were never
+                // the raw row count.
+                counts: normalized.counts,
+
+                key_resolution: normalized.key_resolution,
+                completeness: normalized.completeness,
+            },
+
+            // The model itself, for the pipeline. Kept separate from the summary
+            // above so the response stays readable.
+            btCreditReportModel: normalized.report,
 
             // Every JSON response seen, so the choice above can be CHECKED rather
             // than trusted. If the wrong one was picked, this shows it.
