@@ -112,6 +112,38 @@ check("...the order control is REJECTED", withOrderControl.rejected.length, 1);
 check("...despite carrying a parseable date", /order new report/i.test(withOrderControl.rejected[0].text), true);
 check("newest is still July 13", withOrderControl.newest.reportDate, "2026-07-13");
 
+console.log("\n=== THE NEW-TAB HANDOFF ===\n");
+
+const { readFileSync: rf } = await import("fs");
+const m6 = rf(new URL("./milestone6.js", import.meta.url), "utf-8");
+
+// BUG 1 — THE CRASH. openCreditHero(page, context) takes TWO arguments.
+// milestone6 passed one, so `context` was undefined and context.waitForEvent()
+// threw, immediately after the dashboard was restored.
+check("openCreditHero receives the context", /openCreditHero\(page,\s*context\)/.test(m6), true);
+check("...and the context is taken from the session", /const context = session\.context/.test(m6), true);
+
+// BUG 2 — THE STALE HANDLE. openCreditHero returns the page it ACTUALLY landed
+// on. CRC opens CreditHero in a NEW TAB, so `page` still points at the CRC
+// dashboard. Every downstream read would have queried the wrong tab and failed in
+// a way that looks exactly like Credit Hero being broken.
+check("adopts the page openCreditHero landed on", /const chPage = creditHero\.page/.test(m6), true);
+check("...selector reads the CreditHero page", /readReportSelector\(chPage\)/.test(m6), true);
+check("...selection acts on the CreditHero page", /selectReport\(chPage,/.test(m6), true);
+check("...activation verifies the CreditHero page", /verifyActiveReport\(chPage,/.test(m6), true);
+check("no stale dashboard handle left downstream", /readReportSelector\(page\)|selectReport\(page,|verifyActiveReport\(page,/.test(m6), false);
+
+// BUG 3 — THE SILENT ONE. A response listener bound to the CRC dashboard page
+// would sit on the wrong tab and capture NOTHING. The run would report
+// "no report payload captured" with no hint that the listener had been watching
+// an idle page the whole time.
+console.log("\n--- The capture listener must not be bound to the wrong tab ---");
+
+check("capture listens on the CONTEXT, not a page", /function capturePayloads\(context\)/.test(m6), true);
+check("...context.on(\"response\")", /context\.on\("response"/.test(m6), true);
+check("...NOT page.on(\"response\")", /page\.on\("response"/.test(m6), false);
+check("...attached BEFORE the CreditHero click", m6.indexOf("capturePayloads(context)") < m6.indexOf("openCreditHero(page, context)"), true);
+
 console.log("\n=== NOTHING IS EXTRACTED OR NORMALIZED HERE ===\n");
 
 const { readFileSync } = await import("fs");
