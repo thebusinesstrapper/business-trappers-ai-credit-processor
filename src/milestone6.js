@@ -148,7 +148,18 @@ export async function runMilestone6(data = {}) {
 
         if (!creditHero.ok) {
             return errorResponse(creditHero.error_code ?? "CREDIT_HERO_UNAVAILABLE",
-                creditHero.error ?? "Could not open Credit Hero.", { milestone: "M6_CAPTURE" });
+                creditHero.error ?? "Could not open Credit Hero.",
+                {
+                    milestone: "M6_CAPTURE",
+
+                    // WHY EACH ATTEMPT FAILED. Without this, three identical retries
+                    // produce one identical error and tell us nothing about whether
+                    // the control was missing, invisible, disabled, or silently
+                    // swallowing the click.
+                    attempts: creditHero.attempts ?? null,
+                    attemptLog: creditHero.attemptLog ?? null,
+                    requiresHumanReview: true,
+                });
         }
 
         // ---- ADOPT THE PAGE CREDIT HERO ACTUALLY LANDED ON ------------------
