@@ -24,6 +24,32 @@
 
 export const RECONCILE_SCHEMA_VERSION = "BT-RECONCILE-1.0";
 
+/**
+ * THE CLOSED SET OF LEGAL EXITS.
+ *
+ * Business Trappers ruling: every ELIGIBLE NEGATIVE bureau tradeline must exit
+ * as exactly ONE of these four. There is no fifth door.
+ *
+ * "NO_FINDINGS" is deliberately NOT in this set. It is a legal exit ONLY for a
+ * tradeline that is not an eligible negative — a positive account with nothing
+ * wrong with it. For an eligible negative it is a POLICY VIOLATION, because the
+ * Analysis Engine decides HOW to dispute, never WHETHER to.
+ */
+export const EXIT = Object.freeze({
+    SPECIFIC_STRATEGY: "SPECIFIC_STRATEGY",
+    BASELINE_REINVESTIGATION: "BASELINE_REINVESTIGATION",
+    EXCLUDED: "EXCLUDED",
+    WITHHELD: "WITHHELD",
+
+    // Legal ONLY for non-eligible-negative items.
+    NO_FINDINGS: "NO_FINDINGS",
+    NOT_NEGATIVE: "NOT_NEGATIVE",
+
+    // Never legal.
+    POLICY_VIOLATION: "POLICY_VIOLATION",
+    BUG: "BUG",
+});
+
 export const STAGE = Object.freeze({
     EXTRACTED: "EXTRACTED",
     ANALYZED: "ANALYZED",
@@ -137,22 +163,57 @@ export function reconcile({ report, analysis, decisions, strategies, letters }) 
         journey.findingCodes = a.findings.map((f) => f.code);
         journey.stages.push({ stage: STAGE.ANALYZED, continued: true, findings: a.findings.length });
 
-        if (a.findings.length === 0) {
-            journey.exitStage = STAGE.ANALYZED;
-            journey.exitReason = "No findings. Nothing inaccurate was detected on this tradeline.";
-            return journey;
-        }
-
         // DECISION
+        //
+        // NOTE THE ORDER. We look for a DECISION before we conclude anything from
+        // an empty finding set.
+        //
+        // A BASELINE item has ZERO findings BY DESIGN — that is its whole premise:
+        // a derogatory account with no detectable contradiction, disputed under
+        // §611 anyway. If we exited on `findings.length === 0` the way this code
+        // used to, EVERY baseline dispute would vanish here, silently, and the
+        // reconciliation would cheerfully report it as "No findings".
+        //
+        // That is precisely the failure the ruling forbids.
         const d = decided.get(item.stableItemKey);
 
         if (!d) {
+            if (a.findings.length === 0) {
+                // No findings AND no decision. Legal only if this is not an
+                // eligible negative.
+                journey.exitStage = STAGE.ANALYZED;
+
+                if (item.negative) {
+                    // THE RULING: an eligible negative may never exit here.
+                    journey.exitCategory = EXIT.POLICY_VIOLATION;
+                    journey.exitReason =
+                        "POLICY VIOLATION — an eligible negative tradeline exited as 'No Findings'. " +
+                        "Business Trappers policy is that EVERY eligible negative tradeline is " +
+                        "disputed: the Analysis Engine decides HOW, never WHETHER. This item should " +
+                        "have entered the baseline reinvestigation path, been excluded, or been " +
+                        "withheld — with a reason. It did none of those.";
+                    journey.bug = true;
+                } else {
+                    journey.exitCategory = EXIT.NO_FINDINGS;
+                    journey.exitReason =
+                        "No findings, and not a negative tradeline. Positive accounts are never disputed.";
+                }
+
+                return journey;
+            }
+
             journey.exitStage = STAGE.DECIDED;
+            journey.exitCategory = EXIT.BUG;
             journey.exitReason =
                 "NOT SEEN BY THE DECISION ENGINE despite carrying findings. THIS IS A BUG.";
             journey.bug = true;
             return journey;
         }
+
+        // BT-DM-0054 IS the baseline path. It is emitted by the Analysis Engine
+        // ONLY when no specific defect was found — so a specific strategy always
+        // supersedes it, and one tradeline never gets two dispute sections.
+        journey.baseline = d.primaryDecision?.record === "BT-DM-0054";
 
         journey.outcome = d.outcome;
         journey.decisionRecord = d.primaryDecision?.record ?? null;
@@ -161,13 +222,27 @@ export function reconcile({ report, analysis, decisions, strategies, letters }) 
 
         if (d.outcome === "EXCLUDED") {
             journey.exitStage = STAGE.DECIDED;
+            journey.exitCategory = EXIT.EXCLUDED;
             journey.exitReason = `EXCLUDED — ${d.exclusion?.rule}: ${d.exclusion?.reason}`;
             return journey;
         }
 
         if (d.outcome === "NO_ACTION") {
             journey.exitStage = STAGE.DECIDED;
-            journey.exitReason = "No actionable Decision Record. Findings are context, not inaccuracies.";
+
+            // Same ruling. A negative tradeline may not fall out here either.
+            if (item.negative) {
+                journey.exitCategory = EXIT.POLICY_VIOLATION;
+                journey.exitReason =
+                    "POLICY VIOLATION — an eligible negative tradeline exited as 'No Action'. Every " +
+                    "eligible negative tradeline must be disputed via a specific strategy or the " +
+                    "baseline path.";
+                journey.bug = true;
+            } else {
+                journey.exitCategory = EXIT.NO_FINDINGS;
+                journey.exitReason = "No actionable Decision Record, and not a negative tradeline.";
+            }
+
             return journey;
         }
 
@@ -201,6 +276,7 @@ export function reconcile({ report, analysis, decisions, strategies, letters }) 
         // LETTER
         if (withheld.has(item.stableItemKey)) {
             journey.exitStage = STAGE.LETTERED;
+            journey.exitCategory = EXIT.WITHHELD;
             journey.exitReason = `WITHHELD — ${withheld.get(item.stableItemKey).reason}`;
             return journey;
         }
@@ -216,6 +292,9 @@ export function reconcile({ report, analysis, decisions, strategies, letters }) 
 
         journey.stages.push({ stage: STAGE.LETTERED, continued: true });
         journey.disputed = true;
+        journey.exitCategory = journey.baseline
+            ? EXIT.BASELINE_REINVESTIGATION
+            : EXIT.SPECIFIC_STRATEGY;
 
         return journey;
     });
@@ -245,6 +324,28 @@ export function reconcile({ report, analysis, decisions, strategies, letters }) 
         const negatives = items.filter((j) => j.negative);
         const disputed = items.filter((j) => j.disputed);
 
+        // ---- THE FOUR LEGAL EXITS FOR AN ELIGIBLE NEGATIVE -----------------
+        const bySpecific = negatives.filter((j) => j.exitCategory === EXIT.SPECIFIC_STRATEGY);
+        const byBaseline = negatives.filter((j) => j.exitCategory === EXIT.BASELINE_REINVESTIGATION);
+        const byExcluded = negatives.filter((j) => j.exitCategory === EXIT.EXCLUDED);
+        const byWithheld = negatives.filter((j) => j.exitCategory === EXIT.WITHHELD);
+
+        // Anything else is a violation of the coverage ruling.
+        const violations = negatives.filter(
+            (j) =>
+                ![
+                    EXIT.SPECIFIC_STRATEGY,
+                    EXIT.BASELINE_REINVESTIGATION,
+                    EXIT.EXCLUDED,
+                    EXIT.WITHHELD,
+                ].includes(j.exitCategory)
+        );
+
+        const negativesCovered =
+            bySpecific.length + byBaseline.length + byExcluded.length + byWithheld.length;
+
+        const coverageHolds = violations.length === 0 && negativesCovered === negatives.length;
+
         const excluded = items.filter((j) => j.exitReason?.startsWith("EXCLUDED"));
         const heldBack = items.filter((j) => j.exitReason?.startsWith("WITHHELD"));
         const noFindings = items.filter((j) => j.exitStage === "ANALYZED" && j.findingCount === 0);
@@ -270,6 +371,25 @@ export function reconcile({ report, analysis, decisions, strategies, letters }) 
             bureau,
             totalTradelines: items.length,
             negativeTradelines: negatives.length,
+
+            // ---- COVERAGE: every eligible negative exits exactly one of four ----
+            coverage: {
+                specificStrategy: bySpecific.length,
+                baselineReinvestigation: byBaseline.length,
+                excluded: byExcluded.length,
+                withheld: byWithheld.length,
+                covered: negativesCovered,
+                total: negatives.length,
+                holds: coverageHolds,
+                violations: violations.map((j) => ({
+                    furnisher: j.furnisher,
+                    stableItemKey: j.stableItemKey,
+                    status: j.status,
+                    exitCategory: j.exitCategory ?? "(none)",
+                    reason: j.exitReason,
+                })),
+            },
+            coverageHolds,
 
             disputed: disputed.length,
             excluded: excluded.length,
@@ -305,13 +425,20 @@ export function reconcile({ report, analysis, decisions, strategies, letters }) 
 
     const bugs = journeys.filter((j) => j.bug);
     const allBalance = byBureau.every((b) => b.balances);
+    const allCoverage = byBureau.every((b) => b.coverageHolds);
     const allInvariants = byBureau.every((b) => b.invariantHolds);
 
     return {
         schemaVersion: RECONCILE_SCHEMA_VERSION,
 
         // The whole point. If this is false, THE PACKAGE IS NOT CLIENT-READY.
-        reconciles: allBalance && allInvariants && bugs.length === 0,
+        // RECONCILES may be YES only if:
+        //   - every tradeline is accounted for,
+        //   - letter sections match the disputed count exactly,
+        //   - EVERY ELIGIBLE NEGATIVE exits via one of the four legal doors,
+        //   - and nothing vanished.
+        reconciles: allBalance && allInvariants && allCoverage && bugs.length === 0,
+        coverageHolds: allCoverage,
         invariantsHold: allInvariants,
 
         totals: {
@@ -365,6 +492,22 @@ export function formatReconciliation(r) {
         out.push(`    Letter account sections    : ${b.letterAccountSections}`);
         out.push(`    Reconciled as disputed     : ${b.disputed}`);
         out.push(`    ${b.invariantHolds ? "HOLDS" : "*** VIOLATED ***"}`);
+        out.push("");
+        out.push(`  COVERAGE — every eligible negative exits exactly one of four:`);
+        out.push(`    Specific strategy          : ${b.coverage.specificStrategy}`);
+        out.push(`    Baseline reinvestigation   : ${b.coverage.baselineReinvestigation}`);
+        out.push(`    Excluded                   : ${b.coverage.excluded}`);
+        out.push(`    Withheld                   : ${b.coverage.withheld}`);
+        out.push(`    COVERED                    : ${b.coverage.covered} / ${b.coverage.total}  ${b.coverageHolds ? "HOLDS" : "*** VIOLATED ***"}`);
+
+        if (b.coverage.violations.length) {
+            out.push("");
+            out.push(`    *** COVERAGE VIOLATIONS — eligible negatives with no legal exit ***`);
+            for (const v of b.coverage.violations) {
+                out.push(`      ${v.furnisher} (${v.status ?? "no status"}) -> ${v.exitCategory}`);
+                out.push(`        ${v.reason}`);
+            }
+        }
 
         if (!b.invariantHolds) {
             out.push(`    ${b.invariantNote}`);
