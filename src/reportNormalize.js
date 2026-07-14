@@ -132,7 +132,18 @@ const FIELD = Object.freeze({
 
     // NOT YET CONFIRMED — the liability key list we received was truncated at the
     // top. These are the candidates; a miss is recorded, never guessed around.
-    masked_account: ["@_AccountIdentifier", "@_AccountNumberIdentifier", "@AccountIdentifier"],
+    // CONFIRMED to exist. Both spellings tried; neither assumed.
+    masked_account: ["@_AccountIdentifier", "_AccountIdentifier", "@AccountIdentifier"],
+    account_status_type: ["@_AccountStatusType", "_AccountStatusType"],
+
+    // FCRA §611 — an item the consumer has ALREADY disputed. Maps to BT-RN-0021
+    // (Failure to Mark as Disputed). Captured as a fact; acted on by the Strategy
+    // Engine, never here.
+    consumer_disputed: ["@_ConsumerDisputeIndicator", "_ConsumerDisputeIndicator"],
+
+    // The bureau's OWN derogatory flag. An objective fact, and far safer than
+    // inferring "negative" from a status string we have not verified.
+    derogatory: ["@_DerogatoryDataIndicator", "_DerogatoryDataIndicator"],
     date_opened: ["@_AccountOpenedDate", "@AccountOpenedDate", "@_DateOpened"],
     date_reported: ["@_AccountReportedDate", "@AccountReportedDate", "@_DateReported"],
     date_closed: ["@_AccountClosedDate", "@AccountClosedDate"],
@@ -154,9 +165,9 @@ const FIELD = Object.freeze({
      */
     responsibility: [
         "@_AccountOwnershipType",
+        "_AccountOwnershipType",
         "@AccountOwnershipType",
         "@_OwnershipType",
-        "@RawAccountOwnership",
     ],
 });
 
@@ -279,8 +290,22 @@ function buildObservation(liability, basis, sharedWith, misses) {
         ),
 
         // Constitution: authorized-user accounts are never disputed. Captured
-        // faithfully; NOT acted on here. The exclusion is a Decision Engine rule.
+        // VERBATIM and NOT interpreted here.
+        //
+        // We do NOT map this to a boolean is_authorized_user, because we have not
+        // yet seen the VALUE VOCABULARY — "AuthorizedUser" / "Authorized User" /
+        // "A" / "3" are all plausible, and a wrong guess would not fail loudly. It
+        // would silently dispute exactly the accounts the Constitution protects.
+        //
+        // The Decision Engine interprets it, against a vocabulary read off the real
+        // data (see POST /debug/field-map).
         responsibility: readField(liability, "responsibility", misses),
+
+        account_status_type: readField(liability, "account_status_type", misses),
+
+        // Facts. The Strategy Engine decides what they mean.
+        consumer_disputed: toBool(readField(liability, "consumer_disputed", misses)),
+        derogatory: toBool(readField(liability, "derogatory", misses)),
 
         months_reviewed: toNumber(readField(liability, "months_reviewed", misses)),
         terms_months: toNumber(readField(liability, "terms_months", misses)),
