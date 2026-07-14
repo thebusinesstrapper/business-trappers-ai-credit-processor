@@ -2,91 +2,96 @@
  * permissiblePurpose.js
  *
  * BT-DM-0055 — PERMISSIBLE PURPOSE VERIFICATION.
- * A first-class Business Trappers dispute strategy.
+ * A first-class Business Trappers strategy for BOTH inquiries AND tradelines.
  *
  * ===========================================================================
- * WE REQUEST. WE DO NOT ACCUSE.
+ * TWO ITEM TYPES. TWO DIFFERENT LEGAL QUESTIONS. TWO SEPARATE WORDINGS.
  *
- * The earlier design of this record required a consumer attestation before it
- * could run, because it was framed as an ASSERTION — "this company had no
- * permissible purpose" — and a credit report cannot prove that. Only the
- * consumer knows whether she applied, and asserting it without her would invent
- * a fact in her name.
+ * These are NOT the same dispute with the noun swapped, and treating them that
+ * way would put "inquiry" language on an account section — which reads as a
+ * form letter and tells the bureau nobody looked at the account.
  *
- * The Business Trappers framing dissolves that problem entirely, and it does so
- * without weakening the dispute:
+ *   INQUIRY   — a one-time ACCESS event. Someone obtained the file.
+ *               The question: under what permissible purpose was my credit file
+ *               FURNISHED to this company?
+ *               § 604 governs who may RECEIVE a report.
  *
- *   WE DO NOT SAY:  "You had no permissible purpose to pull my file."
- *                   -> An accusation of a federal violation. Unproven. And if
- *                      she applied and forgot, it is FALSE.
+ *   TRADELINE — an ONGOING act of REPORTING. A furnisher places, and keeps
+ *               placing, an account on the file.
+ *               The question: by what authority does this creditor furnish, and
+ *               CONTINUE to report, this account?
+ *               This concerns the furnisher's authority and its § 623 duties, and
+ *               it must name the CREDITOR and THAT BUREAU'S account number.
  *
- *   WE SAY:         "Please verify and provide the permissible purpose under
- *                    which this inquiry was made."
- *                   -> A REQUEST. It asserts nothing at all, so nothing in it
- *                      can be false — and it puts the burden exactly where FCRA
- *                      § 604 already places it: on the party that furnished the
- *                      report.
+ * "Please verify the permissible purpose for this inquiry" written about a
+ * charge-off is nonsense. It is also the exact tell that a letter was generated.
  *
- * The second is not the weaker move. It is the stronger one. An accusation we
- * cannot support invites a one-line denial. A request for verification obliges
- * the bureau to actually go and check — which is the outcome we wanted from an
- * accusation anyway, minus the risk of being wrong in the consumer's name.
+ * ===========================================================================
+ * THE INVARIANT, ACROSS BOTH TYPES:
  *
- * The Constitutional rule survives intact: THE PROCESSOR NEVER ASSERTS AN
- * UNPROVEN FACT. It just turns out we never needed to.
+ *   WE REQUEST VERIFICATION. WE NEVER ASSERT THAT AUTHORITY WAS ABSENT.
+ *
+ * The processor has not established that, and it cannot from a report. A request
+ * asserts nothing — so nothing in it can be false — and it puts the burden
+ * exactly where the statute already places it: on the party that furnished.
+ *
+ * An accusation we cannot support invites a one-line denial. A request for
+ * verification obliges them to actually go and check. The second is not the
+ * weaker move.
  * ===========================================================================
  */
 
-export const PERMISSIBLE_PURPOSE_SCHEMA_VERSION = "BT-PP-2.0";
+export const PERMISSIBLE_PURPOSE_SCHEMA_VERSION = "BT-PP-3.0";
+
+export const ITEM_TYPE = Object.freeze({
+    INQUIRY: "INQUIRY",
+    TRADELINE: "TRADELINE",
+});
+
+export const MODE = Object.freeze({
+    // No consumer statement. Pure request. Asserts nothing whatsoever.
+    VERIFICATION_REQUEST: "VERIFICATION_REQUEST",
+
+    // The consumer has stated she did not apply / did not authorize. That is HER
+    // fact and she may state it. We still REQUEST verification — the legal
+    // conclusion is not ours to draw.
+    CONSUMER_DISPUTED: "CONSUMER_DISPUTED",
+});
 
 export const BT_DM_0055 = Object.freeze({
     record: "BT-DM-0055",
     name: "Permissible Purpose Verification",
 
     strategy: "BT-ST-0004",
-    strategyName: "Unauthorized Inquiry",
-
     reason: "BT-RN-0004",
-    reasonName: "Unauthorized Hard Inquiry",
-
     instruction: "BT-IN-0004",
     blueprint: "BT-BP-0004",
 
-    authority:
-        "FCRA § 604 (15 U.S.C. § 1681b) — a consumer report may be furnished only for a permissible purpose.",
-
-    // First-class initial dispute. It does not ripen with time: the request is
-    // exactly as valid on round 1 as it will ever be.
     roundEligibility: "1-5",
     escalationOnly: false,
-});
 
-/**
- * TWO MODES. Both REQUEST. Neither ACCUSES.
- */
-export const MODE = Object.freeze({
-    // No consumer statement. We ask the bureau to verify its permissible purpose.
-    // Asserts nothing whatsoever, so nothing in it can be untrue.
-    VERIFICATION_REQUEST: "VERIFICATION_REQUEST",
+    authority: {
+        // Who may RECEIVE a consumer report.
+        [ITEM_TYPE.INQUIRY]:
+            "FCRA § 604 (15 U.S.C. § 1681b) — a consumer report may be furnished only for a permissible purpose.",
 
-    // The consumer has stated she did not apply or authorize. That statement is
-    // HER fact and she is entitled to make it — but we still REQUEST verification
-    // rather than declaring the inquiry unlawful. The legal conclusion is not
-    // ours to draw.
-    CONSUMER_DISPUTED: "CONSUMER_DISPUTED",
+        // A furnisher's duty regarding the accuracy and integrity of what it
+        // reports, and its authority to report it at all.
+        [ITEM_TYPE.TRADELINE]:
+            "FCRA § 623 (15 U.S.C. § 1681s-2) — duties of furnishers of information to consumer reporting agencies.",
+    },
 });
 
 /**
  * FURNISHER ALIAS TABLE — BLOCKING ONLY. It can never cause a dispute.
  *
- * The asymmetry: a false positive costs us one low-value dispute. A false
- * negative sends the consumer's own credit card issuer a demand to justify an
- * inquiry it plainly had every right to make — on a report that shows the
- * account. That is a wasted round and it discredits the letters that matter.
+ * Asymmetry: a false positive costs one low-value dispute. A false negative
+ * sends the consumer's own card issuer a demand to justify an inquiry it plainly
+ * had every right to make — on a report that shows the account. That wastes a
+ * round and teaches the bureau to skim our letters.
  *
- * Discovered by test: "JPMCB CARD SERVICES" (inquiry) and "CHASE BANK USA NA"
- * (tradeline) are the same company; suffix-stripping compares JPMCB to CHASE and
- * silently finds nothing.
+ * Found by test: "JPMCB CARD SERVICES" and "CHASE BANK USA NA" are the same
+ * company; suffix-stripping compares JPMCB to CHASE and silently finds nothing.
  */
 const FURNISHER_ALIASES = Object.freeze([
     ["CHASE", "JPMCB", "JPMORGAN", "JP MORGAN"],
@@ -127,7 +132,6 @@ function aliasGroup(normalised) {
     return null;
 }
 
-/** Does this furnisher already hold an account on the consumer's report? */
 export function furnisherHasTradeline(furnisher, report) {
     const target = normaliseFurnisher(furnisher);
     if (!target) return false;
@@ -144,108 +148,182 @@ export function furnisherHasTradeline(furnisher, report) {
             }
 
             const candidateGroup = aliasGroup(candidate);
-            if (targetGroup && candidateGroup && targetGroup === candidateGroup) {
-                return true;
-            }
+            if (targetGroup && candidateGroup && targetGroup === candidateGroup) return true;
         }
     }
 
     return false;
 }
 
+// ===========================================================================
+// INQUIRIES
+// ===========================================================================
+
 /**
- * Evaluate ONE inquiry.
- *
  * @param {object} ctx
- * @param {object} ctx.inquiry      inquiry from the BT Credit Report Model
- * @param {object} ctx.report       the full report (to check for a relationship)
- * @param {object} [ctx.attestation] optional consumer statement about THIS inquiry
+ * @param {object} ctx.inquiry
+ * @param {object} ctx.report
+ * @param {object} [ctx.attestation]
  */
-export function evaluatePermissiblePurpose(ctx) {
+export function evaluateInquiryPermissiblePurpose(ctx) {
     const { inquiry, report, attestation = null } = ctx;
 
     const blocked = (blockedBy, reason) => ({
         eligible: false,
+        itemType: ITEM_TYPE.INQUIRY,
         record: BT_DM_0055.record,
         blockedBy,
         reason,
     });
 
-    // ---- Soft inquiries are not visible to lenders. Nothing to dispute. -----
     if (/soft|promotional|prescreen|account\s*review|consumer[- ]initiated/i.test(String(inquiry.inquiry_type ?? ""))) {
         return blocked(
             "SOFT_INQUIRY",
-            `Inquiry type "${inquiry.inquiry_type}" is soft. Soft inquiries are not disclosed to ` +
-                `lenders and do not affect the consumer. There is nothing of value to dispute.`
+            `Inquiry type "${inquiry.inquiry_type}" is soft. Soft inquiries are not disclosed to lenders. Nothing of value to dispute.`
         );
     }
 
-    // ---- The consumer's own creditor ---------------------------------------
-    //
     // Not a truth problem — a CREDIBILITY problem. Asking a bureau to justify a
-    // Chase inquiry when a Chase account is sitting on the same report gets a
-    // one-line answer and teaches the bureau to skim our letters. We spend the
-    // consumer's credibility on the disputes that can actually win.
+    // Chase inquiry when a Chase account sits on the same report earns a one-line
+    // answer and spends credibility we need for the disputes that can win.
     if (furnisherHasTradeline(inquiry.furnisher, report)) {
         return blocked(
             "FURNISHER_HAS_TRADELINE_ON_REPORT",
-            `${inquiry.furnisher} appears as an account on this consumer's own credit report. An ` +
-                `existing account relationship is a permissible purpose on its face (account review is ` +
-                `expressly permitted under § 604), so this request would be answered in one line and ` +
-                `would cost credibility on the disputes that matter. Routed to a human, who may know ` +
-                `something the report does not show.`
+            `${inquiry.furnisher} appears as an account on this consumer's own report. An existing ` +
+                `account relationship is a permissible purpose on its face, so this would be answered ` +
+                `in one line and would cost credibility on the disputes that matter. Routed to a human.`
         );
     }
 
-    // ---- ELIGIBLE ----------------------------------------------------------
-    const mode = isCompleteAttestation(attestation, inquiry)
+    const mode = isCompleteAttestation(attestation, inquiry.stable_item_key)
         ? MODE.CONSUMER_DISPUTED
         : MODE.VERIFICATION_REQUEST;
 
     return {
         eligible: true,
+        itemType: ITEM_TYPE.INQUIRY,
         record: BT_DM_0055.record,
         name: BT_DM_0055.name,
         mode,
 
         strategy: BT_DM_0055.strategy,
         reason: BT_DM_0055.reason,
-        instruction: BT_DM_0055.instruction,
-        blueprint: BT_DM_0055.blueprint,
-        authority: BT_DM_0055.authority,
+        authority: BT_DM_0055.authority[ITEM_TYPE.INQUIRY],
 
-        // NEVER an assertion that permissible purpose was absent. This is the
-        // invariant the whole record turns on, and it is machine-checkable.
-        assertsLackOfPermissiblePurpose: false,
-
-        // Every inquiry dispute is read by a human before it goes out. The letter
-        // names a company and asks it to justify itself; that is worth a glance.
+        assertsLackOfPermissiblePurpose: false, // INVARIANT
         humanReview: true,
-        humanReviewReason:
-            "This letter asks a named company to verify the permissible purpose for pulling the " +
-            "consumer's file. It asserts no violation, but it does put a company on the spot in her " +
-            "name, so a human reads it first.",
-
-        attestation: attestation
-            ? { attestedAt: attestation.attestedAt ?? null, attestedBy: attestation.attestedBy ?? "consumer" }
-            : null,
 
         reasoningChain: [
             `INQUIRY: ${inquiry.furnisher} (${inquiry.bureau}), dated ${inquiry.inquiry_date ?? "unknown"}.`,
             `RELATIONSHIP CHECK: no matching tradeline found on this report.`,
             mode === MODE.CONSUMER_DISPUTED
-                ? `CONSUMER STATEMENT: she states she did not apply for credit with this company and did not authorize the inquiry.`
-                : `NO CONSUMER STATEMENT: the letter therefore REQUESTS verification and asserts nothing.`,
-            `DECISION: ${BT_DM_0055.record} (${BT_DM_0055.name}).`,
-            `THE LETTER REQUESTS VERIFICATION OF PERMISSIBLE PURPOSE. It does NOT assert that permissible purpose was absent — the processor has not established that, and § 604 places the duty on the furnishing party regardless.`,
-            `AUTHORITY: ${BT_DM_0055.authority}`,
+                ? `CONSUMER STATEMENT: she states she did not apply and did not authorize this access.`
+                : `NO CONSUMER STATEMENT: the letter REQUESTS verification and asserts nothing.`,
+            `THE LETTER REQUESTS VERIFICATION of the permissible purpose for ACCESS to the file. It does NOT assert that permissible purpose was absent.`,
+            `AUTHORITY: ${BT_DM_0055.authority[ITEM_TYPE.INQUIRY]}`,
         ],
     };
 }
 
-function isCompleteAttestation(attestation, inquiry) {
+// ===========================================================================
+// TRADELINES
+// ===========================================================================
+
+const AUTHORIZED_USER = /authorized\s*user/i;
+const DEROGATORY = /charge.?off|collection|repossession|foreclosure|settled|default|written.?off|late|delinquen|derogatory/i;
+
+/**
+ * Permissible purpose / authority verification for a TRADELINE.
+ *
+ * A different question from the inquiry version: not "who was allowed to LOOK at
+ * my file", but "by what authority does this creditor FURNISH, and continue to
+ * report, this account".
+ *
+ * @param {object} ctx
+ * @param {object} ctx.tradeline   the bureau tradeline (carries THIS bureau's masked account)
+ * @param {string} ctx.furnisher
+ * @param {boolean} [ctx.mixedFile]
+ */
+export function evaluateTradelinePermissiblePurpose(ctx) {
+    const { tradeline, furnisher, mixedFile = false } = ctx;
+    const obs = tradeline.observation ?? {};
+
+    const blocked = (blockedBy, reason) => ({
+        eligible: false,
+        itemType: ITEM_TYPE.TRADELINE,
+        record: BT_DM_0055.record,
+        blockedBy,
+        reason,
+    });
+
+    // Positive accounts are never disputed — a dispute can get a BENEFICIAL
+    // tradeline deleted.
+    const pastDue = Number(obs.past_due ?? 0);
+    const derogatory = DEROGATORY.test(String(obs.status ?? "")) || pastDue > 0;
+
+    if (!derogatory) {
+        return blocked("NOT_DEROGATORY", "Positive accounts are never disputed.");
+    }
+
+    if (AUTHORIZED_USER.test(String(obs.responsibility ?? ""))) {
+        return blocked(
+            "AUTHORIZED_USER",
+            "Authorized-user account. The Project Constitution forbids disputing these."
+        );
+    }
+
+    if (mixedFile) {
+        return blocked(
+            "MIXED_FILE",
+            "An unresolved mixed-file concern supersedes all dispute strategies until identity is resolved."
+        );
+    }
+
+    // THE BUREAU-SPECIFIC ACCOUNT NUMBER IS MANDATORY.
+    //
+    // The dispute is about THIS bureau's reporting of THIS account. Without that
+    // bureau's own masked number the letter cannot identify what it is asking
+    // about, and the bureau answers "unable to locate" — burning a round.
+    if (!tradeline.masked_account) {
+        return blocked(
+            "NO_BUREAU_ACCOUNT_NUMBER",
+            `${furnisher} is reported by ${tradeline.bureau} with no masked account number. A ` +
+                `permissible-purpose request must identify the account by THAT bureau's own number. ` +
+                `Withheld rather than sent unidentifiable.`
+        );
+    }
+
+    return {
+        eligible: true,
+        itemType: ITEM_TYPE.TRADELINE,
+        record: BT_DM_0055.record,
+        name: BT_DM_0055.name,
+        mode: MODE.VERIFICATION_REQUEST,
+
+        strategy: BT_DM_0055.strategy,
+        reason: BT_DM_0055.reason,
+        authority: BT_DM_0055.authority[ITEM_TYPE.TRADELINE],
+
+        stableItemKey: tradeline.stable_item_key,
+        bureau: tradeline.bureau,
+        furnisher,
+        maskedAccount: tradeline.masked_account, // THIS bureau's, verbatim
+
+        assertsLackOfPermissiblePurpose: false, // INVARIANT
+        humanReview: true,
+
+        reasoningChain: [
+            `TRADELINE: ${furnisher}, account ${tradeline.masked_account}, reported by ${tradeline.bureau}.`,
+            `Derogatory, individually held, and identifiable by this bureau's own account number.`,
+            `THE LETTER REQUESTS VERIFICATION of the permissible purpose and authority under which this creditor furnishes, and continues to report, this account. It does NOT assert that authority is absent.`,
+            `AUTHORITY: ${BT_DM_0055.authority[ITEM_TYPE.TRADELINE]}`,
+        ],
+    };
+}
+
+function isCompleteAttestation(attestation, stableItemKey) {
     if (!attestation) return false;
-    if (attestation.stableItemKey !== inquiry.stable_item_key) return false;
+    if (attestation.stableItemKey !== stableItemKey) return false;
 
     return (
         attestation.didNotApply === true &&
@@ -254,26 +332,44 @@ function isCompleteAttestation(attestation, inquiry) {
     );
 }
 
-/**
- * THE LETTER TEXT.
- *
- * Both modes REQUEST. Neither concludes.
- *
- * Note what the CONSUMER_DISPUTED wording does and does not do. It reports HER
- * statement — a fact she is entitled to state, and which is true (she did say
- * it). It does not convert her statement into OUR legal conclusion. She says she
- * did not apply; we ask the bureau to verify. The bureau draws the conclusion.
- */
+// ===========================================================================
+// APPROVED WORDING — DISTINCT BY ITEM TYPE
+//
+// NEVER use inquiry wording for a tradeline. The words "inquiry" and "access"
+// must not appear in a tradeline section, and the words "furnish this account"
+// must not appear in an inquiry section. Enforced by test.
+// ===========================================================================
+
 export function letterTextFor(evaluation) {
+    if (evaluation.itemType === ITEM_TYPE.TRADELINE) {
+        return {
+            // Identifies the CREDITOR and THIS BUREAU'S account number.
+            heading: evaluation.furnisher,
+            accountNumber: evaluation.maskedAccount,
+
+            defect: "I dispute this account.",
+
+            request:
+                "Please verify the permissible purpose and the authority under which this creditor " +
+                "furnishes, and continues to report, this account on my credit file, and provide me " +
+                "with that verification. If that authority cannot be verified, please delete this " +
+                "account from my credit file.",
+
+            authority: evaluation.authority,
+        };
+    }
+
+    // INQUIRY — refers to ACCESS to the credit file.
     if (evaluation.mode === MODE.CONSUMER_DISPUTED) {
         return {
             defect:
                 "I did not apply for credit with this company and did not authorize them to access my " +
                 "credit file.",
             request:
-                "Please verify the permissible purpose under which this inquiry was made and provide " +
-                "me with that verification. If a permissible purpose cannot be verified, please remove " +
-                "this inquiry from my credit file.",
+                "Please verify the permissible purpose under which my credit file was furnished to this " +
+                "company and provide me with that verification. If a permissible purpose cannot be " +
+                "verified, please remove this inquiry from my credit file.",
+            authority: evaluation.authority,
         };
     }
 
@@ -283,6 +379,7 @@ export function letterTextFor(evaluation) {
             "Please verify the permissible purpose under which my credit file was furnished to this " +
             "company and provide me with that verification. If a permissible purpose cannot be " +
             "verified, please remove this inquiry from my credit file.",
+        authority: evaluation.authority,
     };
 }
 
@@ -292,7 +389,7 @@ export function evaluateInquiries(report, attestations = {}) {
     const blocked = [];
 
     for (const inquiry of report.inquiries ?? []) {
-        const result = evaluatePermissiblePurpose({
+        const result = evaluateInquiryPermissiblePurpose({
             inquiry,
             report,
             attestation: attestations[inquiry.stable_item_key] ?? null,
@@ -311,18 +408,61 @@ export function evaluateInquiries(report, attestations = {}) {
 
     return {
         schemaVersion: PERMISSIBLE_PURPOSE_SCHEMA_VERSION,
-        record: BT_DM_0055.record,
+        itemType: ITEM_TYPE.INQUIRY,
         eligible,
         blocked,
         summary: {
-            inquiriesEvaluated: (report.inquiries ?? []).length,
+            evaluated: (report.inquiries ?? []).length,
             eligibleForDispute: eligible.length,
             verificationRequests: eligible.filter((e) => e.mode === MODE.VERIFICATION_REQUEST).length,
             consumerDisputed: eligible.filter((e) => e.mode === MODE.CONSUMER_DISPUTED).length,
             blocked: blocked.length,
-            blockedByAccountRelationship: blocked.filter(
-                (b) => b.blockedBy === "FURNISHER_HAS_TRADELINE_ON_REPORT"
-            ).length,
+            blockedByAccountRelationship: blocked.filter((b) => b.blockedBy === "FURNISHER_HAS_TRADELINE_ON_REPORT").length,
+        },
+    };
+}
+
+/** Evaluate every bureau tradeline on a report. */
+export function evaluateTradelines(report, options = {}) {
+    const { mixedFile = false } = options;
+
+    const eligible = [];
+    const blocked = [];
+
+    const groups = [
+        ...(report.accounts ?? []),
+        ...(report.collections ?? []),
+    ];
+
+    for (const group of groups) {
+        for (const tradeline of group.bureau_tradelines ?? []) {
+            const furnisher = tradeline.furnisher ?? group.original_creditor ?? null;
+
+            const result = evaluateTradelinePermissiblePurpose({ tradeline, furnisher, mixedFile });
+
+            const entry = {
+                stableItemKey: tradeline.stable_item_key,
+                stableAccountKey: group.stable_account_key,
+                bureau: tradeline.bureau,
+                furnisher,
+                ...result,
+            };
+
+            (result.eligible ? eligible : blocked).push(entry);
+        }
+    }
+
+    return {
+        schemaVersion: PERMISSIBLE_PURPOSE_SCHEMA_VERSION,
+        itemType: ITEM_TYPE.TRADELINE,
+        eligible,
+        blocked,
+        summary: {
+            evaluated: eligible.length + blocked.length,
+            eligibleForDispute: eligible.length,
+            blocked: blocked.length,
+            blockedByAuthorizedUser: blocked.filter((b) => b.blockedBy === "AUTHORIZED_USER").length,
+            blockedByNoAccountNumber: blocked.filter((b) => b.blockedBy === "NO_BUREAU_ACCOUNT_NUMBER").length,
         },
     };
 }
