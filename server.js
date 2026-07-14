@@ -12,7 +12,7 @@ import { runIdentifierSpike } from "./src/spikeIdentifiersRun.js";
 import { runClientProfileSpike } from "./src/spikeClientProfileRun.js";
 import { runProfileRead } from "./src/milestoneProfile.js";
 import { runMilestone6 } from "./src/milestone6.js";
-import { extractSkeletonNode, buildLiabilityMap, buildFieldMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
+import { extractSkeletonNode, buildLiabilityMap, buildFieldMap, buildCollisionMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
 
 dotenv.config();
 
@@ -537,6 +537,37 @@ app.post("/debug/field-map", async (req, res) => {
 
 });
 
+/**
+ * TEMPORARY — SCHEMA DISCOVERY ONLY. DELETE WHEN M7 IS COMPLETE.
+ *
+ * POST /debug/collision-map — shows WHY (account, bureau) pairs collide, with the
+ * evidence needed to decide whether they resolve deterministically or must stay
+ * manual review. Reuses M6. Read-only.
+ */
+app.post("/debug/collision-map", async (req, res) => {
+
+    if (!debugGateOpen(req, res, "/debug/collision-map")) return;
+
+    try {
+        const result = await runMilestone6(req.body);
+
+        // extraction_ok is false on a collision — but the RAW PAYLOAD is still
+        // captured and returned, and that is what we read here.
+        const payload = result?.payload ?? null;
+
+        if (!payload) {
+            return res.json({ ok: false, reason: "No raw payload on the M6 result.", milestone_error: result });
+        }
+
+        return res.json(buildCollisionMap(payload));
+
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({ ok: false, error: error.message });
+    }
+
+});
+
 app.get("/debug/routes", (req, res) => {
 
     if (!debugGateOpen(req, res, "/debug/routes")) return;
@@ -584,6 +615,7 @@ app.listen(PORT, () => {
         "POST /debug/skeleton-node",
         "POST /debug/liability-map",
         "POST /debug/field-map",
+        "POST /debug/collision-map",
         "GET /debug/routes",
     ];
 
