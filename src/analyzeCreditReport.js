@@ -164,7 +164,10 @@ function finding(code, explanation, evidence = null) {
 
 function detectInternalInconsistencies(tradeline, asOf, dofdContested = false) {
     const findings = [];
-    const obs = tradeline.observation ?? {};
+    // BUREAU FIDELITY STANDARD: the Intelligence Engine REASONS with the
+    // normalized layer. Letters assert from observation.reported (Layer 2). Reading
+    // normalized here keeps reasoning and fidelity structurally separate.
+    const obs = tradeline.observation?.normalized ?? tradeline.observation ?? {};
 
     const balance = toNumber(obs.balance);
     const pastDue = toNumber(obs.past_due);
@@ -434,8 +437,8 @@ function detectHistoricalFindings(tradeline, previousIndex) {
 
     if (!previous) return findings;
 
-    const now = tradeline.observation ?? {};
-    const before = previous.observation ?? {};
+    const now = tradeline.observation?.normalized ?? tradeline.observation ?? {};
+    const before = previous.observation?.normalized ?? previous.observation ?? {};
 
     const dofdNow = toDate(now.date_of_first_delinquency);
     const dofdBefore = toDate(before.date_of_first_delinquency);
@@ -865,7 +868,10 @@ function detectPublicRecordFindings(report, asOf) {
 
         for (const tradeline of record.bureau_tradelines ?? []) {
             const findings = [];
-            const obs = tradeline.observation ?? {};
+            // BUREAU FIDELITY STANDARD: the Intelligence Engine REASONS with the
+    // normalized layer. Letters assert from observation.reported (Layer 2). Reading
+    // normalized here keeps reasoning and fidelity structurally separate.
+    const obs = tradeline.observation?.normalized ?? tradeline.observation ?? {};
             const filed = toDate(obs.filing_date ?? obs.date_filed);
 
             if (!recordTypeKnown) {
@@ -1028,6 +1034,63 @@ function validateReport(report) {
  *
  * @returns {Promise<object>} structured intelligence. Facts only. No remedies.
  */
+/**
+ * THE BASELINE REINVESTIGATION PATH.
+ *
+ * Business Trappers disputes negative accounts even where the report exposes no
+ * internal contradiction. FCRA §611 gives the consumer the right to dispute
+ * completeness and accuracy and demand a reasonable reinvestigation — WITHOUT
+ * first proving an error. That right is not contingent on us finding a defect.
+ *
+ * TWO RULES GOVERN THIS, AND BOTH MATTER.
+ *
+ * 1. IT ASSERTS NOTHING. The finding records ELIGIBILITY to dispute, not proof
+ *    of a defect. Downstream, the letter may say the consumer disputes the
+ *    completeness and accuracy of the account. It may NEVER say the account IS
+ *    inaccurate, false, or unverifiable — we have not established that, and
+ *    saying so would be inventing a fact in the consumer's voice.
+ *
+ * 2. IT NEVER COMPETES WITH A REAL FINDING. Emitted ONLY when the tradeline has
+ *    no fact-specific finding at all. The strongest supported specific strategy
+ *    always wins, and one tradeline never yields two dispute sections.
+ */
+function baselineFinding(tradeline, existingFindings, code) {
+    if (existingFindings.length > 0) return [];      // a specific finding supersedes
+    if (!isNegativeTradeline(tradeline)) return [];  // positives are never disputed
+
+    // BUREAU FIDELITY STANDARD: the Intelligence Engine REASONS with the
+    // normalized layer. Letters assert from observation.reported (Layer 2). Reading
+    // normalized here keeps reasoning and fidelity structurally separate.
+    const obs = tradeline.observation?.normalized ?? tradeline.observation ?? {};
+
+    return [
+        finding(
+            code,
+            "This negative account carries no internal contradiction detectable from the report. " +
+                "It is eligible for a baseline reinvestigation: the consumer disputes the completeness " +
+                "and accuracy of the reporting and requests a reasonable reinvestigation. NO DEFECT IS " +
+                "ASSERTED.",
+            {
+                status: obs.status ?? null,
+                balance: obs.balance ?? null,
+                past_due: obs.past_due ?? null,
+                asserts_defect: false,
+            }
+        ),
+    ];
+}
+
+/** Negative by the reporting of THIS bureau. Not by another bureau's view of it. */
+function isNegativeTradeline(tradeline) {
+    // BUREAU FIDELITY STANDARD: the Intelligence Engine REASONS with the
+    // normalized layer. Letters assert from observation.reported (Layer 2). Reading
+    // normalized here keeps reasoning and fidelity structurally separate.
+    const obs = tradeline.observation?.normalized ?? tradeline.observation ?? {};
+    const pastDue = Number(obs.past_due ?? 0);
+
+    return isDerogatory(obs.status) || (Number.isFinite(pastDue) && pastDue > 0);
+}
+
 export async function analyzeCreditReport(report, context = {}) {
 
     const { previousReport = null, clientIdentity = null, asOf = new Date() } = context;
@@ -1113,6 +1176,9 @@ export async function analyzeCreditReport(report, context = {}) {
                 ...detectHistoricalFindings(tradeline, previousIndex),
             ];
 
+            // Baseline path — ONLY if nothing specific was found.
+            findings.push(...baselineFinding(tradeline, findings, "TL_BASELINE_REINVESTIGATION"));
+
             tradelines.push({
                 stableItemKey: tradeline.stable_item_key,
                 stableAccountKey: account.stable_account_key, // context, never the dispute unit
@@ -1156,6 +1222,8 @@ export async function analyzeCreditReport(report, context = {}) {
                 ...(collectionFindings.get(tradeline.stable_item_key) ?? []),
                 ...detectHistoricalFindings(tradeline, previousIndex),
             ];
+
+            findings.push(...baselineFinding(tradeline, findings, "COL_BASELINE_REINVESTIGATION"));
 
             collections.push({
                 stableItemKey: tradeline.stable_item_key,
