@@ -399,3 +399,99 @@ export function buildFieldMap(payload) {
         keys_not_mapped: [...allKeys].filter((k) => !mapped.has(k)).sort(),
     };
 }
+
+
+/**
+ * =========================================================================
+ * COLLISION MAP — WHY does one (account, bureau) appear twice? TEMPORARY.
+ *
+ * The normalizer failed closed on (account, bureau) collisions. Before deciding
+ * whether that is a rule we can implement or genuine Array ambiguity, we must see
+ * WHAT collides. This projects every liability grouped by @ArrayAccountIdentifier
+ * and, within each group, by bureau — surfacing exactly the rows that landed on
+ * the same (account, bureau) slot, with the evidence that would (or would not)
+ * let us order them deterministically.
+ *
+ * READ-ONLY. Pure.
+ * =========================================================================
+ */
+export function buildCollisionMap(payload) {
+    const response = payload?.CREDIT_RESPONSE ?? payload;
+    const liabilities = toArray(response?.CREDIT_LIABILITY);
+
+    if (liabilities.length === 0) return { ok: false, error: "No CREDIT_LIABILITY entries." };
+
+    // group by array id -> bureau -> [rows]
+    const groups = new Map();
+
+    liabilities.forEach((l, index) => {
+        const arrayId = l?.["@ArrayAccountIdentifier"] ?? `__none_${index}`;
+        const bureaus = toArray(l?.CREDIT_REPOSITORY)
+            .map((r) => r?.["@_SourceType"] ?? null)
+            .filter(Boolean);
+
+        if (!groups.has(arrayId)) groups.set(arrayId, new Map());
+
+        for (const bureau of bureaus) {
+            const byBureau = groups.get(arrayId);
+            if (!byBureau.has(bureau)) byBureau.set(bureau, []);
+
+            byBureau.get(bureau).push({
+                row: index,
+                bureau,
+                furnisher: l?._CREDITOR?.["@_Name"] ?? null,
+                masked_account: l?.["@_AccountIdentifier"] ?? null,
+                account_status_type: l?.["@_AccountStatusType"] ?? null,
+                is_collection: l?.["@IsCollectionIndicator"] ?? null,
+                is_chargeoff: l?.["@IsChargeoffIndicator"] ?? null,
+                date_reported: l?.["@_AccountReportedDate"] ?? l?.["@_AccountStatusDate"] ?? null,
+                balance: l?.["@_UnpaidBalanceAmount"] ?? null,
+                tradeline_hash_simple: l?.["@TradelineHashSimple"] ?? null,
+                bureau_count_on_row: bureaus.length,
+            });
+        }
+    });
+
+    // keep only the (account, bureau) slots with MORE THAN ONE row
+    const collisions = [];
+
+    for (const [arrayId, byBureau] of groups.entries()) {
+        for (const [bureau, rows] of byBureau.entries()) {
+            if (rows.length > 1) {
+                collisions.push({
+                    array_account_id: arrayId,
+                    bureau,
+                    row_count: rows.length,
+
+                    // The tell. If one row is a single-bureau tradeline and the
+                    // other is a merged multi-bureau row, that is a DETERMINISTIC
+                    // pattern, not ambiguity.
+                    shapes: rows.map((r) => (r.bureau_count_on_row === 1 ? "single" : `merged(${r.bureau_count_on_row})`)),
+
+                    // Do the colliding rows actually AGREE? If the account number
+                    // and status match, they are duplicates. If they differ, they
+                    // are genuinely different reportings and we cannot merge.
+                    distinct_masked: [...new Set(rows.map((r) => r.masked_account))],
+                    distinct_status: [...new Set(rows.map((r) => r.account_status_type))],
+                    distinct_hash: [...new Set(rows.map((r) => r.tradeline_hash_simple))],
+
+                    rows,
+                });
+            }
+        }
+    }
+
+    return {
+        ok: true,
+        total_collisions: collisions.length,
+
+        // How many collisions are "one single-bureau row + one merged row"? That
+        // shape is deterministically resolvable. How many are two rows of the same
+        // shape? Those are the hard ones.
+        single_plus_merged: collisions.filter(
+            (c) => c.shapes.includes("single") && c.shapes.some((sh) => sh.startsWith("merged"))
+        ).length,
+
+        collisions_json: JSON.stringify(collisions, null, 2),
+    };
+}
