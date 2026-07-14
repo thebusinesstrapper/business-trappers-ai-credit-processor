@@ -23,8 +23,11 @@
  *   2. Click the blue "View/Edit Profile" link.
  *   3. Wait for the Edit Profile modal to become visible.
  *   4. Read the identity fields.
- *   5. Close the modal using the X in the upper-right.
- *   6. Return to the dashboard.
+ *   5. Click CANCEL.
+ *   6. Verify the modal is no longer visible.
+ *   7. Verify the "View/Edit Profile" link is visible on the dashboard.
+ *
+ * The upper-right X is NO LONGER USED. Cancel is the approved exit.
  *
  * The profile is a MODAL, not a page. This reader never navigates away from the
  * dashboard, never constructs a profile URL, and never guesses a route.
@@ -203,7 +206,11 @@ export async function readClientProfile(page, crcClientId) {
     //
     // Always attempted, even if a read failed. Leaving a modal open would trap
     // the browser session for whatever runs next.
-    const closed = await closeModal(page, modal);
+    // ---- Exit via CANCEL (frozen navigation) -------------------------------
+    //
+    // Always attempted, even if a field read failed. Leaving the modal open would
+    // wedge the browser session for whatever runs next.
+    const closed = await cancelModal(page, modal);
 
     // ---- Required fields are a HARD STOP -----------------------------------
     const missingRequired = missing.filter((m) => REQUIRED_FIELDS.includes(m.field));
@@ -289,31 +296,31 @@ export async function readClientProfile(page, crcClientId) {
     if (!closed.ok) {
         return {
             ok: false,
-            error_code: "MODAL_NOT_CLOSED",
+
+            // cancelModal names the SPECIFIC failure. These need different
+            // responses, and collapsing them into one code is what sent us hunting
+            // for an execution-path bug that did not exist:
+            //
+            //   CANCEL_CONTROL_NOT_FOUND  -> selector miss. Nothing was clicked.
+            //   UNSAVED_CHANGES_PROMPT    -> A FIELD WAS MODIFIED. Processor failure.
+            //   MODAL_STILL_VISIBLE       -> clicked, but the modal did not dismiss.
+            //   DASHBOARD_NOT_RESTORED    -> modal gone, dashboard not confirmed.
+            error_code: closed.error_code,
             error:
-                `The Edit Profile modal did not close. ${closed.error} This is a FAILED NAVIGATION — ` +
-                `the processor does not continue with the modal open, because every later click in ` +
-                `this session would land on the backdrop and fail far from the real cause. ` +
-                `See closeAttempts for what each candidate matched, and modalHeaderHtml for the real ` +
-                `markup. NOTE: this was a READ-ONLY pass and NO field was modified. If — and only if — ` +
-                `a close control WAS clicked and the modal still refused, an unsaved-changes prompt ` +
-                `may be holding it open, which would mean a field was changed. If every candidate ` +
-                `matched zero elements, nothing was clicked and this is a selector problem, not a ` +
-                `modal problem.`,
-            identityRead: identity, // diagnostic only
+                `${closed.error} This is a FAILED NAVIGATION — the processor does not continue with ` +
+                `the modal open, because every later click in this session would land on the backdrop ` +
+                `and fail far from the real cause.`,
 
-            // WHAT EACH CANDIDATE ACTUALLY FOUND. Without this, "the modal would
-            // not close" is indistinguishable from "we never found anything to
-            // click" — and those need completely different fixes.
-            closeAttempts: closed.attempts ?? null,
-
-            // The real markup, if every candidate missed. The next selector is
-            // written against THIS, not against another guess.
+            // What each Cancel candidate matched, and the real markup if all missed.
+            cancelAttempts: closed.attempts ?? null,
             modalHeaderHtml: closed.modalHeaderHtml ?? null,
+            dialogs: closed.dialogs ?? null,
+            inPagePrompt: closed.inPagePrompt ?? null,
 
+            identityRead: identity, // diagnostic only — a failed run supplies no identity
             identity: null,
             modalClosed: false,
-            requiresHumanReview: true,
+            requiresHumanReview: closed.requiresHumanReview ?? true,
             dashboardUrl,
             fieldsModified: 0,
         };
@@ -332,145 +339,252 @@ export async function readClientProfile(page, crcClientId) {
 }
 
 /**
- * Close the modal with the X in the upper-right, per the frozen navigation.
+ * Exit the Edit Profile modal via the CANCEL button.
  *
- * We do NOT press Escape and we do NOT click a backdrop. Both are guesses about
- * how the modal behaves, and on a form full of live fields a stray interaction
- * is the last thing we want. The X is the control the ruling names.
+ * ===========================================================================
+ * FROZEN NAVIGATION (Business Trappers ruling, updated):
+ *
+ *   Click Cancel
+ *        ↓
+ *   Verify the Edit Profile modal is no longer visible
+ *        ↓
+ *   Verify the "View/Edit Profile" link is visible on the dashboard
+ *
+ * The upper-right X is no longer used.
+ *
+ * We verify BOTH conditions. "The modal is gone" and "we are back on a working
+ * dashboard" are different facts: a modal can disappear into a spinner, an error
+ * state, or a navigation we did not intend. Confirming the View/Edit Profile link
+ * is visible is a POSITIVE confirmation that the dashboard is intact and usable —
+ * an absence check alone would happily pass on a blank page.
+ *
+ * ===========================================================================
+ * AN UNSAVED-CHANGES PROMPT IS A PROCESSOR FAILURE.
+ *
+ * We are in READ MODE. We filled nothing, selected nothing, typed nothing. The
+ * form is CLEAN. There is therefore no legitimate reason for Cancel to ask us
+ * whether we want to discard changes.
+ *
+ * If it does, a field WAS modified — on the one form holding the consumer's legal
+ * identity — and that is the most serious failure this module can have.
+ *
+ * THE TRAP: Playwright AUTO-DISMISSES native dialogs by default. A browser-level
+ * confirm("You have unsaved changes") would be dismissed silently, the modal would
+ * close, the run would continue, and we would never learn that the processor had
+ * edited a client's record. The one failure we most need to catch is the one the
+ * framework hides by default.
+ *
+ * So we attach a dialog listener BEFORE clicking, and treat any dialog as a hard
+ * failure. We also check for an IN-PAGE unsaved-changes prompt, since CRC may
+ * render its own rather than using a native one.
+ * ===========================================================================
  */
-async function closeModal(page, modal, attempt = 1) {
-    const MAX_ATTEMPTS = 2;
 
-    // ---- CANDIDATES: TAG-AGNOSTIC, ROLE LAST ------------------------------
-    //
-    // The previous list led with getByRole("button") and then required a literal
-    // <button> tag. It matched ZERO elements, clicked nothing, and reported
-    // "modal would not close" — which read like the modal RESISTING, when in fact
-    // we never touched it.
-    //
-    // openClient.js already documents why, and this module ignored it:
-    //
-    //   "An <a> only carries the ARIA 'link' role when it has an href. CRC
-    //    renders [controls] as href-less <a>/<span> ... it looks and behaves like
-    //    a link, but has no role, so every role-based query returns zero matches."
-    //
-    // A close X in this app is very likely an href-less <a>, <span>, or <i>. It
-    // carries no role and is not a <button>. So we lead with TAG- and
-    // TEXT-agnostic queries and keep the role-based one LAST, where it can only
-    // help and never blind us.
-    const candidates = [
-        // 1. Anything carrying a close-ish class, ANY tag. Bootstrap/jQuery UI
-        //    modals overwhelmingly use one of these.
-        { name: "class-based (any tag)", locator: () => modal.locator('.modal-header .close, .modal-header .btn-close, a.close, span.close, .ui-dialog-titlebar-close, [class*="close" i]').first() },
+const CANCEL_LABEL = "Cancel";
+const UNSAVED_CHANGES_PATTERN = /unsaved|discard|save your changes|leave without saving|changes you made/i;
 
-        // 2. Explicit accessible label, ANY tag.
-        { name: "aria-label", locator: () => modal.locator('[aria-label="Close" i], [title="Close" i]').first() },
+async function cancelModal(page, modal) {
+    // ---- Catch a native dialog BEFORE it can be auto-dismissed -------------
+    const dialogs = [];
 
-        // 3. The glyph itself, ANY tag. Covers <a>×</a> and <span>✕</span>.
-        { name: "close glyph (any tag)", locator: () => modal.locator(':is(a, span, i, div, button):text-matches("^\\s*[×✕✖xX]\\s*$")').first() },
+    const dialogHandler = async (dialog) => {
+        dialogs.push({ type: dialog.type(), message: dialog.message() });
 
-        // 4. Role-based. LAST, deliberately: it only matches if CRC happens to
-        //    give the control a real role, and leading with it is what blinded us.
-        { name: "role=button (last resort)", locator: () => modal.getByRole("button", { name: /close/i }).first() },
-    ];
+        console.error(`DIALOG APPEARED ON CANCEL: "${dialog.message()}"`);
 
-    // Per-candidate diagnostics. The old code reported only "nothing worked",
-    // which is indistinguishable from "never ran" and from "threw" — and that
-    // ambiguity is exactly what sent us hunting for an execution-path bug that
-    // did not exist.
-    const attempts = [];
+        // Dismiss it so the session is not wedged. The RUN still fails — see below.
+        // Dismissing is the safe direction: it discards, it does not save.
+        await dialog.dismiss().catch(() => {});
+    };
 
-    for (const candidate of candidates) {
-        let count = 0;
+    page.on("dialog", dialogHandler);
 
-        try {
-            count = await candidate.locator().count();
-        } catch (error) {
-            attempts.push({ candidate: candidate.name, matched: null, error: error.message });
-            continue;
-        }
+    try {
+        // ---- Find Cancel. Tag-agnostic, role LAST. -------------------------
+        //
+        // CRC renders href-less <a> controls that carry NO ARIA role, so a
+        // role-based query silently returns zero matches. That is what made the
+        // X unreachable: we led with getByRole and matched nothing, then reported
+        // that the modal "refused to close" when we had never touched it.
+        const candidates = [
+            { name: "exact text (any tag)", locator: () => modal.locator(`:is(button, a, input, span, div):text-is("${CANCEL_LABEL}")`).first() },
+            { name: "input[value=Cancel]", locator: () => modal.locator(`input[value="${CANCEL_LABEL}" i]`).first() },
+            { name: "class-based", locator: () => modal.locator('.btn-cancel, .cancel, [data-dismiss="modal"]').first() },
+            { name: "contains text (any tag)", locator: () => modal.locator(`:is(button, a, input):has-text("${CANCEL_LABEL}")`).first() },
+            { name: "role=button (last resort)", locator: () => modal.getByRole("button", { name: /^cancel$/i }).first() },
+        ];
 
-        attempts.push({ candidate: candidate.name, matched: count });
+        const attempts = [];
+        let clicked = false;
 
-        if (count === 0) continue;
+        for (const candidate of candidates) {
+            let count = 0;
 
-        try {
-            await candidate.locator().click({ timeout: FIELD_TIMEOUT });
-            console.log(`Clicked close control via: ${candidate.name}`);
-        } catch (error) {
-            attempts[attempts.length - 1].clickError = error.message;
-            continue;
-        }
-
-        // Confirm it actually closed. A click landing is not a modal closing.
-        const deadline = Date.now() + 5000;
-
-        while (Date.now() < deadline) {
-            if (!(await findModal(page))) {
-                console.log("Edit Profile modal closed.");
-                return { ok: true, via: candidate.name, attempts };
+            try {
+                count = await candidate.locator().count();
+            } catch (error) {
+                attempts.push({ candidate: candidate.name, matched: null, error: error.message });
+                continue;
             }
 
-            await page.waitForTimeout(200);
+            attempts.push({ candidate: candidate.name, matched: count });
+
+            if (count === 0) continue;
+
+            try {
+                await candidate.locator().click({ timeout: FIELD_TIMEOUT });
+                console.log(`Clicked Cancel via: ${candidate.name}`);
+                clicked = true;
+                break;
+            } catch (error) {
+                attempts[attempts.length - 1].clickError = error.message;
+            }
         }
 
-        attempts[attempts.length - 1].clickedButStillOpen = true;
-    }
+        if (!clicked) {
+            return {
+                ok: false,
+                error_code: "CANCEL_CONTROL_NOT_FOUND",
+                error:
+                    `No Cancel control could be found or clicked in the Edit Profile modal. Nothing ` +
+                    `was clicked — this is a SELECTOR miss, not the modal refusing to close.`,
+                attempts,
+                modalHeaderHtml: await captureModalHtml(modal),
+            };
+        }
 
-    // One retry. A single missed click should not fail a run; a modal that
-    // refuses twice is a real problem.
-    if (attempt < MAX_ATTEMPTS) {
-        console.log(`Modal still open — retrying close (${attempt + 1}/${MAX_ATTEMPTS})...`);
+        // Give a prompt, if there is one, a moment to appear.
         await page.waitForTimeout(1000);
 
-        const stillOpen = await findModal(page);
-        if (!stillOpen) return { ok: true, via: "closed on its own", attempts };
+        // ---- A NATIVE unsaved-changes dialog -> PROCESSOR FAILURE ----------
+        if (dialogs.length > 0) {
+            return {
+                ok: false,
+                error_code: "UNSAVED_CHANGES_PROMPT",
+                error:
+                    `PROCESSOR FAILURE: clicking Cancel produced a dialog — "${dialogs[0].message}". ` +
+                    `This module is READ ONLY. It filled nothing, selected nothing, and typed nothing, ` +
+                    `so the form MUST be clean and Cancel must not ask about unsaved changes. That it ` +
+                    `did means A FIELD WAS MODIFIED on the form holding the consumer's legal identity. ` +
+                    `The dialog was dismissed (discard, never save), but the run FAILS and requires ` +
+                    `immediate human review of this client's record.`,
+                dialogs,
+                attempts,
+                requiresHumanReview: true,
+            };
+        }
 
-        return closeModal(page, stillOpen, attempt + 1);
+        // ---- An IN-PAGE unsaved-changes prompt -> same failure -------------
+        //
+        // CRC may render its own confirm rather than a native one, in which case
+        // no dialog event fires at all and the check above would pass happily.
+        const inPagePrompt = await findUnsavedChangesPrompt(page);
+
+        if (inPagePrompt) {
+            return {
+                ok: false,
+                error_code: "UNSAVED_CHANGES_PROMPT",
+                error:
+                    `PROCESSOR FAILURE: clicking Cancel produced an in-page unsaved-changes prompt ` +
+                    `("${inPagePrompt}"). READ MODE modifies nothing, so the form must be clean. A ` +
+                    `field WAS modified. Immediate human review required.`,
+                inPagePrompt,
+                attempts,
+                requiresHumanReview: true,
+            };
+        }
+
+        // ---- VERIFY 1: the modal is gone ----------------------------------
+        const modalGone = await waitFor(page, async () => !(await findModal(page)), 8000);
+
+        if (!modalGone) {
+            return {
+                ok: false,
+                error_code: "MODAL_STILL_VISIBLE",
+                error:
+                    `Cancel was clicked, but the Edit Profile modal is still visible. No unsaved-changes ` +
+                    `prompt was detected, so the click landed on something that did not dismiss it.`,
+                attempts,
+                modalHeaderHtml: await captureModalHtml(modal),
+            };
+        }
+
+        // ---- VERIFY 2: we are back on a WORKING dashboard ------------------
+        //
+        // The modal being gone is not the same as the dashboard being usable. This
+        // is a POSITIVE check: an absence check alone would pass on a blank page,
+        // an error screen, or a navigation we never intended.
+        const linkBack = await waitFor(
+            page,
+            async () => (await page.getByText(PROFILE_LINK_TEXT, { exact: false }).first().count()) > 0,
+            8000
+        );
+
+        if (!linkBack) {
+            return {
+                ok: false,
+                error_code: "DASHBOARD_NOT_RESTORED",
+                error:
+                    `The Edit Profile modal closed, but the "${PROFILE_LINK_TEXT}" link is not visible ` +
+                    `on the dashboard. The modal disappearing is not proof the dashboard is intact — we ` +
+                    `may be on an error page, a spinner, or a navigation we did not intend. Processing ` +
+                    `does not continue from a page we cannot confirm.`,
+                attempts,
+                currentUrl: page.url(),
+            };
+        }
+
+        console.log("Edit Profile modal cancelled. Dashboard restored.");
+
+        return { ok: true, attempts, dialogs: [] };
+
+    } finally {
+        // Always detach. A leaked listener would silently swallow dialogs raised
+        // by a LATER milestone in the same session.
+        page.off("dialog", dialogHandler);
+    }
+}
+
+/** Poll a condition. Returns true if it became true within the timeout. */
+async function waitFor(page, condition, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+        if (await condition().catch(() => false)) return true;
+        await page.waitForTimeout(200);
     }
 
-    // ---- CAPTURE THE MARKUP SO THE NEXT RUN IS NOT ANOTHER GUESS -----------
-    //
-    // If every candidate matched zero elements, the X is shaped differently than
-    // any of them expect. We do not guess again — we return the actual header
-    // markup so the selector can be written against real evidence, exactly as
-    // the Milestone 4 eligibility engine was.
-    const headerHtml = await captureModalHeader(modal);
+    return false;
+}
 
-    const matchedNothing = attempts.every((a) => !a.matched);
+/** Look for an in-page (non-native) unsaved-changes prompt. */
+async function findUnsavedChangesPrompt(page) {
+    for (const frame of page.frames()) {
+        try {
+            const prompt = frame.getByText(UNSAVED_CHANGES_PATTERN).first();
 
-    return {
-        ok: false,
-        error: matchedNothing
-            ? `every close candidate matched ZERO elements — the X was never clicked because nothing ` +
-              `was found to click. This is a SELECTOR miss, not the modal resisting.`
-            : `a close control was found and clicked, but the modal stayed open.`,
-        attempts,
-        modalHeaderHtml: headerHtml,
-    };
+            if (await prompt.count()) {
+                return (await prompt.textContent())?.trim().slice(0, 200) ?? "(unreadable)";
+            }
+        } catch {
+            // detached frame
+        }
+    }
+
+    return null;
 }
 
 /**
- * Return the modal's header markup, so a failed close produces EVIDENCE rather
- * than another round of guessing at selectors.
- *
- * Read-only. Reads outerHTML. Touches nothing.
+ * Capture the modal markup on failure, so a selector is written against real
+ * evidence rather than another guess. Read-only: reads outerHTML, touches nothing.
  */
-async function captureModalHeader(modal) {
-    const containers = [
-        ".modal-header",
-        ".ui-dialog-titlebar",
-        ".modal-content",
-        "[role='dialog']",
-        ".modal",
-    ];
-
-    for (const selector of containers) {
+async function captureModalHtml(modal) {
+    for (const selector of [".modal-footer", ".modal-content", "[role='dialog']", ".modal"]) {
         try {
             const el = modal.locator(selector).first();
 
             if (await el.count()) {
-                const html = await el.evaluate((node) => node.outerHTML.slice(0, 1500));
+                const html = await el.evaluate((node) => node.outerHTML.slice(0, 2000));
                 return { selector, html };
             }
         } catch {
