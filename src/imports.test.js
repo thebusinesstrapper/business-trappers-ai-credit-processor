@@ -24,7 +24,7 @@
  * ===========================================================================
  */
 
-import { readdirSync, statSync } from "fs";
+import { readdirSync, statSync, readFileSync } from "fs";
 import { join } from "path";
 import { pathToFileURL } from "url";
 
@@ -99,6 +99,98 @@ for (const b of broken) {
 
 check(`every module resolves its imports (${modules.length} checked)`, broken.length === 0,
     `${broken.length} module(s) have unresolvable imports — Railway will crash at boot.`);
+
+console.log("\n=== EVERY NAMED IMPORT ACTUALLY EXISTS ===\n");
+
+// THIS IS THE CHECK THAT WOULD HAVE CAUGHT `normalizeIdentity is not defined`.
+//
+// crcClientProfile.js CALLED normalizeIdentity() but never IMPORTED it. That is
+// a ReferenceError at RUNTIME — `node --check` passes, module resolution passes,
+// and the failure appears only when the code path is actually executed. On a
+// browser-automation route, that meant a live Railway run, a Browserbase session,
+// and a CRC login before anything went wrong.
+//
+// A module resolving is not the same as its imports being satisfiable.
+
+const namedImportMisses = [];
+
+for (const path of modules) {
+    const rel = path.replace(ROOT, "");
+    const source = readFileSync(path, "utf-8");
+
+    // import { a, b as c } from "./x.js"
+    const importRe = /import\s*\{([^}]+)\}\s*from\s*["'](\.[^"']+)["']/g;
+
+    let match;
+    while ((match = importRe.exec(source)) !== null) {
+        const names = match[1]
+            .split(",")
+            .map((n) => n.trim().split(/\s+as\s+/)[0].trim())
+            .filter(Boolean);
+
+        const targetPath = new URL(match[2], pathToFileURL(path)).pathname;
+
+        let target;
+        try {
+            target = await import(pathToFileURL(targetPath).href);
+        } catch {
+            continue; // resolution failure is reported by the check above
+        }
+
+        for (const name of names) {
+            if (!(name in target)) {
+                namedImportMisses.push({ rel, name, from: match[2] });
+            }
+        }
+    }
+}
+
+for (const miss of namedImportMisses) {
+    console.log(`  MISSING EXPORT: ${miss.rel} imports { ${miss.name} } from ${miss.from} — not exported.`);
+}
+
+check(`every named import exists in its target module`, namedImportMisses.length === 0,
+    `${namedImportMisses.length} import(s) name something the target does not export.`);
+
+console.log("\n=== EVERY IDENTIFIER USED IS DEFINED OR IMPORTED ===\n");
+
+// The inverse, and the one that actually bit us: a function CALLED but never
+// imported. It is not a missing export — the export exists. It is a missing
+// IMPORT, and nothing in the module system complains until the line runs.
+//
+// Narrow, deliberate scope: the identity-normalization path, which is frozen and
+// on the letter path. A general-purpose undefined-identifier checker is a linter,
+// and writing one here would be building the wrong thing.
+const IDENTITY_EXPORTS = ["normalizeIdentity", "canonicalState", "verifyIdentity", "fromCrcProfile", "formatAddress", "IDENTITY_SOURCE"];
+
+const undefinedUses = [];
+
+for (const path of modules) {
+    const rel = path.replace(ROOT, "");
+    const source = readFileSync(path, "utf-8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+
+    if (rel.includes("clientIdentity.js")) continue; // it defines them
+
+    for (const name of IDENTITY_EXPORTS) {
+        const used = new RegExp(`\\b${name}\\s*\\(`).test(source) || new RegExp(`\\b${name}\\.`).test(source);
+        if (!used) continue;
+
+        const imported = new RegExp(`import\\s*\\{[^}]*\\b${name}\\b[^}]*\\}`).test(source);
+
+        if (!imported) {
+            undefinedUses.push({ rel, name });
+        }
+    }
+}
+
+for (const u of undefinedUses) {
+    console.log(`  USED BUT NOT IMPORTED: ${u.rel} calls ${u.name}() — ReferenceError at runtime.`);
+}
+
+check("no identity function is used without being imported", undefinedUses.length === 0,
+    `${undefinedUses.length} runtime ReferenceError(s) waiting to happen.`);
 
 console.log("\n=== THE IDENTITY GATE HAS EXACTLY ONE HOME ===\n");
 
