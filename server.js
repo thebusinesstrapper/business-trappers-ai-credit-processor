@@ -12,7 +12,7 @@ import { runIdentifierSpike } from "./src/spikeIdentifiersRun.js";
 import { runClientProfileSpike } from "./src/spikeClientProfileRun.js";
 import { runProfileRead } from "./src/milestoneProfile.js";
 import { runMilestone6 } from "./src/milestone6.js";
-import { extractSkeletonNode, buildLiabilityMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
+import { extractSkeletonNode, buildLiabilityMap, buildFieldMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
 
 dotenv.config();
 
@@ -490,6 +490,53 @@ app.post("/debug/liability-map", async (req, res) => {
 
 });
 
+/**
+ * TEMPORARY — SCHEMA DISCOVERY ONLY. DELETE WHEN M7 IS COMPLETE.
+ *
+ * POST /debug/field-map
+ *   header: x-debug-token: <DEBUG_TOKEN>
+ *   body:   { "clientName": "Elizabeth Kelley" }
+ *
+ * Resolves every candidate key name against the real payload AND enumerates the
+ * DISTINCT VALUES of the fields whose vocabulary we must know before writing logic
+ * that reads them — above all _AccountOwnershipType, because the Project
+ * Constitution forbids disputing authorized-user accounts and a wrong guess at
+ * that spelling fails SILENTLY.
+ *
+ * Reuses M6 as-is. Read-only. Spends nothing.
+ */
+app.post("/debug/field-map", async (req, res) => {
+
+    if (!debugGateOpen(req, res, "/debug/field-map")) return;
+
+    try {
+
+        const result = await runMilestone6(req.body);
+
+        if (!result.success) {
+            return res.json({
+                ok: false,
+                reason: "The M6 capture did not succeed, so there is no payload to read.",
+                milestone_error: result
+            });
+        }
+
+        if (!result.payload) {
+            return res.json({ ok: false, reason: "M6 succeeded but returned no payload." });
+        }
+
+        return res.json(buildFieldMap(result.payload));
+
+    } catch (error) {
+
+        console.error(error);
+
+        return res.status(500).json({ ok: false, error: error.message });
+
+    }
+
+});
+
 app.get("/debug/routes", (req, res) => {
 
     if (!debugGateOpen(req, res, "/debug/routes")) return;
@@ -536,6 +583,7 @@ app.listen(PORT, () => {
     const REQUIRED_DEBUG_ROUTES = [
         "POST /debug/skeleton-node",
         "POST /debug/liability-map",
+        "POST /debug/field-map",
         "GET /debug/routes",
     ];
 
