@@ -18,6 +18,8 @@ import { OPENINGS, renderOpening } from "./voice/openingLibrary.js";
 import { TRANSITIONS } from "./voice/transitionLibrary.js";
 import { CLOSINGS, renderClosing } from "./voice/closingLibrary.js";
 import { selectVoice, combinationCount } from "./voice/index.js";
+import { resolveRecipient, supportedBureaus, BUREAUS } from "./voice/recipientLibrary.js";
+import { APPROVED_BY_BUSINESS_TRAPPERS as OPENINGS_APPROVED } from "./voice/openingLibrary.js";
 
 let passed = 0, failed = 0;
 const check = (n, a, e) => {
@@ -175,6 +177,41 @@ console.log(v1.opening.text);
 console.log("\n" + v1.transition.text);
 console.log("\n[account sections]\n");
 console.log(v1.closing.text);
+
+console.log("\n=== RECIPIENT STANDARD: never a generic greeting ===\n");
+
+const GENERIC = /credit reporting agency|to whom it may concern|dear sir|dear madam|dear sir or madam/i;
+
+for (const key of supportedBureaus()) {
+    const r = resolveRecipient(key);
+    check(`${key}: resolves`, r.ok, true);
+    check(`${key}: greeting names the bureau`, r.greeting.includes(r.shortName), true);
+    check(`${key}: greeting is not generic`, GENERIC.test(r.greeting), false);
+    check(`${key}: address block is not generic`, GENERIC.test(r.addressBlock), false);
+}
+
+check("TransUnion legal entity", resolveRecipient("transunion").legalName, "TransUnion LLC");
+check("Experian legal entity", resolveRecipient("experian").legalName, "Experian Information Solutions, Inc.");
+check("Equifax legal entity", resolveRecipient("equifax").legalName, "Equifax Information Services LLC");
+
+// An unknown bureau must NOT silently fall back to a generic greeting — that
+// would reintroduce the exact failure this standard forbids, on the first typo.
+const unknown = resolveRecipient("transunion-typo");
+check("unknown bureau -> FAILS CLOSED", unknown.ok, false);
+check("...and does NOT fall back to a generic greeting", !!unknown.greeting, false);
+
+// Recipients must NOT vary. There is one correct entity per bureau.
+const a = resolveRecipient("experian");
+const b = resolveRecipient("experian");
+check("recipient never varies", a.legalName === b.legalName && a.greeting === b.greeting, true);
+
+console.log("\n=== PLACEHOLDER LIBRARIES MUST DECLARE THEMSELVES ===\n");
+
+// The engineer wrote the current entries. Kris has not seen them. A library that
+// certifies its own approval is the same bug class as the identity string
+// literal that put a fabricated address on a letter.
+check("opening library is NOT yet approved", OPENINGS_APPROVED, false);
+check("voice provenance reports it", selectVoice(ctx).provenance.librariesApproved, false);
 
 console.log(`\n${passed} passed, ${failed} failed.\n`);
 if (failed > 0) process.exit(1);
