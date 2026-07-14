@@ -177,8 +177,14 @@ const SPEC = {
 
     COL_MISSING_ORIGINAL_CREDITOR: {
         bureauLocal: true,
-        defect: () => `Reported as a collection with no original creditor identified.`,
-        standard: "A collection that does not identify the original creditor cannot be verified.",
+        // We may state what the report DOES NOT SAY. We may NOT conclude from
+        // that silence that the debt "cannot be verified" — the bureau may hold
+        // information we cannot see. Absence of a field in the report is not
+        // proof of absence of verification.
+        defect: () =>
+            `The reporting does not identify the original creditor. I dispute the completeness and ` +
+            `accuracy of this collection account and request a reasonable reinvestigation.`,
+        standard: null,
         authority: AUTH.REINVESTIGATION,
     },
 
@@ -212,35 +218,60 @@ const SPEC = {
     TL_XB_STATUS_INCONSISTENT: {
         bureauLocal: false,
         defect: (e) => `The account status is reported as ${e.this_bureau?.value ?? "shown"}. I dispute the accuracy of this status.`,
-        standard: "The reported status cannot be verified as accurate.",
+        standard: null,
         authority: AUTH.REINVESTIGATION,
     },
 
     TL_XB_BALANCE_INCONSISTENT: {
         bureauLocal: false,
         defect: () => `I dispute the accuracy of the balance reported for this account.`,
-        standard: "The reported balance cannot be verified as accurate.",
+        standard: null,
         authority: AUTH.REINVESTIGATION,
     },
 
     TL_XB_PAST_DUE_INCONSISTENT: {
         bureauLocal: false,
         defect: () => `I dispute the accuracy of the past-due amount reported for this account.`,
-        standard: "The reported past-due amount cannot be verified as accurate.",
+        standard: null,
         authority: AUTH.REINVESTIGATION,
     },
 
     TL_XB_DOFD_INCONSISTENT: {
         bureauLocal: false,
         defect: (e) => `I dispute the accuracy of the date of first delinquency reported for this account.`,
-        standard: "This date determines the permissible reporting period and cannot be verified as accurate.",
+        standard: "This date determines the permissible reporting period.",
         authority: AUTH.DOFD,
     },
 
     COL_XB_BALANCE_INCONSISTENT: {
         bureauLocal: false,
         defect: () => `I dispute the accuracy of the balance reported for this collection.`,
-        standard: "The reported balance cannot be verified as accurate.",
+        standard: null,
+        authority: AUTH.REINVESTIGATION,
+    },
+
+    // ---- BASELINE REINVESTIGATION (BT-DM-0054) ---------------------------
+    //
+    // ASSERTS NO DEFECT. This is the consumer exercising a §611 right, and the
+    // wording must not drift one inch beyond it. It says what she disputes and
+    // what she asks for. It does NOT say the account is inaccurate, false, or
+    // unverifiable — the processor has established none of those things, and to
+    // claim otherwise would be to invent a fact in her name.
+    TL_BASELINE_REINVESTIGATION: {
+        bureauLocal: true,
+        defect: () =>
+            `I dispute the completeness and accuracy of this account and request a reasonable ` +
+            `reinvestigation.`,
+        standard: null,
+        authority: AUTH.REINVESTIGATION,
+    },
+
+    COL_BASELINE_REINVESTIGATION: {
+        bureauLocal: true,
+        defect: () =>
+            `I dispute the completeness and accuracy of this collection account and request a ` +
+            `reasonable reinvestigation.`,
+        standard: null,
         authority: AUTH.REINVESTIGATION,
     },
 
@@ -271,7 +302,14 @@ const SPEC = {
  */
 export async function generateLetters(chain, analysis, context = {}) {
 
-    const { clientIdentity, letterDate = new Date() } = context;
+    const {
+        clientIdentity,
+        letterDate = new Date(),
+        // FIRST PRODUCTION VALIDATION. Every letter is reviewed by a human,
+        // regardless of what the automation policy would otherwise permit. The
+        // first real package is not the place to discover we trusted a tier.
+        firstProductionValidation = false,
+    } = context;
 
     if (!chain?.chainOk) {
         return { schemaVersion: LETTER_SCHEMA_VERSION, lettersOk: false, errors: ["Chain incomplete."], letters: [], withheld: [] };
@@ -360,7 +398,18 @@ export async function generateLetters(chain, analysis, context = {}) {
 
         for (const item of items) {
             const source = findingsByItem.get(item.stableItemKey);
-            if (!source) continue;
+
+            // A BASELINE item legitimately has no analysis findings — that is its
+            // entire premise. Only a NON-baseline item missing from analysis is a bug.
+            if (!source && !item.baseline) {
+                withheld.push({
+                    stableItemKey: item.stableItemKey,
+                    bureau: item.bureau,
+                    furnisher: item.furnisher,
+                    reason: "Item reached letter generation but has no analysis record. THIS IS A BUG.",
+                });
+                continue;
+            }
 
             const masked = maskedByItem.get(item.stableItemKey);
 
@@ -376,6 +425,46 @@ export async function generateLetters(chain, analysis, context = {}) {
                         "No masked account number is reported by this bureau for this tradeline. The " +
                         "dispute cannot identify the account, so it is withheld rather than sent " +
                         "unidentifiable.",
+                });
+                continue;
+            }
+
+            // ---- BASELINE REINVESTIGATION ----------------------------------
+            //
+            // No findings. Nothing has been proven about this account. The letter
+            // says EXACTLY that and no more: it disputes, and it requests. It does
+            // not allege.
+            //
+            // Note what is absent: no "this is inaccurate", no "this cannot be
+            // verified", no invented defect. Every word below is true of an account
+            // the processor has examined and found nothing wrong with.
+            if (item.baseline) {
+                sections.push({
+                    stableItemKey: item.stableItemKey,
+                    stableAccountKey: item.stableAccountKey,
+                    furnisher: item.furnisher,
+                    maskedAccount: masked,
+                    round: item.round,
+                    escalated: item.escalated,
+                    requestedRemedy: item.requestedRemedy,
+                    strategy: item.strategy?.strategy ?? null,
+                    decisionRecord: item.decisionRecord,
+                    baseline: true,
+                    complianceGated: false,
+                    unspeccedFindings: [],
+                    text: [
+                        `${item.furnisher ?? "Account"}`,
+                        `Account Number: ${masked}`,
+                        ``,
+                        ...(item.escalated
+                            ? [`Previously disputed. The information remains on my file and was not corrected.`, ``]
+                            : []),
+                        `I dispute the completeness and accuracy of this account and request a reasonable investigation.`,
+                        ``,
+                        AUTH.REINVESTIGATION,
+                        ``,
+                        `Requested action: If the information cannot be verified as complete and accurate, please delete or correct the reporting.`,
+                    ].join("\n"),
                 });
                 continue;
             }
@@ -431,18 +520,21 @@ export async function generateLetters(chain, analysis, context = {}) {
                 ...local.map((x) => x.spec.defect(x.finding.evidence ?? {})),
                 ...(disputedFields.length
                     ? [
-                          `I dispute the accuracy of the ${
+                          // Cross-bureau variance SUPPORTS OPENING A DISPUTE. It does
+                          // not prove the RECIPIENT bureau is the wrong one. So we
+                          // never say "cannot be verified as accurate" — that is a
+                          // conclusion we have not earned. We say the consumer
+                          // disputes it, which is true by construction.
+                          `I dispute the completeness and accuracy of the ${
                               disputedFields.length === 1
                                   ? disputedFields[0]
-                                  : `${disputedFields.slice(0, -1).join(", ")} and ${disputedFields.slice(-1)}`
-                          } reported for this account. ${
-                              disputedFields.length === 1 ? "It cannot" : "They cannot"
-                          } be verified as accurate.`,
+                                  : `${disputedFields.slice(0, -1).join(", ")}, and ${disputedFields.slice(-1)}`
+                          } reported for this account and request a reasonable reinvestigation.`,
                       ]
                     : []),
             ];
 
-            const standards = [...new Set(local.map((x) => x.spec.standard))];
+            const standards = [...new Set(local.map((x) => x.spec.standard).filter(Boolean))];
 
             // ONE authority. The strongest that applies.
             const authority =
@@ -555,7 +647,10 @@ export async function generateLetters(chain, analysis, context = {}) {
             accountSections: sections,
             body,
 
-            requiresHumanReview: items.some((i) => i.humanReview),
+            requiresHumanReview: firstProductionValidation || items.some((i) => i.humanReview),
+            reviewReason: firstProductionValidation
+                ? "FIRST_PRODUCTION_VALIDATION"
+                : (items.some((i) => i.humanReview) ? "POLICY" : null),
             complianceGated: sections.some((s) => s.complianceGated),
 
             // NOT part of the letter. Kris reads this beside it.
