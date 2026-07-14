@@ -134,18 +134,33 @@ export async function runMilestone6(data = {}) {
             );
         }
 
-        console.log(`Report selector: ${selector.options.length} report(s) available.`);
-        selector.options.forEach((o) => console.log(`  - ${o.label} (${o.date ?? "unparseable"})`));
+        const parsed = selector.selector; // { reports, rejected, newest, count }
 
-        const freshness = decideFreshness({
-            selector,
-            memory: data.memory ?? null,
-        });
+        console.log(`Report selector: ${parsed.count} report(s) positively identified.`);
+        parsed.reports.forEach((r) => console.log(`  - ${r.text} -> ${r.reportDate}`));
+
+        if (parsed.rejected.length) {
+            console.log(`  ${parsed.rejected.length} option(s) rejected as not-a-report:`);
+            parsed.rejected.forEach((r) => console.log(`    - "${r.text}" (${r.reason})`));
+        }
+
+        // decideFreshness takes TWO positional arguments: (selector, memory).
+        // Passing a single object leaves `newest` and `count` undefined, which
+        // resolves to MANUAL_REVIEW — a fail-closed default that would halt every
+        // run on every client while looking like a legitimate refusal.
+        const freshness = decideFreshness(parsed, data.memory ?? {});
 
         console.log(`Freshness decision: ${freshness.action} — ${freshness.reason}`);
 
         if (freshness.action === ACTION.MANUAL_REVIEW) {
             return errorResponse("FRESHNESS_MANUAL_REVIEW", freshness.reason);
+        }
+
+        // NO_ACTION_REQUIRED means memory has already analyzed this report. That is
+        // a decision about whether a DISPUTE CYCLE is due — not about whether we may
+        // read the report. This milestone is capture only, so we proceed.
+        if (freshness.action === ACTION.NO_ACTION_REQUIRED) {
+            console.log("Memory has seen this report before. Capturing anyway — this run is capture-only.");
         }
 
         if (freshness.action === ACTION.ACQUISITION_REQUIRED) {
@@ -164,9 +179,18 @@ export async function runMilestone6(data = {}) {
         }
 
         // ---- 5. SELECT THE NEWEST ------------------------------------------
-        const target = freshness.selectedOption;
+        //
+        // freshness.select is { value, text } — the shape selectReport() expects.
+        const target = freshness.select;
 
-        console.log(`Selecting newest report: ${target.label}`);
+        if (!target) {
+            return errorResponse(
+                "NO_REPORT_SELECTED",
+                `Freshness returned ${freshness.action} but supplied no report to select. ${freshness.reason}`
+            );
+        }
+
+        console.log(`Selecting newest report: ${target.text} (${freshness.newestReportDate})`);
 
         const selected = await selectReport(page, target);
 
@@ -191,7 +215,7 @@ export async function runMilestone6(data = {}) {
             );
         }
 
-        console.log(`VERIFIED ACTIVE: ${target.label}`);
+        console.log(`VERIFIED ACTIVE: ${target.text}`);
 
         // ---- 7. LET THE SELECTED REPORT'S PAYLOAD ARRIVE --------------------
         //
@@ -230,12 +254,13 @@ export async function runMilestone6(data = {}) {
             identityVerified: true,
 
             reportSelected: {
-                label: target.label,
-                date: target.date,
+                text: target.text,
+                date: freshness.newestReportDate,
                 verifiedActive: true,
             },
 
-            selectorOptions: selector.options.map((o) => ({ label: o.label, date: o.date })),
+            selectorOptions: parsed.reports.map((r) => ({ text: r.text, date: r.reportDate })),
+            selectorRejected: parsed.rejected,
             freshness: { action: freshness.action, reason: freshness.reason },
 
             // THE EVIDENCE. This is what the normalizer gets written against.
