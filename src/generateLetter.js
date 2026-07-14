@@ -62,6 +62,7 @@
  */
 
 import { verifyIdentity, formatAddress } from "./clientIdentity.js";
+import { selectOpening, selectClosing } from "./openings.js";
 
 export const LETTER_SCHEMA_VERSION = "BT-LETTER-3.0";
 
@@ -594,6 +595,10 @@ export async function generateLetters(chain, analysis, context = {}) {
                 reason: item.reason.reason,
                 instruction: item.instruction.instruction,
                 blueprint: item.blueprint.blueprint,
+                // Marks a section as the BASELINE path: a §611 request with no proven
+                // defect. Downstream (reconciliation, review UI) must be able to tell
+                // "we found a contradiction" from "we found nothing and said so".
+                baseline: specced.some((x) => /_BASELINE_REINVESTIGATION$/.test(x.finding.code)),
                 complianceGated: specced.some((x) => x.spec.complianceGated),
                 unspeccedFindings: unspecced.map((f) => f.code),
                 text: lines.join("\n"),
@@ -602,15 +607,33 @@ export async function generateLetters(chain, analysis, context = {}) {
 
         if (sections.length === 0) continue;
 
-        // A NEUTRAL OPENING.
+        // A HISTORY-NEUTRAL OPENING, SELECTED — NOT GENERATED.
         //
-        // It must be true of EVERY account in the letter — first-round and
-        // escalated alike. So it asserts nothing about dispute history. Anything
-        // that IS history-specific ("I previously disputed this") belongs in the
-        // account section, where it is true of that account and only that account.
-        const opening =
-            `I am disputing the accuracy of the following information on my credit file. ` +
-            `Please reinvestigate each item identified below.`;
+        // The opening asserts something about EVERY account in the letter, and a
+        // bureau letter carries first-round and escalated accounts side by side.
+        // So it says nothing about dispute history: "I previously disputed these"
+        // would be FALSE for any account being disputed for the first time.
+        // Per-account history lives in the account section, where it is true.
+        //
+        // Variation comes from SELECTION over an approved library, seeded on the
+        // client, bureau, round and report date. Deterministic: the same letter
+        // regenerates word-for-word, and no sentence can appear that a human did
+        // not approve.
+        const openingChoice = selectOpening({
+            crcClientId: identity.crcClientId,
+            bureau,
+            round,
+            reportDate: context.reportDate ?? null,
+        });
+
+        const closingChoice = selectClosing({
+            crcClientId: identity.crcClientId,
+            bureau,
+            round,
+            reportDate: context.reportDate ?? null,
+        });
+
+        const opening = openingChoice.text;
 
         const body = [
             identity.name,
@@ -630,7 +653,7 @@ export async function generateLetters(chain, analysis, context = {}) {
             "",
             "---",
             "",
-            "Please provide the results of your investigation in writing.",
+            closingChoice.text,
             "",
             "Sincerely,",
             "",
@@ -646,6 +669,9 @@ export async function generateLetters(chain, analysis, context = {}) {
             stableItemKeys: sections.map((s) => s.stableItemKey),
             accountSections: sections,
             body,
+
+            openingIndex: openingChoice.index,   // audit: which approved opening was used
+            closingIndex: closingChoice.index,
 
             requiresHumanReview: firstProductionValidation || items.some((i) => i.humanReview),
             reviewReason: firstProductionValidation
