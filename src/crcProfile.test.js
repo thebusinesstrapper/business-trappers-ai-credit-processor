@@ -49,7 +49,13 @@ const WRITE_APIS = [
     [".check(", /\.check\s*\(/],
     [".uncheck(", /\.uncheck\s*\(/],
     [".setInputFiles(", /\.setInputFiles\s*\(/],
-    [".type(", /\.type\s*\(/],
+
+    // NOT /\.type\s*\(/ — that matches `dialog.type()`, which READS a dialog's
+    // type and writes nothing. Same false-positive class as /sue/ matching
+    // "isSUE". A guardrail that fires on innocent code is one people learn to
+    // override, and then it protects nothing. Exclude the known reader.
+    [".type( — keyboard input", /(?<!dialog)\.type\s*\(/],
+
     [".press(", /\.press\s*\(/],
 ];
 
@@ -252,50 +258,63 @@ check("...even though everything else is fine", badState.errors.some((e) => /can
 const doubleSpace = verifyIdentity({ ...messy, address_line_1: "5084  Louvinia Dr" });
 check("double space in address is REFUSED", doubleSpace.ok, false);
 
-console.log("\n=== FAILURE TO CLOSE THE MODAL IS A FAILED NAVIGATION ===\n");
+console.log("\n=== FROZEN NAVIGATION: EXIT VIA CANCEL ===\n");
 
 const readerSrc = readFileSync(new URL("./crcClientProfile.js", import.meta.url), "utf-8");
 
-check("MODAL_NOT_CLOSED is a returned error code", /error_code:\s*"MODAL_NOT_CLOSED"/.test(readerSrc), true);
-check("...it sets ok: false", /ok: false,\s*\n\s*error_code: "MODAL_NOT_CLOSED"/.test(readerSrc), true);
-check("...and supplies NO identity downstream", /identityRead: identity,\s*\/\/ diagnostic only/.test(readerSrc), true);
-check("...and routes to a human", /error_code: "MODAL_NOT_CLOSED",[\s\S]{0,3000}requiresHumanReview: true/.test(readerSrc), true);
-check("no longer a silent warning", /WARNING: could not close/.test(readerSrc), false);
+check("exits via Cancel", /const CANCEL_LABEL = "Cancel"/.test(readerSrc), true);
+check("...and no longer uses the X", /upper-right X|button:has-text\("×"\)/.test(readerCode), false);
+check("still READ ONLY — no Save", /getByRole\(\s*"button"\s*,\s*\{\s*name:\s*\/\^?save/i.test(readerCode), false);
+check("still READ ONLY — no .fill()", /\.fill\s*\(/.test(readerCode), false);
+check("still READ ONLY — no .selectOption()", /\.selectOption\s*\(/.test(readerCode), false);
 
-check("retries the close once before failing", /MAX_ATTEMPTS = 2/.test(readerSrc), true);
+console.log("\n--- Cancel is found tag-agnostically, role LAST ---");
 
-console.log("\n--- The close routine must not be blinded by role-based queries ---");
+// CRC renders href-less <a> controls carrying NO ARIA role. Leading with
+// getByRole is what made the X unreachable: we matched nothing, clicked nothing,
+// and reported that the modal "refused to close" when we had never touched it.
+check("does NOT lead with a role-based query", readerSrc.indexOf('name: "exact text (any tag)"') < readerSrc.indexOf('name: "role=button (last resort)"'), true);
+check("matches an <a> or <input> Cancel", /:is\(button, a, input, span, div\):text-is/.test(readerSrc), true);
 
-// The live run clicked NOTHING. Every candidate matched zero elements, and the
-// failure reported as "the modal would not close" — which read like the modal
-// RESISTING when in fact we never touched it.
-//
-// openClient.js already documents why: CRC renders href-less <a>/<span> controls
-// that carry NO ARIA role, so every role-based query silently returns zero.
-// closeModal led with getByRole("button") and then required a literal <button>.
-check("does NOT lead with a role-based query", readerSrc.indexOf('{ name: "class-based') < readerSrc.indexOf('{ name: "role=button'), true);
-check("role-based candidate is LAST", readerSrc.indexOf('role=button (last resort)') > readerSrc.indexOf('class-based (any tag)'), true);
-check("close candidates are tag-agnostic", /:is\(a, span, i, div, button\)/.test(readerSrc), true);
-check("matches an href-less <a> or <span> X", /a\.close, span\.close/.test(readerSrc), true);
+console.log("\n=== AN UNSAVED-CHANGES PROMPT IS A PROCESSOR FAILURE ===\n");
 
-console.log("\n--- A failed close must produce EVIDENCE, not another guess ---");
+// READ MODE filled nothing. The form is clean. There is NO legitimate reason for
+// Cancel to ask about unsaved changes — if it does, a field WAS modified.
+check("UNSAVED_CHANGES_PROMPT is a distinct error code", /error_code: "UNSAVED_CHANGES_PROMPT"/.test(readerSrc), true);
+check("...names it a PROCESSOR FAILURE", /PROCESSOR FAILURE: clicking Cancel produced a dialog/.test(readerSrc), true);
+check("...routes to human review", /requiresHumanReview: true/.test(readerSrc), true);
 
-// "nothing worked" is indistinguishable from "never ran" and from "threw". That
-// ambiguity is what sent us hunting for an execution-path bug that did not exist.
-check("reports what EACH candidate matched", /closeAttempts: closed\.attempts/.test(readerSrc), true);
-check("captures the real modal markup on failure", /modalHeaderHtml: closed\.modalHeaderHtml/.test(readerSrc), true);
-check("distinguishes 'matched nothing' from 'clicked and refused'", /matchedNothing/.test(readerSrc), true);
+console.log("\n--- The trap: Playwright auto-dismisses native dialogs ---");
 
-// The old message ASSERTED an unsaved-changes prompt. We never observed one.
-check("does not assert a cause it did not observe", /If an unsaved-changes prompt is blocking it, a field WAS/.test(readerSrc), false);
-check("...states it conditionally instead", /and only if[\s\S]{0,40}a close control WAS clicked/.test(readerSrc), true);
+// A browser-level confirm("unsaved changes") is dismissed SILENTLY by default.
+// The modal would close, the run would continue, and we would never learn the
+// processor had edited a client's record. The one failure we most need to catch
+// is the one the framework hides.
+check("attaches a dialog listener", /page\.on\("dialog"/.test(readerSrc), true);
+check("...BEFORE clicking Cancel", readerSrc.indexOf('page.on("dialog"') < readerSrc.indexOf("Clicked Cancel via"), true);
+check("...and detaches it afterwards", /page\.off\("dialog"/.test(readerSrc), true);
+check("dismisses (discards) — never accepts/saves", /dialog\.dismiss\(\)/.test(readerSrc), true);
+check("...and never accepts a dialog", /dialog\.accept\(\)/.test(readerSrc), false);
 
-// Frozen navigation: the X. Never Cancel, never Escape, never a backdrop click.
-// readerCode is comment-stripped. "Escape" appears in a COMMENT explaining that
-// we deliberately do NOT press it — checking raw source would flag the very
-// documentation of the correct behaviour.
-check("never clicks Cancel", /Cancel/i.test(readerCode), false);
-check("never presses Escape", /Escape|\.press\(/i.test(readerCode), false);
+// CRC may render its OWN prompt rather than a native one, in which case no
+// dialog event fires at all and the listener above would pass happily.
+check("also detects an IN-PAGE unsaved prompt", /findUnsavedChangesPrompt/.test(readerSrc), true);
+
+console.log("\n=== BOTH EXIT CONDITIONS ARE VERIFIED ===\n");
+
+// "The modal is gone" and "the dashboard works" are different facts. An absence
+// check alone passes on a blank page, an error screen, or an unintended nav.
+check("verifies the modal is no longer visible", /error_code: "MODAL_STILL_VISIBLE"/.test(readerSrc), true);
+check("verifies View/Edit Profile is visible again", /error_code: "DASHBOARD_NOT_RESTORED"/.test(readerSrc), true);
+check("...a POSITIVE check, not just an absence", /PROFILE_LINK_TEXT[\s\S]{0,80}count\(\)\) > 0/.test(readerSrc), true);
+
+console.log("\n--- Failures are distinguishable, not collapsed into one ---");
+
+// "Nothing worked" is indistinguishable from "never ran" and from "threw" — and
+// that ambiguity is what sent us hunting for an execution-path bug last time.
+check("selector miss has its own code", /error_code: "CANCEL_CONTROL_NOT_FOUND"/.test(readerSrc), true);
+check("reports what each candidate matched", /cancelAttempts: closed\.attempts/.test(readerSrc), true);
+check("captures real markup when all miss", /modalHeaderHtml: closed\.modalHeaderHtml/.test(readerSrc), true);
 
 check("state that will not canonicalize STOPS the run", /error_code: "STATE_NOT_CANONICAL"/.test(readerSrc), true);
 
