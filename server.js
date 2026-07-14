@@ -12,7 +12,7 @@ import { runIdentifierSpike } from "./src/spikeIdentifiersRun.js";
 import { runClientProfileSpike } from "./src/spikeClientProfileRun.js";
 import { runProfileRead } from "./src/milestoneProfile.js";
 import { runMilestone6 } from "./src/milestone6.js";
-import { extractSkeletonNode } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
+import { extractSkeletonNode, buildLiabilityMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
 
 dotenv.config();
 
@@ -433,6 +433,52 @@ app.post("/debug/skeleton-node", async (req, res) => {
         }
 
         return res.json(extractSkeletonNode(skeleton, path));
+
+    } catch (error) {
+
+        console.error(error);
+
+        return res.status(500).json({ ok: false, error: error.message });
+
+    }
+
+});
+
+/**
+ * TEMPORARY — SCHEMA DISCOVERY ONLY. DELETE WHEN M7 IS COMPLETE.
+ *
+ * POST /debug/liability-map
+ *   header: x-debug-token: <DEBUG_TOKEN>
+ *   body:   { "clientName": "Elizabeth Kelley" }
+ *
+ * Projects EVERY CREDIT_LIABILITY into one flat row. The skeleton samples element
+ * [0] only, and one row cannot answer whether a liability is one BUREAU'S
+ * TRADELINE or one MERGED ACCOUNT — a question that governs the entire extraction
+ * design. This counts the answer instead of inferring it.
+ *
+ * Reuses M6 as-is. Read-only. Spends nothing.
+ */
+app.post("/debug/liability-map", async (req, res) => {
+
+    if (!debugGateOpen(req, res, "/debug/liability-map")) return;
+
+    try {
+
+        const result = await runMilestone6(req.body);
+
+        if (!result.success) {
+            return res.json({
+                ok: false,
+                reason: "The M6 capture did not succeed, so there is no payload to read.",
+                milestone_error: result
+            });
+        }
+
+        if (!result.payload) {
+            return res.json({ ok: false, reason: "M6 succeeded but returned no payload." });
+        }
+
+        return res.json(buildLiabilityMap(result.payload));
 
     } catch (error) {
 
