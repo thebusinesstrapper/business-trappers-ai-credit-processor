@@ -42,6 +42,7 @@ import {
     automationTierFor,
     applyOverride,
     requiresHumanReview,
+    complianceGateFor,
 } from "./decisionRecords.js";
 
 export const DECISION_SCHEMA_VERSION = "BT-DECISION-1.0";
@@ -80,10 +81,53 @@ const SEVERITY_RANK = { CRITICAL: 5, HIGH: 4, MEDIUM: 3, LOW: 2, INFO: 1 };
  * consumer loses that history. The account is not theirs to dispute in the
  * first place.
  */
+/**
+ * The ownership vocabulary, READ OFF THE LIVE PAYLOAD — not invented.
+ *
+ * Confirmed present in run #83 across 119 liability rows:
+ *   Individual, AuthorizedUser, JointContractualLiability, Terminated
+ *
+ * This list exists so that an UNRECOGNISED value is recognisable AS unrecognised.
+ * Without it, a new ownership type Array starts emitting tomorrow would simply
+ * fail the AuthorizedUser regex and be silently disputed.
+ */
+export const KNOWN_RESPONSIBILITY_VALUES = Object.freeze([
+    "Individual",
+    "AuthorizedUser",
+    "JointContractualLiability",
+    "Terminated",
+]);
+
 function checkAuthorizedUser(observation) {
     const responsibility = observation?.responsibility;
 
-    if (responsibility && AUTHORIZED_USER.test(String(responsibility))) {
+    // ---- FAIL CLOSED ON THE UNKNOWN --------------------------------------
+    //
+    // THIS CHECK PREVIOUSLY FAILED OPEN.
+    //
+    // A null or unrecognised responsibility fell through the regex, returned null,
+    // and the tradeline WAS DISPUTED. That is precisely backwards: the one field
+    // that tells us whether an account is the consumer's to dispute was allowed to
+    // be missing, and its absence was read as permission.
+    //
+    // We cannot dispute an account whose ownership we do not know. An authorized-
+    // user tradeline usually carries someone else's GOOD history — disputing it
+    // invites its deletion, and the consumer loses history that was helping her.
+    // The cost of stopping is one item reviewed by a human. The cost of guessing
+    // is beneficial history destroyed, irreversibly, in her name.
+    if (!responsibility) {
+        return {
+            rule: "RESPONSIBILITY_UNKNOWN",
+            reason:
+                `No reported responsibility/ownership value. We cannot confirm this account is the ` +
+                `consumer's to dispute, and the Project Constitution forbids disputing authorized ` +
+                `user accounts. An ABSENT value is not evidence of individual ownership. Routing to ` +
+                `human review rather than disputing on an assumption.`,
+            decisionRecord: DECISION_HUMAN_EXCEPTION,
+        };
+    }
+
+    if (AUTHORIZED_USER.test(String(responsibility))) {
         return {
             rule: "CONSTITUTION_NEVER_DISPUTE_AUTHORIZED_USER",
             reason:
@@ -91,6 +135,18 @@ function checkAuthorizedUser(observation) {
                 `disputing authorized user accounts. Disputing it risks removing beneficial history ` +
                 `that is not the consumer's to dispute.`,
             decisionRecord: DECISION_AUTHORIZED_USER,
+        };
+    }
+
+    if (!KNOWN_RESPONSIBILITY_VALUES.includes(String(responsibility))) {
+        return {
+            rule: "RESPONSIBILITY_UNRECOGNISED",
+            reason:
+                `Reported responsibility is "${responsibility}", which is not in the vocabulary ` +
+                `observed in production (${KNOWN_RESPONSIBILITY_VALUES.join(", ")}). We do not know ` +
+                `whether it denotes an authorized-user relationship. Routing to human review rather ` +
+                `than assuming it does not.`,
+            decisionRecord: DECISION_HUMAN_EXCEPTION,
         };
     }
 
@@ -395,6 +451,31 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
         );
     }
 
+    // ---- COMPLIANCE GATE ---------------------------------------------------
+    //
+    // Gathered from EVERY applicable record, not just the primary. A gated record
+    // riding along as a secondary decision would otherwise smuggle its forbidden
+    // assertion into the letter unnoticed.
+    //
+    // The gate is carried FORWARD on the decision object. It does not merely
+    // demote the tier — it tells the Letter Engine what it MAY NOT SAY. A human
+    // reviewer approving the letter does not clear the gate; only counsel does.
+    const complianceGates = records
+        .map((r) => complianceGateFor(r.record))
+        .filter(Boolean);
+
+    if (complianceGates.length > 0) {
+        tier = applyOverride(tier, POLICY_OVERRIDES.COMPLIANCE_GATED.tier);
+        appliedOverrides.push("COMPLIANCE_GATED");
+
+        for (const gate of complianceGates) {
+            humanReviewReasons.push(
+                `COMPLIANCE GATE on ${gate.record} (${gate.name}): ${gate.reason} ` +
+                `No automated letter may assert: ${gate.forbiddenAssertions.join("; ")}.`
+            );
+        }
+    }
+
     const humanReview = requiresHumanReview(tier);
 
     if (humanReview && humanReviewReasons.length === 0) {
@@ -443,6 +524,7 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
         evidenceClass: primary.evidenceClass,
         automationTier: tier,
         appliedOverrides,
+        complianceGates,   // travels downstream. The Letter Engine MUST honour this.
         humanReview,
         humanReviewReasons,
         exclusion: null,
@@ -627,6 +709,7 @@ export async function decideDisputes(analysis, context = {}) {
             excludedByConstitution: counts[OUTCOME.EXCLUDED],
             constitutionalExclusionsEnforced: exclusionsEnforced,
             libraryGapsFound: libraryGaps.length,
+            complianceGated: itemDecisions.filter((d) => (d.complianceGates ?? []).length > 0).length,
             blockedByMixedFile: mixedFile,
         },
     };
