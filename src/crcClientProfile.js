@@ -205,10 +205,6 @@ export async function readClientProfile(page, crcClientId) {
     // the browser session for whatever runs next.
     const closed = await closeModal(page, modal);
 
-    if (!closed.ok) {
-        console.error(`WARNING: could not close the Edit Profile modal — ${closed.error}`);
-    }
-
     // ---- Required fields are a HARD STOP -----------------------------------
     const missingRequired = missing.filter((m) => REQUIRED_FIELDS.includes(m.field));
 
@@ -229,8 +225,12 @@ export async function readClientProfile(page, crcClientId) {
         };
     }
 
-    // ---- Build the authoritative identity ----------------------------------
-    const identity = {
+    // ---- Build and NORMALIZE the authoritative identity ---------------------
+    //
+    // Normalization happens HERE, at the point of capture. Nothing downstream ever
+    // sees the raw DOM strings — they are retained under identity.raw for audit
+    // and are read by nobody.
+    const identity = normalizeIdentity({
         source: IDENTITY_SOURCE.CRC_CLIENT_PROFILE,
         crcClientId: String(crcClientId),
         retrievedAt: new Date().toISOString(),
@@ -240,7 +240,6 @@ export async function readClientProfile(page, crcClientId) {
         middleName: raw.middleName,
         lastName: raw.lastName,
 
-        // The Letter Engine's verifyIdentity() requires these exact names.
         name: [raw.firstName, raw.middleName, raw.lastName].filter(Boolean).join(" "),
         address_line_1: raw.address,
         city: raw.city,
@@ -249,15 +248,69 @@ export async function readClientProfile(page, crcClientId) {
 
         email: raw.email,
         phone: raw.phone,
-    };
+    });
+
+    // The state must canonicalize. CRC may hold "Florida"; the letter needs "FL".
+    // A state we cannot recognise is a letter that does not arrive — we do not guess.
+    if (!identity.state) {
+        return {
+            ok: false,
+            error_code: "STATE_NOT_CANONICAL",
+            error:
+                `The State field reads ${JSON.stringify(raw.state)}, which does not resolve to a ` +
+                `canonical two-letter code. A bureau letter addressed to an unrecognised state does ` +
+                `not arrive. Letter generation STOPS.`,
+            identity: null,
+            modalClosed: closed.ok,
+            dashboardUrl,
+        };
+    }
 
     console.log(`Identity read from CRC: ${identity.name}, ${identity.city}, ${identity.state}`);
+
+    // ---- THE MODAL MUST BE CLOSED — A FAILED CLOSE IS A FAILED NAVIGATION ---
+    //
+    // The frozen sequence ends on the DASHBOARD, not on an open modal. Two
+    // reasons, and the second is the one that matters:
+    //
+    //   1. The browser session is unusable. An open modal overlays the dashboard,
+    //      so every subsequent click lands on a backdrop or is swallowed. The next
+    //      milestone would fail somewhere far from here, with an error that says
+    //      nothing about a modal.
+    //
+    //   2. WE ARE IN READ MODE. WE CHANGED NOTHING. There is no legitimate reason
+    //      for this modal to resist closing. If an "unsaved changes" prompt is
+    //      holding it open, then a field WAS modified — and that is a processor
+    //      failure of the most serious kind, on the one form holding the
+    //      consumer's legal identity.
+    //
+    // The identity we read is returned for DIAGNOSIS. A failed run supplies no
+    // identity downstream.
+    if (!closed.ok) {
+        return {
+            ok: false,
+            error_code: "MODAL_NOT_CLOSED",
+            error:
+                `The Edit Profile modal did not close (${closed.error}). This is a FAILED NAVIGATION. ` +
+                `The processor does not continue with the modal open — every later click in this ` +
+                `session would land on the backdrop and fail far from the real cause. ` +
+                `NOTE: this was a READ-ONLY pass and NO field was modified, so nothing should be ` +
+                `holding this modal open. If an unsaved-changes prompt is blocking it, a field WAS ` +
+                `changed, and that requires immediate human review.`,
+            identityRead: identity, // diagnostic only
+            identity: null,
+            modalClosed: false,
+            requiresHumanReview: true,
+            dashboardUrl,
+            fieldsModified: 0,
+        };
+    }
 
     return {
         ok: true,
         identity,
         optionalMissing: missing.filter((m) => !REQUIRED_FIELDS.includes(m.field)),
-        modalClosed: closed.ok,
+        modalClosed: true,
         dashboardUrl,
 
         // INVARIANT. This module cannot write; there is no code path that could.
@@ -272,7 +325,9 @@ export async function readClientProfile(page, crcClientId) {
  * how the modal behaves, and on a form full of live fields a stray interaction
  * is the last thing we want. The X is the control the ruling names.
  */
-async function closeModal(page, modal) {
+async function closeModal(page, modal, attempt = 1) {
+    const MAX_ATTEMPTS = 2;
+
     const candidates = [
         () => modal.getByRole("button", { name: /close/i }).first(),
         () => modal.locator('[aria-label="Close" i]').first(),
@@ -304,7 +359,19 @@ async function closeModal(page, modal) {
         }
     }
 
-    return { ok: false, error: "No working close control was found on the Edit Profile modal." };
+    // One retry. A single missed click should not fail a run; a modal that
+    // refuses twice is a real problem.
+    if (attempt < MAX_ATTEMPTS) {
+        console.log(`Modal still open — retrying close (${attempt + 1}/${MAX_ATTEMPTS})...`);
+        await page.waitForTimeout(1000);
+
+        const stillOpen = await findModal(page);
+        if (!stillOpen) return { ok: true };
+
+        return closeModal(page, stillOpen, attempt + 1);
+    }
+
+    return { ok: false, error: `no close control worked after ${MAX_ATTEMPTS} attempts` };
 }
 
 export { FIELD_LABELS, REQUIRED_FIELDS };
