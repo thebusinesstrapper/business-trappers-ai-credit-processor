@@ -11,6 +11,7 @@ import { runReportJsonSpike } from "./src/spikeReportJsonRun.js";
 import { runIdentifierSpike } from "./src/spikeIdentifiersRun.js";
 import { runClientProfileSpike } from "./src/spikeClientProfileRun.js";
 import { runProfileRead } from "./src/milestoneProfile.js";
+import { runMilestone6 } from "./src/milestone6.js";
 
 dotenv.config();
 
@@ -260,6 +261,37 @@ app.post("/read-client-profile", async (req, res) => {
     try {
 
         const result = await runProfileRead(req.body);
+
+        res.json(result);
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+
+    }
+
+});
+
+/**
+ * MILESTONE 6 — REAL REPORT CAPTURE.
+ *
+ * Selects the newest report, VERIFIES it is active, and passively captures the
+ * Array.io payload. Does NOT normalize, reconcile, or generate letters — the
+ * Normalization Engine is written against what this returns, never against a
+ * guessed schema.
+ *
+ * Body: { "clientName": "Elizabeth Kelley" }
+ */
+app.post("/milestone-6", async (req, res) => {
+
+    try {
+
+        const result = await runMilestone6(req.body);
 
         res.json(result);
 
