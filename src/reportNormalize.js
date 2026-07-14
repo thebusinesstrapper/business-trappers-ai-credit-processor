@@ -147,7 +147,14 @@ const FIELD = Object.freeze({
     date_opened: ["@_AccountOpenedDate", "@AccountOpenedDate", "@_DateOpened"],
     date_reported: ["@_AccountReportedDate", "@AccountReportedDate", "@_DateReported"],
     date_closed: ["@_AccountClosedDate", "@AccountClosedDate"],
-    dofd: ["@_AccountFirstDelinquencyDate", "@_DateOfFirstDelinquency", "@FirstDelinquencyDate"],
+    // CONFIRMED from the live payload. My earlier candidates all missed.
+    //
+    // DOFD is load-bearing: BT-DM-0034 (Date of First Delinquency Conflict) and the
+    // obsolescence guardrail BT-DM-0051 both depend on it. Had this stayed
+    // unresolved it would read as null — and a null DOFD makes an obsolescence
+    // claim INDETERMINATE rather than false, so the failure would have been silent
+    // and conservative rather than loud.
+    dofd: ["@_FirstDelinquencyDate", "@_AccountFirstDelinquencyDate", "@_DateOfFirstDelinquency"],
     credit_limit: ["@_CreditLimitAmount", "@CreditLimitAmount"],
     high_balance: ["@_HighBalanceAmount", "@HighBalanceAmount", "@_HighCreditAmount"],
 
