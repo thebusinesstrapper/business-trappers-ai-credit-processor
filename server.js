@@ -509,12 +509,51 @@ app.listen(PORT, () => {
 
     console.log(`Business Trappers AI Credit Processor listening on port ${PORT}`);
 
-    // State it at boot. A 404 from a debug route is ambiguous by design; this line
-    // removes the ambiguity from the one place we can read without leaking it.
+    // ---- ENUMERATE THE ACTUAL ROUTER. DO NOT ASSERT. ----------------------
+    //
+    // The previous version of this log printed the word "REGISTERED" from a STRING
+    // LITERAL, branching only on DEBUG_TOKEN. It would have printed "REGISTERED"
+    // for a route that had never been written — and it did exactly that, while
+    // Express was returning "Cannot POST /debug/skeleton-node".
+    //
+    // That is the same defect as `IDENTITY SOURCE: CRC client profile
+    // (authoritative)` printed from a string literal, and it has the same cost:
+    // A GUARANTEE THAT IS ASSERTED RATHER THAN ENFORCED IS WORSE THAN NONE,
+    // BECAUSE IT STOPS PEOPLE LOOKING.
+    //
+    // So we read the router stack — the same source /debug/routes reads — and
+    // print what is genuinely mounted in THIS process.
+    const registered = app._router.stack
+        .filter((layer) => layer.route)
+        .map((layer) => `${Object.keys(layer.route.methods)[0].toUpperCase()} ${layer.route.path}`);
+
+    console.log(`Routes mounted (${registered.length}):`);
+
+    for (const route of registered) {
+        console.log(`  ${route}`);
+    }
+
+    const REQUIRED_DEBUG_ROUTES = [
+        "POST /debug/skeleton-node",
+        "POST /debug/liability-map",
+        "GET /debug/routes",
+    ];
+
+    const missing = REQUIRED_DEBUG_ROUTES.filter((r) => !registered.includes(r));
+
+    if (missing.length > 0) {
+        console.error(
+            `DEBUG ROUTES MISSING FROM THIS BUILD: ${missing.join(", ")}. ` +
+            `The deployed server.js is NOT the current one. Express will answer ` +
+            `"Cannot POST" for these paths.`
+        );
+    } else {
+        console.log("All debug routes are mounted.");
+    }
+
     console.log(
         process.env.DEBUG_TOKEN
-            ? "Debug routes: REGISTERED and DEBUG_TOKEN is set (/debug/routes, /debug/skeleton-node)."
-            : "Debug routes: REGISTERED but DEBUG_TOKEN is NOT SET — they will return 404 to every caller."
+            ? "DEBUG_TOKEN: set."
+            : "DEBUG_TOKEN: NOT SET — debug routes will return 404 to every caller."
     );
-
 });
