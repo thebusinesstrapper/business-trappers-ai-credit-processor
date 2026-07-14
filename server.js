@@ -551,8 +551,10 @@ app.post("/debug/collision-map", async (req, res) => {
     try {
         const result = await runMilestone6(req.body);
 
-        // extraction_ok is false on a collision — but the RAW PAYLOAD is still
-        // captured and returned, and that is what we read here.
+        // On a collision, M6 returns success:false — but as of the EXTRACTION_FAILED
+        // fix it now carries the RAW PAYLOAD on that failed path (a failure that
+        // discards its evidence cannot be diagnosed). We read the payload REGARDLESS
+        // of success: this endpoint exists to inspect exactly the failed case.
         const payload = result?.payload ?? null;
 
         if (!payload) {
