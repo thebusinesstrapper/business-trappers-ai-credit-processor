@@ -62,7 +62,7 @@
  */
 
 import { verifyIdentity, formatAddress } from "./clientIdentity.js";
-import { selectOpening, selectClosing } from "./openings.js";
+import { selectVoice } from "./voice/index.js";
 
 export const LETTER_SCHEMA_VERSION = "BT-LETTER-3.0";
 
@@ -607,33 +607,22 @@ export async function generateLetters(chain, analysis, context = {}) {
 
         if (sections.length === 0) continue;
 
-        // A HISTORY-NEUTRAL OPENING, SELECTED — NOT GENERATED.
+        // ---- LETTER VOICE ---------------------------------------------------
         //
-        // The opening asserts something about EVERY account in the letter, and a
-        // bureau letter carries first-round and escalated accounts side by side.
-        // So it says nothing about dispute history: "I previously disputed these"
-        // would be FALSE for any account being disputed for the first time.
+        // Three approved libraries, seeded on the client, bureau, round and report
+        // date. Deterministic: this letter regenerates word-for-word in two years.
+        //
+        // Every sentence in these libraries is HISTORY-NEUTRAL and makes no
+        // account-specific claim, because the opening speaks for the WHOLE letter
+        // — and a bureau letter carries first-round and escalated accounts side by
+        // side. "As I told you previously" would be false for the new ones.
         // Per-account history lives in the account section, where it is true.
-        //
-        // Variation comes from SELECTION over an approved library, seeded on the
-        // client, bureau, round and report date. Deterministic: the same letter
-        // regenerates word-for-word, and no sentence can appear that a human did
-        // not approve.
-        const openingChoice = selectOpening({
+        const voice = selectVoice({
             crcClientId: identity.crcClientId,
             bureau,
             round,
             reportDate: context.reportDate ?? null,
         });
-
-        const closingChoice = selectClosing({
-            crcClientId: identity.crcClientId,
-            bureau,
-            round,
-            reportDate: context.reportDate ?? null,
-        });
-
-        const opening = openingChoice.text;
 
         const body = [
             identity.name,
@@ -645,7 +634,9 @@ export async function generateLetters(chain, analysis, context = {}) {
             "",
             `Re: Dispute — ${identity.name}`,
             "",
-            opening,
+            voice.opening.text,
+            "",
+            voice.transition.text,
             "",
             "---",
             "",
@@ -653,7 +644,7 @@ export async function generateLetters(chain, analysis, context = {}) {
             "",
             "---",
             "",
-            closingChoice.text,
+            voice.closing.text,
             "",
             "Sincerely,",
             "",
@@ -670,8 +661,8 @@ export async function generateLetters(chain, analysis, context = {}) {
             accountSections: sections,
             body,
 
-            openingIndex: openingChoice.index,   // audit: which approved opening was used
-            closingIndex: closingChoice.index,
+            // Audit: Kris can reproduce this letter's voice from the combination alone.
+            voice: voice.provenance,
 
             requiresHumanReview: firstProductionValidation || items.some((i) => i.humanReview),
             reviewReason: firstProductionValidation
