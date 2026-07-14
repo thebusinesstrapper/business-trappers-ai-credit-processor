@@ -2,7 +2,20 @@
  * openingLibrary.js
  *
  * BUSINESS TRAPPERS OPENING LIBRARY™
- * Confidential & Proprietary. Kris-approved text only.
+ * Confidential & Proprietary.
+ *
+ * ###########################################################################
+ * ##  STATUS: PLACEHOLDER — NOT YET AUTHORED OR APPROVED BY BUSINESS TRAPPERS ##
+ * ##                                                                         ##
+ * ##  These entries were written by the engineer to build and test the       ##
+ * ##  ARCHITECTURE. They are structurally correct and factually safe, but    ##
+ * ##  they are NOT the Business Trappers voice and Kris has not seen them.   ##
+ * ##                                                                         ##
+ * ##  The approved library is authored separately. Replace the entries; the  ##
+ * ##  selection logic, the guardrails, and the tests all stay as they are.   ##
+ * ##                                                                         ##
+ * ##  DO NOT SEND A PRODUCTION LETTER BUILT ON THESE.                        ##
+ * ###########################################################################
  *
  * ===========================================================================
  * THIS FILE IS CONTENT, NOT LOGIC.
@@ -60,6 +73,10 @@
  */
 
 export const OPENING_LIBRARY_VERSION = "BT-OPENING-LIB-1.0";
+
+// Machine-readable. The Letter Engine surfaces this on every letter so a
+// placeholder library can never be mistaken for an approved one.
+export const APPROVED_BY_BUSINESS_TRAPPERS = false;
 
 /**
  * Each entry is 2–3 paragraphs, joined with a blank line.
