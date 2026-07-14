@@ -6,7 +6,7 @@
  */
 
 import { readFileSync } from "fs";
-import { walkSkeleton, extractSkeletonNode } from "./debugSkeleton.js";
+import { walkSkeleton, extractSkeletonNode, buildLiabilityMap } from "./debugSkeleton.js";
 
 let passed = 0, failed = 0;
 const check = (n, a, e) => {
@@ -116,9 +116,110 @@ const server = readFileSync(new URL("../server.js", import.meta.url), "utf-8");
 // With no DEBUG_TOKEN configured the route does not exist. 404, not 403 — a 403
 // would confirm to an unauthenticated caller that the endpoint is there.
 check("route is token-gated", /skeleton-node[\s\S]{0,400}x-debug-token/.test(server), true);
-check("...404 on a bad token, not 403", /skeleton-node[\s\S]{0,500}status\(404\)/.test(server), true);
+check("...404 on a bad token, not 403", /function debugGateOpen[\s\S]{0,1500}status\(404\)/.test(server), true);
+check("...never 403 (would confirm the route exists)", /status\(403\)/.test(server), false);
+check("...refusal REASON logged server-side", /REFUSED: DEBUG_TOKEN is not set/.test(server), true);
+check("...token values are NOT logged", /console\.error[^;]*\$\{supplied\}/.test(server), false);
+check("...tokens are trimmed", /\(process\.env\.DEBUG_TOKEN \?\? ""\)\.trim\(\)/.test(server), true);
+check("...boot log states if DEBUG_TOKEN is missing", /DEBUG_TOKEN is NOT SET/.test(server), true);
 check("...reuses M6, does not reimplement it", /skeleton-node[\s\S]{0,1800}await runMilestone6\(req\.body\)/.test(server), true);
 check("...marked TEMPORARY for removal", /TEMPORARY — SCHEMA DISCOVERY ONLY/.test(server), true);
+
+console.log("\n=== LIABILITY MAP: COUNT THE ANSWER, DO NOT INFER IT ===\n");
+
+// HYPOTHESIS A — SEPARATE. One liability = ONE BUREAU'S tradeline. The same real
+// account appears up to three times, correlated by @ArrayAccountIdentifier, and
+// each carries THAT BUREAU'S balance and status.
+//   -> Per-bureau values PRESERVED. Decision 4 holds. BT-DM-0031 provable.
+const separate = {
+    CREDIT_RESPONSE: {
+        CREDIT_LIABILITY: [
+            { "@ArrayAccountIdentifier": "ARR-1", "@TradelineHashSimple": "h1",
+              "@_UnpaidBalanceAmount": "4200", "@RawAccountStatus": "ChargeOff",
+              CREDIT_REPOSITORY: { "@_SourceType": "TransUnion" } },
+            { "@ArrayAccountIdentifier": "ARR-1", "@TradelineHashSimple": "h2",
+              "@_UnpaidBalanceAmount": "4350", "@RawAccountStatus": "Current",
+              CREDIT_REPOSITORY: { "@_SourceType": "Experian" } },
+            { "@ArrayAccountIdentifier": "ARR-2", "@TradelineHashSimple": "h3",
+              CREDIT_REPOSITORY: { "@_SourceType": "Equifax" } },
+        ],
+    },
+};
+
+const sep = buildLiabilityMap(separate);
+
+check("SEPARATE: 3 liabilities", sep.liability_count, 3);
+check("...every row names ONE bureau", sep.rows_with_multiple_bureaus, 0);
+check("...one account appears twice", sep.accounts_appearing_more_than_once, 1);
+check("...verdict = SEPARATE", /^SEPARATE/.test(sep.verdict), true);
+check("...Decision 4 holds", /Decision 4 holds/.test(sep.verdict), true);
+
+// The proof that per-bureau values survive: same account, DIFFERENT balances.
+const rows = JSON.parse(sep.rows_json);
+check("...same account, different balances", rows[0].balance !== rows[1].balance, true);
+check("...same account, different statuses", rows[0].status !== rows[1].status, true);
+
+console.log("\n--- HYPOTHESIS B: MERGED (the bad case) ---");
+
+// One liability carries SEVERAL bureaus, and the balance is a single merged scalar.
+// Array flattened before we saw it -> BT-DM-0031 unprovable, cross-bureau findings
+// in analyzeCreditReport.js become dead code.
+const merged = {
+    CREDIT_RESPONSE: {
+        CREDIT_LIABILITY: [
+            { "@ArrayAccountIdentifier": "ARR-1", "@_UnpaidBalanceAmount": "4200",
+              CREDIT_REPOSITORY: [
+                  { "@_SourceType": "TransUnion" },
+                  { "@_SourceType": "Experian" },
+                  { "@_SourceType": "Equifax" },
+              ] },
+        ],
+    },
+};
+
+const mrg = buildLiabilityMap(merged);
+
+check("MERGED: row carries 3 bureaus", mrg.rows_with_multiple_bureaus, 1);
+check("...verdict = MERGED", /^MERGED/.test(mrg.verdict), true);
+check("...flags Decision 4 at risk", /Decision 4 is at risk/.test(mrg.verdict), true);
+check("...demands a ruling", /NEEDS A RULING/.test(mrg.verdict), true);
+
+console.log("\n--- THE XML->JSON COLLAPSE TRAP ---");
+
+// Converters render ONE repeated element as an OBJECT and SEVERAL as an ARRAY.
+// Reading only CREDIT_LIABILITY[0] — which is all the skeleton shows — and
+// generalising is exactly how you conclude the wrong thing with total confidence.
+// Both shapes must be handled, or a tri-bureau account reads as single-bureau.
+const mixed = {
+    CREDIT_RESPONSE: {
+        CREDIT_LIABILITY: [
+            { CREDIT_REPOSITORY: { "@_SourceType": "TransUnion" } },                    // object
+            { CREDIT_REPOSITORY: [{ "@_SourceType": "Experian" },
+                                  { "@_SourceType": "Equifax" }] },                     // array
+        ],
+    },
+};
+
+const mix = buildLiabilityMap(mixed);
+const mixRows = JSON.parse(mix.rows_json);
+
+check("object form -> 1 bureau", mixRows[0].bureau_count, 1);
+check("array form  -> 2 bureaus", mixRows[1].bureau_count, 2);
+check("...the array row is NOT missed", mix.rows_with_multiple_bureaus, 1);
+
+console.log("\n--- No shared account id -> say so, do not guess ---");
+
+const lonely = buildLiabilityMap({
+    CREDIT_RESPONSE: { CREDIT_LIABILITY: [
+        { "@ArrayAccountIdentifier": "ARR-1", CREDIT_REPOSITORY: { "@_SourceType": "TransUnion" } },
+        { "@ArrayAccountIdentifier": "ARR-2", CREDIT_REPOSITORY: { "@_SourceType": "Experian" } },
+    ] },
+});
+
+check("no correlation evidence -> UNRESOLVED", /^UNRESOLVED/.test(lonely.verdict), true);
+check("...and says not to design on it", /Do not design the cascade on this alone/.test(lonely.verdict), true);
+
+check("rows_json is a STRING (n8n)", typeof sep.rows_json, "string");
 
 console.log(`\n${passed} passed, ${failed} failed.\n`);
 if (failed > 0) process.exit(1);
