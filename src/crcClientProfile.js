@@ -291,13 +291,26 @@ export async function readClientProfile(page, crcClientId) {
             ok: false,
             error_code: "MODAL_NOT_CLOSED",
             error:
-                `The Edit Profile modal did not close (${closed.error}). This is a FAILED NAVIGATION. ` +
-                `The processor does not continue with the modal open — every later click in this ` +
-                `session would land on the backdrop and fail far from the real cause. ` +
-                `NOTE: this was a READ-ONLY pass and NO field was modified, so nothing should be ` +
-                `holding this modal open. If an unsaved-changes prompt is blocking it, a field WAS ` +
-                `changed, and that requires immediate human review.`,
+                `The Edit Profile modal did not close. ${closed.error} This is a FAILED NAVIGATION — ` +
+                `the processor does not continue with the modal open, because every later click in ` +
+                `this session would land on the backdrop and fail far from the real cause. ` +
+                `See closeAttempts for what each candidate matched, and modalHeaderHtml for the real ` +
+                `markup. NOTE: this was a READ-ONLY pass and NO field was modified. If — and only if — ` +
+                `a close control WAS clicked and the modal still refused, an unsaved-changes prompt ` +
+                `may be holding it open, which would mean a field was changed. If every candidate ` +
+                `matched zero elements, nothing was clicked and this is a selector problem, not a ` +
+                `modal problem.`,
             identityRead: identity, // diagnostic only
+
+            // WHAT EACH CANDIDATE ACTUALLY FOUND. Without this, "the modal would
+            // not close" is indistinguishable from "we never found anything to
+            // click" — and those need completely different fixes.
+            closeAttempts: closed.attempts ?? null,
+
+            // The real markup, if every candidate missed. The next selector is
+            // written against THIS, not against another guess.
+            modalHeaderHtml: closed.modalHeaderHtml ?? null,
+
             identity: null,
             modalClosed: false,
             requiresHumanReview: true,
@@ -328,35 +341,80 @@ export async function readClientProfile(page, crcClientId) {
 async function closeModal(page, modal, attempt = 1) {
     const MAX_ATTEMPTS = 2;
 
+    // ---- CANDIDATES: TAG-AGNOSTIC, ROLE LAST ------------------------------
+    //
+    // The previous list led with getByRole("button") and then required a literal
+    // <button> tag. It matched ZERO elements, clicked nothing, and reported
+    // "modal would not close" — which read like the modal RESISTING, when in fact
+    // we never touched it.
+    //
+    // openClient.js already documents why, and this module ignored it:
+    //
+    //   "An <a> only carries the ARIA 'link' role when it has an href. CRC
+    //    renders [controls] as href-less <a>/<span> ... it looks and behaves like
+    //    a link, but has no role, so every role-based query returns zero matches."
+    //
+    // A close X in this app is very likely an href-less <a>, <span>, or <i>. It
+    // carries no role and is not a <button>. So we lead with TAG- and
+    // TEXT-agnostic queries and keep the role-based one LAST, where it can only
+    // help and never blind us.
     const candidates = [
-        () => modal.getByRole("button", { name: /close/i }).first(),
-        () => modal.locator('[aria-label="Close" i]').first(),
-        () => modal.locator("button.close, .modal-header .close, .modal-header button").first(),
-        () => modal.locator('button:has-text("×"), button:has-text("✕"), button:has-text("X")').first(),
+        // 1. Anything carrying a close-ish class, ANY tag. Bootstrap/jQuery UI
+        //    modals overwhelmingly use one of these.
+        { name: "class-based (any tag)", locator: () => modal.locator('.modal-header .close, .modal-header .btn-close, a.close, span.close, .ui-dialog-titlebar-close, [class*="close" i]').first() },
+
+        // 2. Explicit accessible label, ANY tag.
+        { name: "aria-label", locator: () => modal.locator('[aria-label="Close" i], [title="Close" i]').first() },
+
+        // 3. The glyph itself, ANY tag. Covers <a>×</a> and <span>✕</span>.
+        { name: "close glyph (any tag)", locator: () => modal.locator(':is(a, span, i, div, button):text-matches("^\\s*[×✕✖xX]\\s*$")').first() },
+
+        // 4. Role-based. LAST, deliberately: it only matches if CRC happens to
+        //    give the control a real role, and leading with it is what blinded us.
+        { name: "role=button (last resort)", locator: () => modal.getByRole("button", { name: /close/i }).first() },
     ];
 
+    // Per-candidate diagnostics. The old code reported only "nothing worked",
+    // which is indistinguishable from "never ran" and from "threw" — and that
+    // ambiguity is exactly what sent us hunting for an execution-path bug that
+    // did not exist.
+    const attempts = [];
+
     for (const candidate of candidates) {
+        let count = 0;
+
         try {
-            const locator = candidate();
-
-            if (await locator.count()) {
-                await locator.click({ timeout: FIELD_TIMEOUT });
-
-                // Confirm it actually closed rather than assuming the click landed.
-                const deadline = Date.now() + 5000;
-
-                while (Date.now() < deadline) {
-                    if (!(await findModal(page))) {
-                        console.log("Edit Profile modal closed.");
-                        return { ok: true };
-                    }
-
-                    await page.waitForTimeout(200);
-                }
-            }
-        } catch {
-            // try the next candidate
+            count = await candidate.locator().count();
+        } catch (error) {
+            attempts.push({ candidate: candidate.name, matched: null, error: error.message });
+            continue;
         }
+
+        attempts.push({ candidate: candidate.name, matched: count });
+
+        if (count === 0) continue;
+
+        try {
+            await candidate.locator().click({ timeout: FIELD_TIMEOUT });
+            console.log(`Clicked close control via: ${candidate.name}`);
+        } catch (error) {
+            attempts[attempts.length - 1].clickError = error.message;
+            continue;
+        }
+
+        // Confirm it actually closed. A click landing is not a modal closing.
+        const deadline = Date.now() + 5000;
+
+        while (Date.now() < deadline) {
+            if (!(await findModal(page))) {
+                console.log("Edit Profile modal closed.");
+                return { ok: true, via: candidate.name, attempts };
+            }
+
+            await page.waitForTimeout(200);
+        }
+
+        attempts[attempts.length - 1].clickedButStillOpen = true;
     }
 
     // One retry. A single missed click should not fail a run; a modal that
@@ -366,12 +424,61 @@ async function closeModal(page, modal, attempt = 1) {
         await page.waitForTimeout(1000);
 
         const stillOpen = await findModal(page);
-        if (!stillOpen) return { ok: true };
+        if (!stillOpen) return { ok: true, via: "closed on its own", attempts };
 
         return closeModal(page, stillOpen, attempt + 1);
     }
 
-    return { ok: false, error: `no close control worked after ${MAX_ATTEMPTS} attempts` };
+    // ---- CAPTURE THE MARKUP SO THE NEXT RUN IS NOT ANOTHER GUESS -----------
+    //
+    // If every candidate matched zero elements, the X is shaped differently than
+    // any of them expect. We do not guess again — we return the actual header
+    // markup so the selector can be written against real evidence, exactly as
+    // the Milestone 4 eligibility engine was.
+    const headerHtml = await captureModalHeader(modal);
+
+    const matchedNothing = attempts.every((a) => !a.matched);
+
+    return {
+        ok: false,
+        error: matchedNothing
+            ? `every close candidate matched ZERO elements — the X was never clicked because nothing ` +
+              `was found to click. This is a SELECTOR miss, not the modal resisting.`
+            : `a close control was found and clicked, but the modal stayed open.`,
+        attempts,
+        modalHeaderHtml: headerHtml,
+    };
+}
+
+/**
+ * Return the modal's header markup, so a failed close produces EVIDENCE rather
+ * than another round of guessing at selectors.
+ *
+ * Read-only. Reads outerHTML. Touches nothing.
+ */
+async function captureModalHeader(modal) {
+    const containers = [
+        ".modal-header",
+        ".ui-dialog-titlebar",
+        ".modal-content",
+        "[role='dialog']",
+        ".modal",
+    ];
+
+    for (const selector of containers) {
+        try {
+            const el = modal.locator(selector).first();
+
+            if (await el.count()) {
+                const html = await el.evaluate((node) => node.outerHTML.slice(0, 1500));
+                return { selector, html };
+            }
+        } catch {
+            // try the next container
+        }
+    }
+
+    return { selector: null, html: "(could not locate a modal container to capture)" };
 }
 
 export { FIELD_LABELS, REQUIRED_FIELDS };
