@@ -10,6 +10,7 @@ import { runOrderPageSpike } from "./src/spikeOrderPageRun.js";
 import { runReportJsonSpike } from "./src/spikeReportJsonRun.js";
 import { runIdentifierSpike } from "./src/spikeIdentifiersRun.js";
 import { runClientProfileSpike } from "./src/spikeClientProfileRun.js";
+import { runProfileRead } from "./src/milestoneProfile.js";
 
 dotenv.config();
 
@@ -230,6 +231,35 @@ app.post("/spike-client-profile", async (req, res) => {
     try {
 
         const result = await runClientProfileSpike(req.body);
+
+        res.json(result);
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+
+    }
+
+});
+
+/**
+ * Read the authoritative CRC client identity from the Edit Profile modal.
+ *
+ * READ ONLY. This route imports only the profile READER, which has no write
+ * path. The status writer is a separate module and is not reachable from here.
+ *
+ * Body: { "clientName": "Elizabeth Kelley" }
+ */
+app.post("/read-client-profile", async (req, res) => {
+
+    try {
+
+        const result = await runProfileRead(req.body);
 
         res.json(result);
 
