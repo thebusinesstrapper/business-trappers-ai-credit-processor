@@ -125,6 +125,109 @@ async function clickAndFollow(page, context) {
     return { page, openedInNewTab: false };
 }
 
+const MAX_OPEN_ATTEMPTS = 3;
+
+// How long to wait for the dashboard to still be there, and for the control to
+// become visible and enabled. Both are waits on REAL STATE, not sleeps.
+const DASHBOARD_TIMEOUT = 15000;
+const CONTROL_TIMEOUT = 15000;
+
+/**
+ * ONE attempt at opening CreditHero. Everything is re-located from scratch.
+ *
+ * ===========================================================================
+ * NO STALE LOCATORS BETWEEN ATTEMPTS.
+ *
+ * A locator captured on attempt 1 may point at a detached node by attempt 2 —
+ * the page re-rendered, the link was replaced, the frame swapped. Clicking a
+ * detached handle either throws something unhelpful or silently hits nothing,
+ * and we would retry against the same dead reference three times and conclude
+ * CreditHero was down.
+ *
+ * So each attempt re-queries the DOM from the page handle. Nothing is carried
+ * across.
+ * ===========================================================================
+ */
+async function attemptOpen(page, context, attempt) {
+    console.log(`CreditHero open attempt ${attempt}/${MAX_OPEN_ATTEMPTS}...`);
+
+    // ---- 1. VERIFY THE DASHBOARD IS ACTIVE --------------------------------
+    //
+    // If a previous attempt navigated us somewhere unexpected, clicking blindly
+    // would click whatever happens to be under the cursor on a page we have not
+    // confirmed. We check we are still where we think we are.
+    const dashboardLink = page.getByText(CREDIT_HERO_LABEL, { exact: false }).first();
+
+    const onDashboard = await dashboardLink
+        .waitFor({ state: "attached", timeout: DASHBOARD_TIMEOUT })
+        .then(() => true)
+        .catch(() => false);
+
+    if (!onDashboard) {
+        return {
+            ok: false,
+            reason: `The "${CREDIT_HERO_LABEL}" link is not present — the client dashboard does not appear to be active. Current URL: ${page.url()}`,
+        };
+    }
+
+    // ---- 2. RE-LOCATE, FRESH ----------------------------------------------
+    const link = getCreditHeroLink(page);
+
+    // ---- 3. WAIT UNTIL VISIBLE --------------------------------------------
+    try {
+        await link.waitFor({ state: "visible", timeout: CONTROL_TIMEOUT });
+    } catch {
+        return { ok: false, reason: `The "${CREDIT_HERO_LABEL}" control never became visible.` };
+    }
+
+    // ---- 4. WAIT UNTIL ENABLED --------------------------------------------
+    //
+    // Visible is not clickable. CRC renders the control before the dashboard has
+    // finished wiring it up, and a click that lands on a not-yet-enabled control
+    // is swallowed — no error, no navigation, nothing. That silent no-op is
+    // exactly what an intermittent failure looks like.
+    const enabled = await link
+        .isEnabled({ timeout: CONTROL_TIMEOUT })
+        .catch(() => false);
+
+    if (!enabled) {
+        return { ok: false, reason: `The "${CREDIT_HERO_LABEL}" control is visible but not enabled.` };
+    }
+
+    // ---- 5. CLICK AND FOLLOW ----------------------------------------------
+    let landed;
+
+    try {
+        landed = await clickAndFollow(page, context);
+    } catch (error) {
+        return { ok: false, reason: `Click failed: ${error.message}` };
+    }
+
+    // ---- 6. VERIFY CREDITHERO ACTUALLY OPENED -----------------------------
+    //
+    // A click landing is not CreditHero opening. Without this we would hand
+    // Milestone 6 a handle to the CRC dashboard and every downstream read would
+    // fail in a way that looks like Credit Hero being broken.
+    try {
+        await landed.page.waitForLoadState("load", { timeout: PAGE_LOAD_TIMEOUT });
+    } catch {
+        return { ok: false, reason: "The page never finished loading after the click." };
+    }
+
+    const url = landed.page.url();
+
+    // Still on CRC means the click did nothing. This is the silent no-op above,
+    // and it is the failure mode a naive "did we click?" check cannot see.
+    if (!landed.openedInNewTab && /app\.creditrepaircloud\.com/i.test(url)) {
+        return {
+            ok: false,
+            reason: `The click did not navigate — still on CRC (${url}). The control was likely not yet wired up.`,
+        };
+    }
+
+    return { ok: true, ...landed };
+}
+
 /**
  * Open the CreditHeroScore account from an already-open client dashboard.
  *
@@ -146,37 +249,75 @@ async function clickAndFollow(page, context) {
  * }>}
  */
 export async function openCreditHero(page, context) {
-    const { page: creditHeroPage, openedInNewTab } = await clickAndFollow(page, context);
+    const attempts = [];
 
-    console.log("Waiting for the CreditHeroScore page to load...");
+    // ---- BOUNDED RETRY — READ-ONLY OPERATIONS ONLY --------------------------
+    //
+    // Retrying is safe HERE and nowhere else, and the reason is not "we approved
+    // it": opening CreditHero is READ-ONLY AND IDEMPOTENT. Clicking the link twice
+    // costs the client nothing. Nothing is written, ordered, or spent.
+    //
+    // THIS AUTHORITY DOES NOT GENERALISE. It must never be extended to Save, a
+    // Status update, an Order Report, a purchase, or any write — where a retry
+    // after an ambiguous outcome is precisely how a client gets charged twice.
+    // See the Report Acquisition Authority §5: a run that submits and then crashes
+    // leaves no record, and the "safe" retry spends a second entitlement.
+    //
+    // The boundary is the idempotence of the action, not the convenience of the
+    // caller.
+    for (let attempt = 1; attempt <= MAX_OPEN_ATTEMPTS; attempt++) {
+        const result = await attemptOpen(page, context, attempt);
 
-    await creditHeroPage.waitForLoadState("load", { timeout: PAGE_LOAD_TIMEOUT });
+        if (result.ok) {
+            const creditHeroPage = result.page;
 
-    // TEMPORARY — Milestone 3 discovery scaffolding. See DISCOVERY_SETTLE_MS
-    // above. Remove in Milestone 4 once we know the real readiness signal.
-    await creditHeroPage.waitForTimeout(DISCOVERY_SETTLE_MS);
+            console.log(`CreditHero opened on attempt ${attempt}.`);
 
-    const currentUrl = creditHeroPage.url();
-    const pageTitle = await creditHeroPage.title();
+            // Milestone 3 discovery scaffolding, preserved. Not my call to remove
+            // it in a retry change.
+            await creditHeroPage.waitForTimeout(DISCOVERY_SETTLE_MS);
 
-    console.log("CreditHeroScore page loaded.");
-    console.log("CreditHeroScore URL:", currentUrl);
-    console.log("CreditHeroScore title:", pageTitle);
+            const currentUrl = creditHeroPage.url();
+            const pageTitle = await creditHeroPage.title();
 
-    console.log("Capturing screenshot...");
+            console.log("CreditHeroScore URL:", currentUrl);
+            console.log("CreditHeroScore title:", pageTitle);
 
-    // Viewport-only (not fullPage) to keep the base64 payload small enough to
-    // travel comfortably in the JSON response over Railway and into n8n.
-    // The viewport is 1440x900 (see playwright.config.js), which is enough to
-    // show whether we landed on the account or the reactivation page — the one
-    // question this milestone exists to answer.
-    const screenshotBuffer = await creditHeroPage.screenshot();
+            const screenshotBuffer = await creditHeroPage.screenshot();
+
+            return {
+                ok: true,                       // <- THE CONTRACT. See below.
+                page: creditHeroPage,
+                openedInNewTab: result.openedInNewTab,
+                currentUrl,
+                pageTitle,
+                screenshotBase64: screenshotBuffer.toString("base64"),
+                attempts: attempt,
+                attemptLog: attempts,
+            };
+        }
+
+        attempts.push({ attempt, reason: result.reason });
+
+        console.error(`Attempt ${attempt} failed: ${result.reason}`);
+
+        if (attempt < MAX_OPEN_ATTEMPTS) {
+            // Let the dashboard settle before re-locating. We are waiting for CRC
+            // to finish whatever it was doing, not padding for luck.
+            await page.waitForTimeout(2000);
+        }
+    }
 
     return {
-        page: creditHeroPage,
-        openedInNewTab,
-        currentUrl,
-        pageTitle,
-        screenshotBase64: screenshotBuffer.toString("base64"),
+        ok: false,
+        error_code: "CREDIT_HERO_UNAVAILABLE",
+        error:
+            `CreditHeroScore could not be opened after ${MAX_OPEN_ATTEMPTS} attempts. Each attempt ` +
+            `re-verified the dashboard, re-located the control, and waited for it to be visible and ` +
+            `enabled before clicking. Requires human review.`,
+        attempts: MAX_OPEN_ATTEMPTS,
+        attemptLog: attempts,
+        requiresHumanReview: true,
+        page: null,
     };
 }
