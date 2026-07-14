@@ -259,13 +259,43 @@ const readerSrc = readFileSync(new URL("./crcClientProfile.js", import.meta.url)
 check("MODAL_NOT_CLOSED is a returned error code", /error_code:\s*"MODAL_NOT_CLOSED"/.test(readerSrc), true);
 check("...it sets ok: false", /ok: false,\s*\n\s*error_code: "MODAL_NOT_CLOSED"/.test(readerSrc), true);
 check("...and supplies NO identity downstream", /identityRead: identity,\s*\/\/ diagnostic only/.test(readerSrc), true);
-check("...and routes to a human", /error_code: "MODAL_NOT_CLOSED",[\s\S]{0,900}requiresHumanReview: true/.test(readerSrc), true);
+check("...and routes to a human", /error_code: "MODAL_NOT_CLOSED",[\s\S]{0,3000}requiresHumanReview: true/.test(readerSrc), true);
 check("no longer a silent warning", /WARNING: could not close/.test(readerSrc), false);
 
-// READ MODE changed nothing, so a modal that refuses to close is not a benign UI
-// hiccup — an unsaved-changes prompt would prove a field WAS modified.
-check("names the unsaved-changes implication", /unsaved-changes prompt is blocking it, a field WAS/i.test(readerSrc), true);
 check("retries the close once before failing", /MAX_ATTEMPTS = 2/.test(readerSrc), true);
+
+console.log("\n--- The close routine must not be blinded by role-based queries ---");
+
+// The live run clicked NOTHING. Every candidate matched zero elements, and the
+// failure reported as "the modal would not close" — which read like the modal
+// RESISTING when in fact we never touched it.
+//
+// openClient.js already documents why: CRC renders href-less <a>/<span> controls
+// that carry NO ARIA role, so every role-based query silently returns zero.
+// closeModal led with getByRole("button") and then required a literal <button>.
+check("does NOT lead with a role-based query", readerSrc.indexOf('{ name: "class-based') < readerSrc.indexOf('{ name: "role=button'), true);
+check("role-based candidate is LAST", readerSrc.indexOf('role=button (last resort)') > readerSrc.indexOf('class-based (any tag)'), true);
+check("close candidates are tag-agnostic", /:is\(a, span, i, div, button\)/.test(readerSrc), true);
+check("matches an href-less <a> or <span> X", /a\.close, span\.close/.test(readerSrc), true);
+
+console.log("\n--- A failed close must produce EVIDENCE, not another guess ---");
+
+// "nothing worked" is indistinguishable from "never ran" and from "threw". That
+// ambiguity is what sent us hunting for an execution-path bug that did not exist.
+check("reports what EACH candidate matched", /closeAttempts: closed\.attempts/.test(readerSrc), true);
+check("captures the real modal markup on failure", /modalHeaderHtml: closed\.modalHeaderHtml/.test(readerSrc), true);
+check("distinguishes 'matched nothing' from 'clicked and refused'", /matchedNothing/.test(readerSrc), true);
+
+// The old message ASSERTED an unsaved-changes prompt. We never observed one.
+check("does not assert a cause it did not observe", /If an unsaved-changes prompt is blocking it, a field WAS/.test(readerSrc), false);
+check("...states it conditionally instead", /and only if[\s\S]{0,40}a close control WAS clicked/.test(readerSrc), true);
+
+// Frozen navigation: the X. Never Cancel, never Escape, never a backdrop click.
+// readerCode is comment-stripped. "Escape" appears in a COMMENT explaining that
+// we deliberately do NOT press it — checking raw source would flag the very
+// documentation of the correct behaviour.
+check("never clicks Cancel", /Cancel/i.test(readerCode), false);
+check("never presses Escape", /Escape|\.press\(/i.test(readerCode), false);
 
 check("state that will not canonicalize STOPS the run", /error_code: "STATE_NOT_CANONICAL"/.test(readerSrc), true);
 
