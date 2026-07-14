@@ -116,6 +116,47 @@ async function readLabelledField(scope, label) {
     return null;
 }
 
+const MODAL_POPULATE_TIMEOUT = 15000;
+
+/**
+ * Wait until the REQUIRED identity fields actually carry values.
+ *
+ * Polls the real DOM state rather than sleeping. Optional fields (middle name,
+ * email, phone) are legitimately blank on some clients and are never waited on —
+ * waiting for a value that will never arrive would turn a complete profile into a
+ * 15-second timeout.
+ */
+async function waitForPopulatedModal(page, modal) {
+    const requiredLabels = REQUIRED_FIELDS.map((f) => FIELD_LABELS[f]);
+
+    const deadline = Date.now() + MODAL_POPULATE_TIMEOUT;
+    let lastRead = {};
+
+    while (Date.now() < deadline) {
+        lastRead = {};
+        const stillEmpty = [];
+
+        for (const label of requiredLabels) {
+            const value = await readLabelledField(modal, label);
+
+            lastRead[label] = value;
+
+            if (!value) stillEmpty.push(label);
+        }
+
+        if (stillEmpty.length === 0) {
+            return { ok: true, lastRead };
+        }
+
+        await page.waitForTimeout(300);
+    }
+
+    // Re-read once more so the reported state is the final state, not a stale one.
+    const stillEmpty = requiredLabels.filter((label) => !lastRead[label]);
+
+    return { ok: false, stillEmpty, lastRead };
+}
+
 /** Find the modal, in whichever frame it renders. */
 async function findModal(page) {
     for (const frame of page.frames()) {
@@ -186,7 +227,43 @@ export async function readClientProfile(page, crcClientId) {
         };
     }
 
-    console.log("Edit Profile modal is visible. Reading identity fields...");
+    console.log("Edit Profile modal is visible. Waiting for it to be POPULATED...");
+
+    // ---- THE MODAL EXISTING IS NOT THE MODAL BEING LOADED -------------------
+    //
+    // findModal() returns as soon as the First Name INPUT EXISTS. CRC renders the
+    // modal shell first and populates it from the client record a moment later, so
+    // reading immediately gets EMPTY inputs — every field comes back "", every
+    // field becomes null, and the run reports REQUIRED_IDENTITY_FIELDS_MISSING on
+    // a profile that is perfectly complete.
+    //
+    // That is a RACE. It passes when we win it and fails when we lose it, which is
+    // why the standalone route succeeded and this one did not. Nothing about the
+    // profile was wrong; we simply looked too early.
+    //
+    // We wait for the actual state change — required fields carrying VALUES — not
+    // for a duration. A field that is genuinely empty still fails, but only after
+    // we have given it a real chance to arrive.
+    const populated = await waitForPopulatedModal(page, modal);
+
+    if (!populated.ok) {
+        return {
+            ok: false,
+            error_code: "REQUIRED_IDENTITY_FIELDS_MISSING",
+            error:
+                `The Edit Profile modal opened, but required identity fields were still empty after ` +
+                `${MODAL_POPULATE_TIMEOUT / 1000}s: ${populated.stillEmpty.join(", ")}. Either CRC did ` +
+                `not populate them, or the field is genuinely blank on this client's record. Letter ` +
+                `generation STOPS — the processor does not substitute a value from the credit report, ` +
+                `a previous run, or anywhere else.`,
+            missing: populated.stillEmpty.map((label) => ({ label })),
+            partial: populated.lastRead,
+            identity: null,
+            dashboardUrl,
+        };
+    }
+
+    console.log("Modal populated. Reading identity fields...");
 
     // ---- Read every field --------------------------------------------------
     const raw = {};
