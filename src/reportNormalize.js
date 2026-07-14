@@ -192,6 +192,40 @@ export const FIELD = Object.freeze({
  */
 const REQUIRED_FIELDS = ["responsibility", "masked_account"];
 
+/**
+ * Fields the normalizer ACTUALLY READS into the model.
+ *
+ * `fields_never_found` is computed against THIS set — not against every key in
+ * FIELD. The distinction is the bug this fixes:
+ *
+ *   A field DEFINED in FIELD but never read (e.g. credit_business_type) is not a
+ *   mapping failure. /debug/field-map probes the payload directly and finds it;
+ *   the normalizer, which only marks keysSeen for fields it reads, never marks it —
+ *   so the old check reported it as "never found" while it plainly exists.
+ *
+ * Two tools, same map, DIFFERENT question. field-map asks "is the key in the
+ * payload?" The normalizer asks "did I read this field?" Both are legitimate; they
+ * are not the same, and never_found must be asked only of fields we read.
+ *
+ * Fields present in FIELD but absent here are UNUSED — reported separately, never
+ * silently. Whether they SHOULD be read is a downstream-need question, not a bug
+ * to paper over by wiring them in.
+ */
+const READ_FIELDS = new Set([
+    "balance", "past_due", "monthly_payment", "months_reviewed", "terms_months",
+    "last_payment_date", "raw_account_status", "raw_account_type", "raw_industry_text",
+    "is_closed", "is_chargeoff", "is_collection", "is_mortgage", "is_secured",
+    "is_student_loan", "is_fed_guaranteed_student_loan", "masked_account",
+    "account_status_type", "consumer_disputed", "derogatory", "date_opened",
+    "date_reported", "date_closed", "dofd", "credit_limit", "high_balance",
+    "responsibility",
+]);
+
+// Defined in FIELD but not read. Surfaced in completeness so it is visible, not
+// mistaken for missing data. Currently: terms_description, credit_loan_type,
+// credit_business_type.
+const DEFINED_NOT_READ = Object.keys(FIELD).filter((f) => !READ_FIELDS.has(f));
+
 // ---------------------------------------------------------------------------
 // PRIMITIVES — never infer, never default, never "reasonably estimate"
 // ---------------------------------------------------------------------------
@@ -660,7 +694,9 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
     // real mapping concern — the parser is looking for a key the payload never
     // uses. Present-but-null fields (track.valueless) are NOT warned about: they
     // are legitimate absence, which is exactly the DOFD-on-108-rows case.
-    const neverSeen = Object.keys(FIELD).filter(
+    // Only fields we READ can be "never found." A field we never read was never
+    // looked for, so its absence from keysSeen says nothing about the payload.
+    const neverSeen = [...READ_FIELDS].filter(
         (f) => !track.keysSeen.has(f) && !REQUIRED_FIELDS.includes(f)
     );
 
@@ -771,6 +807,12 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
             // absence here as disputable evidence (Extraction §6.1), never as a bug.
             fields_present_but_null: [...track.valueless],
 
+            // Defined in the field map but NOT read into the model. These exist in
+            // the payload (field-map sees them) but no engine consumes them yet.
+            // Surfaced so the gap is visible and a product decision — not silently
+            // dropped, and NOT mistaken for a missing key.
+            fields_defined_but_not_read: DEFINED_NOT_READ,
+
             warnings,
         },
 
@@ -784,7 +826,7 @@ function fail(code, message) {
         extraction_ok: false,
         report: null,
         counts: null,
-        completeness: { sections_found: [], fields_never_found: [], fields_present_but_null: [], warnings: [] },
+        completeness: { sections_found: [], fields_never_found: [], fields_present_but_null: [], fields_defined_but_not_read: [], warnings: [] },
         key_resolution: null,
         errors: [`${code}: ${message}`],
     };
