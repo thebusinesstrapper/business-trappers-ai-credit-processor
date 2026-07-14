@@ -35,6 +35,7 @@
 import { readSelector, isSelectableReportOption } from "./reportFreshness.js";
 
 const SELECTOR_TIMEOUT = 20000;
+const ACTIVE_VERIFY_TIMEOUT = 15000;
 
 function cssAttrValue(value) {
     return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -149,5 +150,78 @@ export async function selectReport(page, target) {
 
     await locator.selectOption(option.value, { timeout: SELECTOR_TIMEOUT });
 
-    return { ok: true, selected: { value: option.value, text: option.text } };
+    // ---- VERIFY THE SELECTION IS ACTUALLY ACTIVE --------------------------
+    //
+    // selectOption() succeeding proves ONE thing: Playwright set the <select>'s
+    // value. It does NOT prove the application reacted — that the change event
+    // fired, that the app re-fetched, or that the page now shows the report we
+    // asked for.
+    //
+    // If we assume it did, and it did not, we extract the OLD report while
+    // believing we have the new one. That is the worst possible failure of this
+    // module: it is silent, it is invisible in the logs, and it produces a
+    // dispute package built on stale facts that we would swear was current.
+    //
+    // So we read the page BACK and confirm.
+    const verification = await verifyActiveReport(page, option);
+
+    if (!verification.ok) {
+        return {
+            ok: false,
+            error:
+                `Selected "${option.text}", but could not verify it became the ACTIVE report: ` +
+                `${verification.error} Failing closed — we do not extract a report we cannot confirm ` +
+                `is the one we chose.`,
+            selectionAttempted: { value: option.value, text: option.text },
+        };
+    }
+
+    console.log(`Verified active report: "${option.text}"`);
+
+    return {
+        ok: true,
+        selected: { value: option.value, text: option.text },
+        verifiedActive: true,
+    };
+}
+
+/**
+ * Confirm the selector now reports our chosen option as the ACTIVE one.
+ *
+ * Polls rather than assuming: the app may re-render asynchronously after the
+ * change event. Fails closed on timeout.
+ */
+export async function verifyActiveReport(page, expected, options = {}) {
+    const timeoutMs = options.timeoutMs ?? ACTIVE_VERIFY_TIMEOUT;
+    const intervalMs = options.intervalMs ?? 500;
+
+    const started = Date.now();
+    let lastSeen = null;
+
+    while (Date.now() - started < timeoutMs) {
+        const found = await findReportSelector(page);
+
+        if (found) {
+            const active = found.select.options.find((o) => o.selected) ?? null;
+            lastSeen = active?.text ?? found.select.selectedValue ?? null;
+
+            const valueMatches = found.select.selectedValue === expected.value;
+            const optionMatches = active?.value === expected.value;
+
+            if (valueMatches || optionMatches) {
+                return { ok: true, activeReport: expected.text };
+            }
+        }
+
+        await page.waitForTimeout(intervalMs);
+    }
+
+    return {
+        ok: false,
+        error:
+            `After ${Math.round((Date.now() - started) / 1000)}s the active report still reads ` +
+            `"${lastSeen ?? "(unreadable)"}", not "${expected.text}".`,
+        expected: expected.text,
+        lastSeen,
+    };
 }
