@@ -265,3 +265,136 @@ function toArray(v) {
 
     return Array.isArray(v) ? v : [v];
 }
+
+
+/**
+ * =========================================================================
+ * FIELD MAP — resolve candidate keys AND enumerate their real values.
+ * TEMPORARY. Delete with M7.
+ *
+ * A key NAME is not enough. Knowing `_AccountOwnershipType` exists does not tell
+ * us whether an authorized user is spelled "AuthorizedUser", "Authorized User",
+ * "A", or "3" — and the Project Constitution FORBIDS DISPUTING AUTHORIZED-USER
+ * ACCOUNTS.
+ *
+ * A wrong guess there does not fail loudly. It silently disputes exactly the
+ * accounts the Constitution protects, in the consumer's voice, over her
+ * signature. So we enumerate the DISTINCT VALUES actually present across all 119
+ * rows, and read the vocabulary off the real data instead of inventing it.
+ *
+ * Same for _AccountStatusType, _ConsumerDisputeIndicator, and
+ * _DerogatoryDataIndicator: we must know the alphabet before we can read.
+ *
+ * READ-ONLY. Pure. Reads the payload M6 already captured.
+ * =========================================================================
+ */
+
+/** Candidate key names per logical field. Both @-prefixed and bare are tried. */
+const FIELD_CANDIDATES = Object.freeze({
+    responsibility:      ["@_AccountOwnershipType", "_AccountOwnershipType", "@AccountOwnershipType"],
+    masked_account:      ["@_AccountIdentifier", "_AccountIdentifier", "@AccountIdentifier"],
+    account_status_type: ["@_AccountStatusType", "_AccountStatusType"],
+    consumer_disputed:   ["@_ConsumerDisputeIndicator", "_ConsumerDisputeIndicator"],
+    derogatory:          ["@_DerogatoryDataIndicator", "_DerogatoryDataIndicator"],
+
+    date_opened:         ["@_AccountOpenedDate", "_AccountOpenedDate", "@_DateOpened"],
+    date_reported:       ["@_AccountReportedDate", "_AccountReportedDate", "@_DateReported"],
+    date_closed:         ["@_AccountClosedDate", "_AccountClosedDate"],
+    dofd:                ["@_AccountFirstDelinquencyDate", "_AccountFirstDelinquencyDate",
+                          "@_DateOfFirstDelinquency", "_DateOfFirstDelinquency"],
+    credit_limit:        ["@_CreditLimitAmount", "_CreditLimitAmount"],
+    high_balance:        ["@_HighBalanceAmount", "_HighBalanceAmount", "@_HighCreditAmount"],
+    balance:             ["@_UnpaidBalanceAmount"],
+    past_due:            ["@_PastDueAmount"],
+});
+
+/**
+ * Fields whose VALUE VOCABULARY we must know before writing any logic that reads
+ * them. Every distinct value is reported, with its count.
+ */
+const ENUM_FIELDS = ["responsibility", "account_status_type", "consumer_disputed", "derogatory"];
+
+export function buildFieldMap(payload) {
+    const response = payload?.CREDIT_RESPONSE ?? payload;
+
+    const liabilities = toArray(response?.CREDIT_LIABILITY);
+
+    if (liabilities.length === 0) {
+        return { ok: false, error: "No CREDIT_LIABILITY entries in the payload." };
+    }
+
+    const resolved = {};
+    const distinct = {};
+
+    for (const [field, candidates] of Object.entries(FIELD_CANDIDATES)) {
+        let winningKey = null;
+        let found = 0;
+        const values = new Map();
+
+        for (const liability of liabilities) {
+            for (const key of candidates) {
+                if (!liability || !Object.prototype.hasOwnProperty.call(liability, key)) continue;
+
+                const value = liability[key];
+
+                if (value === null || value === undefined || value === "") continue;
+
+                winningKey = winningKey ?? key;
+                found++;
+
+                if (ENUM_FIELDS.includes(field)) {
+                    const v = String(value);
+                    values.set(v, (values.get(v) ?? 0) + 1);
+                }
+
+                break; // first candidate that hits wins for this row
+            }
+        }
+
+        resolved[field] = {
+            key: winningKey,                 // null = NOT FOUND under any candidate
+            rows_with_value: found,
+            rows_total: liabilities.length,
+            candidates_tried: candidates,
+        };
+
+        if (ENUM_FIELDS.includes(field)) {
+            distinct[field] = [...values.entries()]
+                .sort((a, b) => b[1] - a[1])
+                .map(([value, count]) => ({ value, count }));
+        }
+    }
+
+    // Any key on a liability we have NO candidate for. We cannot ask for a field
+    // we do not know exists — so list everything, and let the gaps be visible.
+    const allKeys = new Set();
+
+    for (const liability of liabilities) {
+        for (const key of Object.keys(liability ?? {})) allKeys.add(key);
+    }
+
+    const mapped = new Set(Object.values(resolved).map((r) => r.key).filter(Boolean));
+
+    const unresolved = Object.entries(resolved)
+        .filter(([, r]) => r.key === null)
+        .map(([field]) => field);
+
+    return {
+        ok: true,
+        liability_count: liabilities.length,
+
+        // The fields we NEED and could not find. Each is a hard stop in the
+        // normalizer — never a guess.
+        unresolved_required_fields: unresolved,
+
+        // A string, so n8n cannot collapse it.
+        resolved_json: JSON.stringify(resolved, null, 2),
+
+        // THE VOCABULARY. This is what makes the authorized-user rule safe to write.
+        distinct_values_json: JSON.stringify(distinct, null, 2),
+
+        // Everything on the liability, so nothing stays invisible.
+        all_liability_keys: [...allKeys].sort(),
+        keys_not_mapped: [...allKeys].filter((k) => !mapped.has(k)).sort(),
+    };
+}
