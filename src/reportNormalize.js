@@ -196,18 +196,43 @@ const REQUIRED_FIELDS = ["responsibility", "masked_account"];
 // PRIMITIVES — never infer, never default, never "reasonably estimate"
 // ---------------------------------------------------------------------------
 
-function readField(node, fieldName, misses) {
+/**
+ * @param {object} node        the liability
+ * @param {string} fieldName   logical field
+ * @param {object} track       { keysSeen:Set, valueless:Set } — see below
+ *
+ * TWO DIFFERENT FACTS, NEVER CONFLATED:
+ *
+ *   keysSeen   — this field's KEY was present on this node (regardless of value).
+ *                If a field is in keysSeen for ANY row, the key name is correct.
+ *
+ *   valueless  — the key was present but the VALUE was null/empty on this node.
+ *                That is DATA ("this bureau does not report a close date"), not a
+ *                defect.
+ *
+ * A field is only a genuine "not found" if it is in keysSeen for ZERO rows — i.e.
+ * we never located the key under any candidate, on any liability. THAT is a
+ * mapping bug. Everything else is legitimate absence.
+ *
+ * The old code added to a single `misses` set whenever the VALUE was absent, so a
+ * field that is present-and-null on 108 rows and populated on 11 — like DOFD —
+ * was reported as "not found" AND warned about, while working perfectly.
+ */
+function readField(node, fieldName, track) {
     for (const key of FIELD[fieldName]) {
         if (node && Object.prototype.hasOwnProperty.call(node, key)) {
+            track.keysSeen.add(fieldName);           // the KEY exists here
+
             const value = node[key];
 
             if (value !== null && value !== undefined && value !== "") return value;
+
+            track.valueless.add(fieldName);           // key present, value empty
+            return null;
         }
     }
 
-    misses.add(fieldName);
-
-    return null;
+    return null;   // key absent on THIS node; not yet a defect — see finalize
 }
 
 /** A number we cannot read is null. NEVER 0 — zero is a fact, absence is not. */
@@ -263,37 +288,37 @@ function normalizeBureau(sourceType) {
  * `basis` records whether this liability spoke for one bureau or several. It is
  * the difference between a fact we may assert and a fact we may only dispute.
  */
-function buildObservation(liability, basis, sharedWith, misses) {
+function buildObservation(liability, basis, sharedWith, track) {
     return {
         basis,
         shared_with: sharedWith.length ? sharedWith : null,
 
-        balance: toNumber(readField(liability, "balance", misses)),
-        past_due: toNumber(readField(liability, "past_due", misses)),
-        monthly_payment: toNumber(readField(liability, "monthly_payment", misses)),
-        credit_limit: toNumber(readField(liability, "credit_limit", misses)),
-        high_balance: toNumber(readField(liability, "high_balance", misses)),
+        balance: toNumber(readField(liability, "balance", track)),
+        past_due: toNumber(readField(liability, "past_due", track)),
+        monthly_payment: toNumber(readField(liability, "monthly_payment", track)),
+        credit_limit: toNumber(readField(liability, "credit_limit", track)),
+        high_balance: toNumber(readField(liability, "high_balance", track)),
 
-        date_opened: toDate(readField(liability, "date_opened", misses)),
-        date_reported: toDate(readField(liability, "date_reported", misses)),
-        date_closed: toDate(readField(liability, "date_closed", misses)),
-        date_of_first_delinquency: toDate(readField(liability, "dofd", misses)),
-        last_payment_date: toDate(readField(liability, "last_payment_date", misses)),
+        date_opened: toDate(readField(liability, "date_opened", track)),
+        date_reported: toDate(readField(liability, "date_reported", track)),
+        date_closed: toDate(readField(liability, "date_closed", track)),
+        date_of_first_delinquency: toDate(readField(liability, "dofd", track)),
+        last_payment_date: toDate(readField(liability, "last_payment_date", track)),
 
         // Verbatim. We do not map raw status codes to meanings we have not verified.
-        account_status_raw: readField(liability, "raw_account_status", misses),
-        account_type_raw: readField(liability, "raw_account_type", misses),
-        industry_raw: readField(liability, "raw_industry_text", misses),
+        account_status_raw: readField(liability, "raw_account_status", track),
+        account_type_raw: readField(liability, "raw_account_type", track),
+        industry_raw: readField(liability, "raw_industry_text", track),
 
         // OBJECTIVE INDICATORS. Facts. The Strategy Engine decides what they mean.
-        is_closed: toBool(readField(liability, "is_closed", misses)),
-        is_chargeoff: toBool(readField(liability, "is_chargeoff", misses)),
-        is_collection: toBool(readField(liability, "is_collection", misses)),
-        is_mortgage: toBool(readField(liability, "is_mortgage", misses)),
-        is_secured: toBool(readField(liability, "is_secured", misses)),
-        is_student_loan: toBool(readField(liability, "is_student_loan", misses)),
+        is_closed: toBool(readField(liability, "is_closed", track)),
+        is_chargeoff: toBool(readField(liability, "is_chargeoff", track)),
+        is_collection: toBool(readField(liability, "is_collection", track)),
+        is_mortgage: toBool(readField(liability, "is_mortgage", track)),
+        is_secured: toBool(readField(liability, "is_secured", track)),
+        is_student_loan: toBool(readField(liability, "is_student_loan", track)),
         is_fed_guaranteed_student_loan: toBool(
-            readField(liability, "is_fed_guaranteed_student_loan", misses)
+            readField(liability, "is_fed_guaranteed_student_loan", track)
         ),
 
         // Constitution: authorized-user accounts are never disputed. Captured
@@ -306,16 +331,16 @@ function buildObservation(liability, basis, sharedWith, misses) {
         //
         // The Decision Engine interprets it, against a vocabulary read off the real
         // data (see POST /debug/field-map).
-        responsibility: readField(liability, "responsibility", misses),
+        responsibility: readField(liability, "responsibility", track),
 
-        account_status_type: readField(liability, "account_status_type", misses),
+        account_status_type: readField(liability, "account_status_type", track),
 
         // Facts. The Strategy Engine decides what they mean.
-        consumer_disputed: toBool(readField(liability, "consumer_disputed", misses)),
-        derogatory: toBool(readField(liability, "derogatory", misses)),
+        consumer_disputed: toBool(readField(liability, "consumer_disputed", track)),
+        derogatory: toBool(readField(liability, "derogatory", track)),
 
-        months_reviewed: toNumber(readField(liability, "months_reviewed", misses)),
-        terms_months: toNumber(readField(liability, "terms_months", misses)),
+        months_reviewed: toNumber(readField(liability, "months_reviewed", track)),
+        terms_months: toNumber(readField(liability, "terms_months", track)),
 
         payment_history: readPaymentPattern(liability),
         late_counts: readLateCounts(liability),
@@ -385,7 +410,10 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
 
     const warnings = [];
     const errors = [];
-    const misses = new Set();
+    // Two facts, tracked apart (see readField): which field KEYS we ever saw, and
+    // which were present-but-empty. A field missing from keysSeen entirely is the
+    // only genuine "not found."
+    const track = { keysSeen: new Set(), valueless: new Set() };
 
     // ---- Key registry from the PREVIOUS report (Extraction Decision 2) --------
     const accountRegistry = buildRegistry(previousReport?.key_index?.accounts ?? []);
@@ -439,9 +467,9 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
         // --- stable_account_key -----------------------------------------------
         const acctSigs = accountSignatures({
             "@ArrayAccountIdentifier": arrayId.startsWith("__uncorrelated_") ? null : arrayId,
-            masked_account: readField(first, "masked_account", misses),
-            date_opened: readField(first, "date_opened", misses),
-            account_type: readField(first, "raw_account_type", misses),
+            masked_account: readField(first, "masked_account", track),
+            date_opened: readField(first, "date_opened", track),
+            account_type: readField(first, "raw_account_type", track),
             furnisher: readCreditor(first),
         });
 
@@ -517,12 +545,12 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
                     continue;
                 }
 
-                const observation = buildObservation(liability, basis, sharedWith, misses);
+                const observation = buildObservation(liability, basis, sharedWith, track);
 
                 const tlSigs = tradelineSignatures(
                     {
                         "@TradelineHashSimple": liability["@TradelineHashSimple"] ?? null,
-                        masked_account: readField(liability, "masked_account", misses),
+                        masked_account: readField(liability, "masked_account", track),
                         furnisher: readCreditor(liability),
                         bureau,
                     },
@@ -548,7 +576,7 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
                     stable_item_key: tlResolved.key,
                     bureau,
                     furnisher: readCreditor(liability),
-                    masked_account: readField(liability, "masked_account", misses),
+                    masked_account: readField(liability, "masked_account", track),
                     observation,
                     signatures: tlSigs.map((s) => s.value),
                     vendor_identifiers: readVendorIdentifiers(liability),
@@ -561,7 +589,7 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
         accounts.push({
             stable_account_key: stableAccountKey,
             array_account_identifier: arrayId.startsWith("__uncorrelated_") ? null : arrayId,
-            account_type: readField(first, "raw_account_type", misses),
+            account_type: readField(first, "raw_account_type", track),
             signatures: acctSigs.map((s) => s.value),
             bureau_tradelines: [...byBureau.values()],
         });
@@ -605,7 +633,11 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
     }
 
     // ---- Required fields -----------------------------------------------------
-    const missingRequired = REQUIRED_FIELDS.filter((f) => misses.has(f));
+    //
+    // GENUINELY missing = the key was never located under any candidate, on any
+    // liability. A required field that is present-but-null on some row is a
+    // different matter and is NOT a hard stop here (the row-level guards handle it).
+    const missingRequired = REQUIRED_FIELDS.filter((f) => !track.keysSeen.has(f));
 
     if (missingRequired.length > 0) {
         errors.push(
@@ -624,13 +656,20 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
         );
     }
 
-    for (const miss of misses) {
-        if (!REQUIRED_FIELDS.includes(miss)) {
-            warnings.push(
-                `Field "${miss}" was not found on at least one liability (tried: ${FIELD[miss].join(", ")}). ` +
-                `It is null. It was NOT inferred.`
-            );
-        }
+    // A field whose KEY appeared on NO liability under ANY candidate. This is a
+    // real mapping concern — the parser is looking for a key the payload never
+    // uses. Present-but-null fields (track.valueless) are NOT warned about: they
+    // are legitimate absence, which is exactly the DOFD-on-108-rows case.
+    const neverSeen = Object.keys(FIELD).filter(
+        (f) => !track.keysSeen.has(f) && !REQUIRED_FIELDS.includes(f)
+    );
+
+    for (const field of neverSeen) {
+        warnings.push(
+            `Field "${field}" was not found on ANY liability under any candidate key ` +
+            `(tried: ${FIELD[field].join(", ")}). Every value is null. If this attribute ` +
+            `genuinely exists on this bureau's reports, the candidate key list is wrong.`
+        );
     }
 
     // ---- extraction_ok -------------------------------------------------------
@@ -718,7 +757,20 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
 
         completeness: {
             sections_found: Object.keys(response).filter((k) => k.startsWith("CREDIT_") || k === "BORROWER"),
-            fields_not_found: [...misses],
+
+            // A GENUINE mapping concern: a field whose key appeared on NO liability
+            // under any candidate. THIS is the "not found" that means something is
+            // wrong. It replaces the old fields_not_found, which flagged any field
+            // that was ever null on any row — and therefore flagged DOFD, a field
+            // working exactly as intended.
+            fields_never_found: neverSeen,
+
+            // Present-but-null on at least one row. LEGITIMATE ABSENCE, reported for
+            // transparency, NOT as a defect. "This bureau does not report a close
+            // date on this account" lives here. The Intelligence Engine treats an
+            // absence here as disputable evidence (Extraction §6.1), never as a bug.
+            fields_present_but_null: [...track.valueless],
+
             warnings,
         },
 
@@ -732,7 +784,7 @@ function fail(code, message) {
         extraction_ok: false,
         report: null,
         counts: null,
-        completeness: { sections_found: [], fields_not_found: [], warnings: [] },
+        completeness: { sections_found: [], fields_never_found: [], fields_present_but_null: [], warnings: [] },
         key_resolution: null,
         errors: [`${code}: ${message}`],
     };
