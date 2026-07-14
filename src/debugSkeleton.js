@@ -19,6 +19,26 @@
  */
 
 /**
+ * ===========================================================================
+ * ONE FIELD MAP. IMPORTED, NOT COPIED.
+ *
+ * This module previously kept its OWN copy of the candidate key names. When the
+ * real DOFD key turned out to be @_FirstDelinquencyDate, I updated the
+ * normalizer's map and not this one — so /debug/field-map went on reporting DOFD
+ * as unresolved against keys nobody uses any more, while the normalizer had
+ * already been fixed.
+ *
+ * TWO SOURCES OF TRUTH FOR THE SAME THING IS THE DEFECT. A discovery tool that
+ * disagrees with the parser it exists to serve is worse than no discovery tool:
+ * it reports confidently on a schema the code does not use.
+ *
+ * So the map is imported. There is now exactly one, and it cannot drift.
+ * ===========================================================================
+ */
+import { FIELD as FIELD_CANDIDATES } from "./reportNormalize.js";
+
+
+/**
  * Walk a dotted path into the skeleton.
  *
  * The skeleton nests real keys under `children`, so a caller may write either:
@@ -288,25 +308,6 @@ function toArray(v) {
  * READ-ONLY. Pure. Reads the payload M6 already captured.
  * =========================================================================
  */
-
-/** Candidate key names per logical field. Both @-prefixed and bare are tried. */
-const FIELD_CANDIDATES = Object.freeze({
-    responsibility:      ["@_AccountOwnershipType", "_AccountOwnershipType", "@AccountOwnershipType"],
-    masked_account:      ["@_AccountIdentifier", "_AccountIdentifier", "@AccountIdentifier"],
-    account_status_type: ["@_AccountStatusType", "_AccountStatusType"],
-    consumer_disputed:   ["@_ConsumerDisputeIndicator", "_ConsumerDisputeIndicator"],
-    derogatory:          ["@_DerogatoryDataIndicator", "_DerogatoryDataIndicator"],
-
-    date_opened:         ["@_AccountOpenedDate", "_AccountOpenedDate", "@_DateOpened"],
-    date_reported:       ["@_AccountReportedDate", "_AccountReportedDate", "@_DateReported"],
-    date_closed:         ["@_AccountClosedDate", "_AccountClosedDate"],
-    dofd:                ["@_AccountFirstDelinquencyDate", "_AccountFirstDelinquencyDate",
-                          "@_DateOfFirstDelinquency", "_DateOfFirstDelinquency"],
-    credit_limit:        ["@_CreditLimitAmount", "_CreditLimitAmount"],
-    high_balance:        ["@_HighBalanceAmount", "_HighBalanceAmount", "@_HighCreditAmount"],
-    balance:             ["@_UnpaidBalanceAmount"],
-    past_due:            ["@_PastDueAmount"],
-});
 
 /**
  * Fields whose VALUE VOCABULARY we must know before writing any logic that reads
