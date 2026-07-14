@@ -63,6 +63,12 @@ export async function runMilestone6(data = {}) {
         browser = session.browser;
 
         const page = session.page;
+
+        // openCreditHero() needs the CONTEXT, not just the page: CRC opens
+        // CreditHeroScore in a NEW TAB, and that tab arrives as a context-level
+        // "page" event. Omitting it is what threw the waitForEvent error —
+        // `context` was undefined.
+        const context = session.context;
         const replayUrl = `https://www.browserbase.com/sessions/${session.session.id}`;
 
         console.log(`Browserbase replay: ${replayUrl}`);
@@ -103,22 +109,43 @@ export async function runMilestone6(data = {}) {
         // Retains the FULL parsed payload, not just a skeleton: the Normalization
         // Engine has to be written against the real structure, and a skeleton
         // tells us the shape without giving us a fixture to test against.
-        const captured = capturePayloads(page);
+        // ATTACHED TO THE CONTEXT, NOT THE PAGE.
+        //
+        // CreditHeroScore opens in a NEW TAB. A listener bound to the CRC dashboard
+        // page would sit on the wrong tab and capture NOTHING — and the run would
+        // report "no report payload captured" with no hint that the listener had
+        // been watching an idle page the entire time. A context-level listener sees
+        // every page in the session, including tabs that do not exist yet.
+        const captured = capturePayloads(context);
 
         // ---- 3. CREDIT HERO ------------------------------------------------
-        const creditHero = await openCreditHero(page);
+        const creditHero = await openCreditHero(page, context);
 
         if (!creditHero.ok) {
             return errorResponse(creditHero.error_code ?? "CREDIT_HERO_UNAVAILABLE",
                 creditHero.error ?? "Could not open Credit Hero.", { milestone: "M6_CAPTURE" });
         }
 
+        // ---- ADOPT THE PAGE CREDIT HERO ACTUALLY LANDED ON ------------------
+        //
+        // openCreditHero returns the page it landed on. If CreditHero opened in a
+        // NEW TAB, `page` still points at the CRC dashboard — and every subsequent
+        // read (selector, selection, activation) would query the wrong tab and fail
+        // in a way that looks like Credit Hero being broken.
+        const chPage = creditHero.page;
+
+        console.log(
+            creditHero.openedInNewTab
+                ? "CreditHeroScore opened in a NEW TAB — adopting that page handle."
+                : "CreditHeroScore navigated in the current tab."
+        );
+
         // ---- 4. THE REPORT SELECTOR IS AUTHORITATIVE FOR FRESHNESS ---------
         //
         // Not the CRC timer, not the order page, not elapsed time. Those describe
         // when a report BECOMES ORDERABLE. The selector enumerates WHAT EXISTS.
         // Freshness is READ, never INFERRED.
-        const selector = await readReportSelector(page);
+        const selector = await readReportSelector(chPage);
 
         if (!selector.ok) {
             return errorResponse("REPORT_SELECTOR_UNREADABLE",
@@ -182,7 +209,7 @@ export async function runMilestone6(data = {}) {
 
         console.log(`Selecting newest report: ${target.text} (${freshness.newestReportDate})`);
 
-        const selected = await selectReport(page, target);
+        const selected = await selectReport(chPage, target);
 
         if (!selected.ok) {
             return errorResponse("REPORT_SELECT_FAILED", selected.error, { milestone: "M6_CAPTURE" });
@@ -194,7 +221,7 @@ export async function runMilestone6(data = {}) {
         // NOT that the app reacted. If Credit Hero swallowed the change event we
         // would parse the OLD report while believing it was the new one, and every
         // downstream fact would be wrong with no error anywhere.
-        const active = await verifyActiveReport(page, target);
+        const active = await verifyActiveReport(chPage, target);
 
         if (!active.ok) {
             return errorResponse("REPORT_NOT_VERIFIED_ACTIVE",
@@ -212,7 +239,7 @@ export async function runMilestone6(data = {}) {
         //
         // READ ONLY throughout. The report page carries controls that order
         // reports and reactivate monitoring. Nothing here clicks any of them.
-        await page.waitForTimeout(5000);
+        await chPage.waitForTimeout(5000);
 
         const reportPayloads = captured.filter((c) => c.looksLikeCreditReport);
 
@@ -304,10 +331,12 @@ export async function runMilestone6(data = {}) {
  * PURELY PASSIVE. It observes responses. It never issues a request, never clicks,
  * and cannot affect the page.
  */
-function capturePayloads(page) {
+function capturePayloads(context) {
     const captured = [];
 
-    page.on("response", async (response) => {
+    // context.on("response") fires for EVERY page in the session — including tabs
+    // that do not exist yet when this listener is attached. That is the point.
+    context.on("response", async (response) => {
         try {
             const url = response.url();
             const contentType = (response.headers()["content-type"] || "").toLowerCase();
