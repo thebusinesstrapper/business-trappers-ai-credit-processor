@@ -31,6 +31,13 @@
 import { OPENINGS, renderOpening, OPENING_LIBRARY_VERSION } from "./openingLibrary.js";
 import { TRANSITIONS, TRANSITION_LIBRARY_VERSION } from "./transitionLibrary.js";
 import { CLOSINGS, renderClosing, CLOSING_LIBRARY_VERSION } from "./closingLibrary.js";
+import { resolveRecipient, RECIPIENT_STANDARD_VERSION } from "./recipientLibrary.js";
+
+import { APPROVED_BY_BUSINESS_TRAPPERS as OPENINGS_APPROVED } from "./openingLibrary.js";
+import { APPROVED_BY_BUSINESS_TRAPPERS as TRANSITIONS_APPROVED } from "./transitionLibrary.js";
+import { APPROVED_BY_BUSINESS_TRAPPERS as CLOSINGS_APPROVED } from "./closingLibrary.js";
+
+export { resolveRecipient };
 
 export const VOICE_SCHEMA_VERSION = "BT-VOICE-1.0";
 
@@ -127,8 +134,15 @@ export function selectVoice(context) {
                 opening: OPENING_LIBRARY_VERSION,
                 transition: TRANSITION_LIBRARY_VERSION,
                 closing: CLOSING_LIBRARY_VERSION,
+                recipient: RECIPIENT_STANDARD_VERSION,
             },
             generated: false, // INVARIANT. No model touches this text.
+
+            // TRUE only when Business Trappers has authored and approved every
+            // library. Surfaced on every letter so a placeholder library can never
+            // be mistaken for an approved one — the mistake that put a fabricated
+            // address on a dispute letter once already.
+            librariesApproved: OPENINGS_APPROVED && TRANSITIONS_APPROVED && CLOSINGS_APPROVED,
         },
     };
 }
