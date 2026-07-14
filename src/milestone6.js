@@ -393,6 +393,18 @@ export async function runMilestone6(data = {}) {
                     completeness: normalized.completeness,
                     counts: normalized.counts,
                     requiresHumanReview: true,
+
+                    // ---- THE RAW PAYLOAD SURVIVES THE FAILURE -----------------
+                    //
+                    // A failure that discards its own evidence cannot be diagnosed.
+                    // The raw report is the MOST useful artifact when extraction
+                    // fails — it is what a human (or /debug/collision-map) needs to
+                    // see WHY it failed — and it was the one thing being dropped,
+                    // precisely on the path where it matters.
+                    //
+                    // Extraction §8 already requires "raw capture is never discarded
+                    // on failure." This honours that at the M6 boundary.
+                    payload: report.payload,
                 });
         }
 
