@@ -49,6 +49,7 @@ import { openClient } from "./openClient.js";
 import { readClientProfile } from "./crcClientProfile.js";
 import { verifyIdentity } from "./intelligence/clientIdentity.js";
 import { openCreditHero } from "./openCreditHero.js";
+import { openCreditReport } from "./openCreditReport.js";
 import { readReportSelector, selectReport, verifyActiveReport } from "./reportSelector.js";
 import { decideFreshness, ACTION } from "./reportFreshness.js";
 import { analyzeReportShape, buildSkeleton } from "./spikeReportJson.js";
@@ -176,7 +177,50 @@ export async function runMilestone6(data = {}) {
                 : "CreditHeroScore navigated in the current tab."
         );
 
-        // ---- 4. THE REPORT SELECTOR IS AUTHORITATIVE FOR FRESHNESS ---------
+        // ---- 4. NAVIGATE INTO THE REPORT PAGE ------------------------------
+        //
+        // openCreditHero lands on the Credit Hero MEMBER DASHBOARD
+        // (mcc_creditscores.asp). The report selector does not live there — it
+        // lives on the REPORT page (mcc_creditreports_v2.asp), reached via the
+        // View Report link.
+        //
+        // M6 was reading the selector straight off the landing page, which has no
+        // selector to read, and reporting REPORT_SELECTOR_UNREADABLE. The reader
+        // was never wrong; it was pointed at the wrong page.
+        //
+        // openCreditReport() is the VALIDATED navigator from the acquisition
+        // spikes. It finds the link (it never CONSTRUCTS the URL — we know the
+        // filename, not the path, and a guessed path is a guessed navigation on a
+        // site with an order page on it), and it hard-blocks
+        // mcc_order_select_v2.asp both BEFORE navigating and AFTER landing —
+        // because Credit Hero redirects to the ORDER page when no report is
+        // available, and we would arrive somewhere that costs the client money
+        // without ever having asked to go there.
+        //
+        // NOTE THE CONTRACT: openCreditReport returns { reportOpened: true, ... }
+        // and THROWS on failure. It does NOT return `ok`. Checking `!report.ok`
+        // would be false-negative on every successful run — exactly the bug that
+        // made openCreditHero report CREDIT_HERO_UNAVAILABLE while succeeding.
+        let reportPage;
+
+        try {
+            reportPage = await openCreditReport(chPage);
+        } catch (error) {
+            // The order-page guard throws too. That is NOT a retryable condition —
+            // it means Credit Hero tried to send us somewhere that spends the
+            // client's money, and the correct response is to stop, not to try again.
+            return errorResponse("CREDIT_REPORT_PAGE_UNAVAILABLE",
+                `Could not reach the credit report page: ${error.message}`,
+                {
+                    milestone: "M6_CAPTURE",
+                    creditHeroLandingUrl: chPage.url(),
+                    requiresHumanReview: true,
+                });
+        }
+
+        console.log(`On the report page: ${reportPage.reportUrl}`);
+
+        // ---- 5. THE REPORT SELECTOR IS AUTHORITATIVE FOR FRESHNESS ---------
         //
         // Not the CRC timer, not the order page, not elapsed time. Those describe
         // when a report BECOMES ORDERABLE. The selector enumerates WHAT EXISTS.
@@ -196,7 +240,14 @@ export async function runMilestone6(data = {}) {
                     // present, options not report dates). The old error pointed at
                     // neither, which is why a timing race looked like a broken reader.
                     selectsSeen: selector.selectsSeen ?? null,
-                    creditHeroUrl: selector.currentUrl ?? chPage.url(),
+
+                    // BOTH urls. If reportPageUrl is mcc_creditreports_v2.asp and the
+                    // selector is still unreadable, the problem is genuinely the
+                    // selector — not the navigation. That distinction is the whole
+                    // point of recording where we were standing when we looked.
+                    creditHeroLandingUrl: creditHero.currentUrl,
+                    reportPageUrl: reportPage.reportUrl,
+                    currentUrl: selector.currentUrl ?? chPage.url(),
                     openedInNewTab: creditHero.openedInNewTab,
                 });
         }
@@ -315,6 +366,9 @@ export async function runMilestone6(data = {}) {
             crcClientId: client.crcClientId,
             identity,
             identityVerified: true,
+
+            creditHeroLandingUrl: creditHero.currentUrl,
+            reportPageUrl: reportPage.reportUrl,
 
             reportSelected: {
                 text: target.text,
