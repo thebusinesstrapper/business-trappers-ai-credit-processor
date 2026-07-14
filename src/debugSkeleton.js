@@ -139,3 +139,129 @@ export function extractSkeletonNode(skeleton, path) {
         node_bytes: JSON.stringify(result.node).length,
     };
 }
+
+
+/**
+ * =========================================================================
+ * LIABILITY MAP — the decisive schema artifact. TEMPORARY, delete with M7.
+ *
+ * The skeleton samples CREDIT_LIABILITY[0] only. One row cannot answer the
+ * question that governs the entire extraction design:
+ *
+ *   Is ONE CreditLiability = ONE BUREAU'S TRADELINE (and Array reports the same
+ *   real account up to three times, once per bureau)?
+ *
+ *      -> Per-bureau values are PRESERVED. Extraction Decision 4 holds.
+ *         CREDIT_LIABILITY is the stable_item_key unit.
+ *         BT-DM-0031 cross-bureau variance is provable.
+ *
+ *   Or is ONE CreditLiability = ONE MERGED ACCOUNT carrying several bureaus?
+ *
+ *      -> Array FLATTENED the bureaus before we ever saw them. Decision 4 is
+ *         unsatisfiable from this payload, and every cross-bureau finding in
+ *         analyzeCreditReport.js is dead code.
+ *
+ * THE XML->JSON TRAP: converters collapse ONE repeated element into an OBJECT and
+ * SEVERAL into an ARRAY. So CREDIT_REPOSITORY is an object when a single bureau
+ * reports the account and an array when two or three do. Reading element [0] and
+ * generalising is exactly how you conclude the wrong thing with total confidence.
+ *
+ * This projects EVERY liability into one flat row so the answer is counted, not
+ * inferred. Read-only. Pure. Reads the payload M6 already captured.
+ * =========================================================================
+ */
+export function buildLiabilityMap(payload) {
+    const response = payload?.CREDIT_RESPONSE ?? payload;
+
+    const liabilities = toArray(response?.CREDIT_LIABILITY);
+
+    if (liabilities.length === 0) {
+        return { ok: false, error: "No CREDIT_LIABILITY entries in the payload." };
+    }
+
+    const rows = liabilities.map((liability, index) => {
+        // CREDIT_REPOSITORY: object when ONE bureau reports it, array when several.
+        const repositories = toArray(liability?.CREDIT_REPOSITORY);
+
+        const bureaus = repositories
+            .map((r) => r?.["@_SourceType"] ?? null)
+            .filter(Boolean);
+
+        return {
+            i: index,
+
+            // The account-correlation key (tier A0). If THREE rows share one value,
+            // Array is giving us three bureau views of ONE account.
+            array_account_id: liability?.["@ArrayAccountIdentifier"] ?? null,
+
+            // The tradeline-identity key (tier T0). Should be UNIQUE per row.
+            tradeline_hash_simple: liability?.["@TradelineHashSimple"] ?? null,
+
+            bureau_count: bureaus.length,
+            bureaus: bureaus.join("|") || null,
+
+            // If rows sharing an array_account_id have DIFFERENT values here, then
+            // per-bureau reporting is preserved and Decision 4 holds.
+            balance: liability?.["@_UnpaidBalanceAmount"] ?? null,
+            past_due: liability?.["@_PastDueAmount"] ?? null,
+            status: liability?.["@RawAccountStatus"] ?? null,
+            account_type: liability?.["@RawAccountType"] ?? null,
+
+            creditor: liability?._CREDITOR?.["@_Name"] ?? null,
+
+            is_collection: liability?.["@IsCollectionIndicator"] ?? null,
+            is_chargeoff: liability?.["@IsChargeoffIndicator"] ?? null,
+        };
+    });
+
+    // ---- COUNT THE ANSWER. DO NOT INFER IT. --------------------------------
+    const byAccountId = new Map();
+
+    for (const row of rows) {
+        if (!row.array_account_id) continue;
+
+        if (!byAccountId.has(row.array_account_id)) byAccountId.set(row.array_account_id, []);
+
+        byAccountId.get(row.array_account_id).push(row);
+    }
+
+    const shared = [...byAccountId.values()].filter((g) => g.length > 1);
+
+    const multiBureauRows = rows.filter((r) => r.bureau_count > 1);
+
+    let verdict;
+
+    if (multiBureauRows.length > 0) {
+        verdict =
+            `MERGED — ${multiBureauRows.length}/${rows.length} liabilities carry MORE THAN ONE bureau. ` +
+            `Array flattened per-bureau values before we saw them. Extraction Decision 4 is at risk; ` +
+            `BT-DM-0031 cross-bureau variance may be unprovable. NEEDS A RULING.`;
+    } else if (shared.length > 0) {
+        verdict =
+            `SEPARATE — every liability names ONE bureau, and ${shared.length} account(s) appear as ` +
+            `multiple liabilities sharing an @ArrayAccountIdentifier. CREDIT_LIABILITY IS the ` +
+            `stable_item_key unit. Per-bureau values are PRESERVED. Decision 4 holds.`;
+    } else {
+        verdict =
+            `UNRESOLVED — every liability names one bureau, but NO @ArrayAccountIdentifier is shared ` +
+            `across rows. Either this consumer genuinely has no account reported by two bureaus, or ` +
+            `A0 does not correlate. Do not design the cascade on this alone.`;
+    }
+
+    return {
+        ok: true,
+        liability_count: rows.length,
+        rows_with_multiple_bureaus: multiBureauRows.length,
+        accounts_appearing_more_than_once: shared.length,
+        verdict,
+
+        // A string, so n8n cannot collapse it.
+        rows_json: JSON.stringify(rows, null, 2),
+    };
+}
+
+function toArray(v) {
+    if (v == null) return [];
+
+    return Array.isArray(v) ? v : [v];
+}
