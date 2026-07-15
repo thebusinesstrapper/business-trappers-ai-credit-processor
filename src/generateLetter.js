@@ -62,7 +62,8 @@
  */
 
 import { verifyIdentity, formatAddress } from "./clientIdentity.js";
-import { selectVoice } from "./voice/index.js";
+import { selectVoice, resolveRecipient } from "./voice/index.js";
+import { createBureauFidelity, hasReported, NO_REPORTED_VALUE } from "../bureauFidelity.js";
 
 export const LETTER_SCHEMA_VERSION = "BT-LETTER-3.0";
 
@@ -85,6 +86,42 @@ const BUREAU_ADDRESSES = {
 function money(v) {
     const n = Number(v);
     return Number.isFinite(n) ? `$${n.toLocaleString("en-US")}` : `$${v}`;
+}
+
+/**
+ * ===========================================================================
+ * quote() — THE BUREAU FIDELITY ENFORCEMENT POINT.
+ *
+ * A defect template receives a `q` object, and the ONLY way it may emit a bureau
+ * value is through `q`. `q` reads exclusively from the tradeline's reported view
+ * (Layer 2). There is no path from `q` to the normalized layer, so a template
+ * CANNOT quote a coerced value even by mistake.
+ *
+ * When the reported value is absent, `q` returns a LOUD marker string, not "".
+ * A blank would print as an intentional gap in a letter; the marker is visible to
+ * a human and is caught by the leak-check against the generated body. A template
+ * that quotes an absent value fails LOUDLY, never silently.
+ *
+ * The values printed are the bureau's OWN strings, verbatim — "$4,200.00" stays
+ * "$4,200.00". money() is NOT applied: reformatting a reported number is itself a
+ * fidelity violation (it would turn the bureau's "$4,200.00" into our "$4,200").
+ * ===========================================================================
+ */
+export const FIDELITY_MISSING_MARKER = "[REPORTED VALUE UNAVAILABLE — DO NOT SEND]";
+
+function makeQuoter(reportedView) {
+    // Each quoter method returns the verbatim reported string, or the loud marker.
+    const q = (accessorValue) =>
+        hasReported(accessorValue) ? String(accessorValue) : FIDELITY_MISSING_MARKER;
+
+    return {
+        balance: () => q(reportedView.balance()),
+        pastDue: () => q(reportedView.pastDue()),
+        status: () => q(reportedView.status()),
+        dofd: () => q(reportedView.dateOfFirstDelinquency()),
+        dateOpened: () => q(reportedView.dateOpened()),
+        furnisher: () => q(reportedView.furnisher()),
+    };
 }
 
 const AUTH = {
@@ -122,56 +159,61 @@ const AUTHORITY_PRIORITY = [AUTH.OBSOLETE, AUTH.DOFD, AUTH.ACCURACY, AUTH.REINVE
 const SPEC = {
     TL_PAST_DUE_ON_ZERO_BALANCE: {
         bureauLocal: true,
-        defect: (e) => `Reported with a past-due amount of ${money(e.past_due)} and a balance of $0.`,
+        defect: (q) => `Reported with a past-due amount of ${q.pastDue()} and a balance of ${q.balance()}.`,
         standard: "An account with no balance cannot carry an amount past due. The reporting is internally inconsistent.",
         authority: AUTH.ACCURACY,
     },
 
     TL_PAST_DUE_EXCEEDS_BALANCE: {
         bureauLocal: true,
-        defect: (e) => `Reported with a past-due amount of ${money(e.past_due)}, exceeding the reported balance of ${money(e.balance)}.`,
+        defect: (q) => `Reported with a past-due amount of ${q.pastDue()}, exceeding the reported balance of ${q.balance()}.`,
         standard: "A past-due amount cannot exceed the balance owed. The reporting is internally inconsistent.",
         authority: AUTH.ACCURACY,
     },
 
     TL_DEROGATORY_WITHOUT_DOFD: {
         bureauLocal: true,
-        defect: (e) => `Reported with a status of "${e.status}" and no date of first delinquency.`,
+        defect: (q) => `Reported with a status of "${q.status()}" and no date of first delinquency.`,
         standard: "A derogatory account must carry a date of first delinquency. Without it, the permissible reporting period cannot be determined.",
         authority: AUTH.DOFD,
     },
 
     TL_DOFD_BEFORE_OPENED: {
         bureauLocal: true,
-        defect: (e) => `Reported as first delinquent on ${e.date_of_first_delinquency}, before the account opened date of ${e.date_opened}.`,
+        defect: (q) => `Reported as first delinquent on ${q.dofd()}, before the account opened date of ${q.dateOpened()}.`,
         standard: "An account cannot become delinquent before it exists. The reporting is internally inconsistent.",
         authority: AUTH.ACCURACY,
     },
 
     TL_BEYOND_REPORTING_PERIOD: {
         bureauLocal: true,
-        defect: (e) => `Reported with a date of first delinquency of ${e.date_of_first_delinquency}. The permissible reporting period has elapsed.`,
+        defect: (q) => `Reported with a date of first delinquency of ${q.dofd()}. The permissible reporting period has elapsed.`,
         standard: "Obsolete information may not be reported.",
         authority: AUTH.OBSOLETE,
     },
 
     TL_CLOSED_WITH_ACTIVE_STATUS: {
         bureauLocal: true,
-        defect: () => `Reported as both closed and active.`,
+        defect: () => `Reported as both closed and active.`,  // no quoted value
         standard: "An account cannot be simultaneously closed and active. The reporting is internally inconsistent.",
         authority: AUTH.ACCURACY,
     },
 
     TL_STATUS_CONFLICTS_WITH_PAYMENT_HISTORY: {
         bureauLocal: true,
-        defect: (e) => `Reported with a status of "${e.status}", while the payment history for the same account shows a recent late payment.`,
+        defect: (q) => `Reported with a status of "${q.status()}", while the payment history for the same account shows a recent late payment.`,
         standard: "The status and the payment history for one account must agree.",
         authority: AUTH.ACCURACY,
     },
 
     TL_DUPLICATE_WITHIN_BUREAU: {
         bureauLocal: true,
-        defect: (e) => `Reported ${e.occurrences} times on my file.`,
+        // NAMED EXCEPTION (derived). `occurrences` is a COUNT the processor
+        // computed — the bureau never reported it as a string, so it cannot come
+        // from the Fidelity Layer. It is a derived fact about the reporting, not a
+        // quoted reported value, and the leak-check permits it by name.
+        derivedValues: ["occurrences"],
+        defect: (q, e) => `Reported ${e.occurrences} times on my file.`,
         standard: "A single account may appear only once.",
         authority: AUTH.ACCURACY,
     },
@@ -191,21 +233,35 @@ const SPEC = {
 
     COL_DUPLICATE_COLLECTION: {
         bureauLocal: true,
-        defect: () => `The same debt is reported by more than one collection agency.`,
+        defect: () => `The same debt is reported by more than one collection agency.`,  // no quoted value
         standard: "One debt may be reported as owed to one collector.",
         authority: AUTH.ACCURACY,
     },
 
     HIST_RE_AGING_INDICATOR: {
         bureauLocal: true,
-        defect: (e) => `The date of first delinquency was previously reported as ${e.previous_dofd} and is now reported as ${e.current_dofd}.`,
+        // NAMED EXCEPTION (cross-report). This defect compares THIS report against
+        // a PRIOR one. `current_dofd` is this report's reported value; `previous_dofd`
+        // is the prior report's reported value, which is not in the current
+        // Fidelity Layer. Both are reported values from their respective reports —
+        // a legitimate historical comparison the single-report view cannot express.
+        // Permitted by name; see the cross-report fidelity note.
+        derivedValues: ["previous_dofd", "current_dofd"],
+        defect: (q, e) => `The date of first delinquency was previously reported as ${e.previous_dofd} and is now reported as ${e.current_dofd}.`,
         standard: "A date of first delinquency is a historical fact and does not change. Moving it forward extends the reporting period.",
         authority: AUTH.DOFD,
     },
 
     HIST_BALANCE_INCREASED_ON_CHARGED_OFF: {
         bureauLocal: true,
-        defect: (e) => `The balance on this charged-off account increased from ${money(e.previous)} to ${money(e.current)}.`,
+        // NAMED EXCEPTION (cross-report). Compares this report to a prior one.
+        // `current` and `previous` are reported balances from their respective
+        // reports. NOTE: this still routes through evidence, because the PRIOR
+        // report's reported layer is not held by the current Fidelity Layer. When
+        // multi-report Fidelity lands, `current` should be quoted via q.balance();
+        // `previous` needs the prior report's view. Flagged, not silently accepted.
+        derivedValues: ["previous", "current"],
+        defect: (q, e) => `The balance on this charged-off account increased from ${e.previous} to ${e.current}.`,
         standard: "A charged-off balance does not increase.",
         authority: AUTH.ACCURACY,
     },
@@ -352,18 +408,14 @@ export async function generateLetters(chain, analysis, context = {}) {
         findingsByItem.set(item.stableItemKey, item);
     }
 
-    // The bureau's OWN masked account number, per tradeline. Never another
-    // bureau's, never a normalised one.
-    const maskedByItem = new Map();
+    // THE BUREAU FIDELITY LAYER. The single access point for reported values.
+    //
+    // The Letter Engine does not know where a reported value lives — it asks
+    // Fidelity by stable_item_key and quotes what it gets. This is the Bureau
+    // Fidelity Standard's one enforcement point: no template reaches into
+    // observation.reported, and no normalized value can reach a letter.
     const report = context.report ?? null;
-
-    if (report) {
-        for (const account of [...(report.accounts ?? []), ...(report.collections ?? []), ...(report.public_records ?? [])]) {
-            for (const tradeline of account.bureau_tradelines ?? []) {
-                maskedByItem.set(tradeline.stable_item_key, tradeline.masked_account ?? null);
-            }
-        }
-    }
+    const fidelity = createBureauFidelity(report);
 
     // ONE LETTER PER BUREAU. Business Trappers sends one letter per bureau,
     // containing every disputed tradeline for that bureau.
@@ -391,7 +443,26 @@ export async function generateLetters(chain, analysis, context = {}) {
     const letters = [];
 
     for (const [bureau, items] of [...byBureau.entries()].sort()) {
-        const bureauName = BUREAU_NAMES[bureau] ?? bureau;
+        // ---- RECIPIENT ------------------------------------------------------
+        //
+        // Derived from the bureau, never selected. There is exactly ONE correct
+        // legal entity and dispute address per bureau; "variation" here would
+        // mean getting it wrong. Fails closed — an unknown bureau does NOT fall
+        // back to "Dear Credit Reporting Agency", which is the single clearest
+        // tell that a letter was mail-merged.
+        const recipient = resolveRecipient(bureau);
+
+        if (!recipient.ok) {
+            withheld.push({
+                bureau,
+                stableItemKey: null,
+                furnisher: null,
+                reason: recipient.error,
+            });
+            continue;
+        }
+
+        const bureauName = recipient.shortName;
         const escalated = items.some((i) => i.escalated);
         const round = Math.max(...items.map((i) => i.round ?? 1));
 
@@ -412,7 +483,28 @@ export async function generateLetters(chain, analysis, context = {}) {
                 continue;
             }
 
-            const masked = maskedByItem.get(item.stableItemKey);
+            // Resolve THIS tradeline's reported view. A tradeline the Fidelity
+            // Layer has never heard of cannot be quoted — that is a fail-closed
+            // signal, not a value to invent.
+            const reportedView = fidelity.forItem(item.stableItemKey);
+
+            if (!reportedView) {
+                withheld.push({
+                    stableItemKey: item.stableItemKey,
+                    bureau,
+                    furnisher: item.furnisher,
+                    reason:
+                        "The Bureau Fidelity Layer has no reported record for this tradeline, so no " +
+                        "value can be quoted faithfully. Withheld for human review rather than " +
+                        "generated from an unknown source.",
+                });
+                continue;
+            }
+
+            const itemQuoter = makeQuoter(reportedView);
+
+            const maskedValue = reportedView.maskedAccount();
+            const masked = hasReported(maskedValue) ? maskedValue : null;
 
             // AN ACCOUNT WE CANNOT IDENTIFY TO THE BUREAU IS AN ACCOUNT WE DO NOT
             // DISPUTE. Sending a dispute with no account number invites "unable to
@@ -518,7 +610,11 @@ export async function generateLetters(chain, analysis, context = {}) {
             const disputedFields = [...new Set(crossBureau.map((x) => CROSS_FIELD[x.finding.code]).filter(Boolean))];
 
             const defects = [
-                ...local.map((x) => x.spec.defect(x.finding.evidence ?? {})),
+                // The quoter reads ONLY this tradeline's reported view. Every
+                // template quotes bureau values through it; the finding evidence is
+                // passed second, for reasoning context and named derived values
+                // only — never for quoting a reported value.
+                ...local.map((x) => x.spec.defect(itemQuoter, x.finding.evidence ?? {})),
                 ...(disputedFields.length
                     ? [
                           // Cross-bureau variance SUPPORTS OPENING A DISPUTE. It does
@@ -630,9 +726,11 @@ export async function generateLetters(chain, analysis, context = {}) {
             "",
             letterDate.toISOString().slice(0, 10),
             "",
-            BUREAU_ADDRESSES[bureau] ?? bureauName,
+            recipient.addressBlock,
             "",
             `Re: Dispute — ${identity.name}`,
+            "",
+            recipient.greeting,
             "",
             voice.opening.text,
             "",
@@ -663,6 +761,7 @@ export async function generateLetters(chain, analysis, context = {}) {
 
             // Audit: Kris can reproduce this letter's voice from the combination alone.
             voice: voice.provenance,
+            recipient: { legalName: recipient.legalName, greeting: recipient.greeting },
 
             requiresHumanReview: firstProductionValidation || items.some((i) => i.humanReview),
             reviewReason: firstProductionValidation
@@ -711,6 +810,10 @@ export async function generateLetters(chain, analysis, context = {}) {
             identityCrcClientId: identity.crcClientId,
             identityRetrievedAt: identity.retrievedAt,
             crossBureauLeakCheck: leaks.length === 0 ? "PASS" : "FAIL",
+
+            // If FALSE, the voice libraries are engineer-authored placeholders.
+            // NOT SENDABLE. Business Trappers authors the approved text.
+            voiceLibrariesApproved: letters[0]?.voice?.librariesApproved ?? null,
         },
     };
 }
