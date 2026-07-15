@@ -577,7 +577,13 @@ export async function decideDisputes(analysis, context = {}) {
 
         for (const account of groups) {
             for (const tradeline of account.bureau_tradelines ?? []) {
-                observationsByItemKey.set(tradeline.stable_item_key, tradeline.observation ?? {});
+                // REASONING reads the NORMALIZED layer (Bureau Fidelity Standard:
+                // the Decision Engine reasons on Layer 1; letters quote Layer 2).
+                // Falls back to the observation itself for pre-two-layer fixtures.
+                observationsByItemKey.set(
+                    tradeline.stable_item_key,
+                    tradeline.observation?.normalized ?? tradeline.observation ?? {}
+                );
             }
         }
     }
