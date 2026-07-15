@@ -42,7 +42,7 @@
  * ===========================================================================
  */
 
-import { IDENTITY_SOURCE, normalizeIdentity } from "./intelligence/clientIdentity.js";
+import { IDENTITY_SOURCE, normalizeIdentity } from "./clientIdentity.js";
 
 const PROFILE_LINK_TEXT = "View/Edit Profile";
 const MODAL_TIMEOUT = 20000;
