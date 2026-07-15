@@ -440,6 +440,23 @@ export async function generateLetters(chain, analysis, context = {}) {
         byBureau.get(item.bureau).push(item);
     }
 
+    // ---- REPORT ORDER — Letter Intelligence Standard §4 ---------------------
+    //
+    // Tradelines must appear in the EXACT order shown on that bureau's report. The
+    // dispute chain hands items in decision order, which is NOT report order. We
+    // re-sort each bureau's items by the tradeline's position in the report, read
+    // through the Fidelity Layer so the Letter Engine never inspects report
+    // structure itself. Stable: equal positions keep chain order.
+    for (const [bureau, items] of byBureau.entries()) {
+        items.sort((a, b) => {
+            const va = fidelity.forItem(a.stableItemKey);
+            const vb = fidelity.forItem(b.stableItemKey);
+            const oa = va ? va.reportOrder() : Infinity;
+            const ob = vb ? vb.reportOrder() : Infinity;
+            return oa - ob;
+        });
+    }
+
     const letters = [];
 
     for (const [bureau, items] of [...byBureau.entries()].sort()) {
