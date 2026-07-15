@@ -12,6 +12,7 @@ import { runIdentifierSpike } from "./src/spikeIdentifiersRun.js";
 import { runClientProfileSpike } from "./src/spikeClientProfileRun.js";
 import { runProfileRead } from "./src/milestoneProfile.js";
 import { runMilestone6 } from "./src/milestone6.js";
+import { runMilestone7 } from "./src/milestone7.js";
 import { extractSkeletonNode, buildLiabilityMap, buildFieldMap, buildCollisionMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
 
 dotenv.config();
@@ -293,6 +294,35 @@ app.post("/milestone-6", async (req, res) => {
     try {
 
         const result = await runMilestone6(req.body);
+
+        res.json(result);
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+
+    }
+
+});
+
+/**
+ * /milestone-7 — THE FULL END-TO-END PIPELINE.
+ *
+ * Capture + normalize (via M6) -> analysis -> decision -> strategy -> chain ->
+ * letters -> reconcile. Returns the three-bureau dispute package, marked
+ * FIRST_PRODUCTION_VALIDATION / NOT SENT. Adds no logic; orchestrates existing
+ * tested stages.
+ */
+app.post("/milestone-7", async (req, res) => {
+
+    try {
+
+        const result = await runMilestone7(req.body);
 
         res.json(result);
 
