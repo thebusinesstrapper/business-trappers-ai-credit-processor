@@ -62,7 +62,8 @@
  */
 
 import { verifyIdentity, formatAddress } from "./clientIdentity.js";
-import { selectVoice, resolveRecipient } from "./voice/index.js";
+import { selectVoice } from "./voice.js";
+import { resolveRecipient } from "./recipientLibrary.js";
 import { createBureauFidelity, hasReported, NO_REPORTED_VALUE } from "./bureauFidelity.js";
 
 export const LETTER_SCHEMA_VERSION = "BT-LETTER-3.0";
