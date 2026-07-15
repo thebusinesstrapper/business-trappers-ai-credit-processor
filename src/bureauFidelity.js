@@ -88,6 +88,14 @@ function makeReportedView(tradeline) {
         // ---- Metadata. Does NOT gate quoting. ----
         basis: () => tradeline?.observation?.basis ?? null,
         bureau: () => tradeline?.bureau ?? null,
+
+        // The tradeline's position in the bureau's report. Letter Intelligence
+        // Standard §4: tradelines appear in the EXACT order shown on that bureau's
+        // report — never reordered, prioritized, or grouped. This is that order.
+        // A tradeline with no recorded position sorts last (Infinity) rather than
+        // silently jumping to the front.
+        reportOrder: () =>
+            Number.isFinite(tradeline?.source_row_index) ? tradeline.source_row_index : Infinity,
     };
 }
 
