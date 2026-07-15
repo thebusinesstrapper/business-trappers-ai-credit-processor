@@ -47,7 +47,7 @@ import { launchBrowser } from "./browserbase.js";
 import { loginToCRC } from "./crcLogin.js";
 import { openClient } from "./openClient.js";
 import { readClientProfile } from "./crcClientProfile.js";
-import { verifyIdentity } from "./intelligence/clientIdentity.js";
+import { verifyIdentity } from "./clientIdentity.js";
 import { openCreditHero } from "./openCreditHero.js";
 import { openCreditReport } from "./openCreditReport.js";
 import { normalizeReport } from "./reportNormalize.js";
