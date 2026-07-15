@@ -398,13 +398,19 @@ function tradelineIdentity(bureau, maskedAccount, furnisher) {
 function sameTradelineIdentity(a, b) {
     if (a.bureau !== b.bureau) return false;
 
-    // last-4 must be present on both and equal. Absence never confirms identity.
+    // Same bureau + same masked last-4 = the SAME bureau tradeline.
+    //
+    // Absence never confirms identity: a null last-4 on either side fails closed.
     if (a.last4 === null || b.last4 === null || a.last4 !== b.last4) return false;
 
-    // furnisher must be present on both and equal.
-    if (a.furnisher_norm === null || b.furnisher_norm === null) return false;
-    if (a.furnisher_norm !== b.furnisher_norm) return false;
-
+    // FURNISHER NAME DOES NOT PARTICIPATE. Frozen Extraction Standard:
+    //   "Furnisher-name differences alone are never sufficient evidence of a
+    //    collision," and furnisher naming "must not split an account that
+    //    account-number evidence joins."
+    // NAVY FEDERAL CR UNION / NAVY FCU on the same bureau with the same last-4 are
+    // one tradeline. The bureau-reported furnisher STRING is preserved verbatim in
+    // observation.reported for Bureau Fidelity and letters; it is simply not an
+    // identity signal here.
     return true;
 }
 
@@ -796,8 +802,14 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
                 // may describe one TransUnion tradeline as a merged {TU, EXP} row
                 // AND a separate {TU} row in the same report. Both observe the SAME
                 // tradeline; they are folded, not treated as two.
-                if (byBureau.has(bureau)) {
-                    const existing = byBureau.get(bureau);
+                // Slot key is bureau + last-4, NOT bureau alone. Two DIFFERENT
+                // accounts reported by the same bureau (different last-4 — e.g. two
+                // separate Aidvantage student loans) must occupy DIFFERENT slots and
+                // remain independent tradelines. Same last-4 shares a slot and folds.
+                const bureauSlot = `${bureau}|${candidateTradeline.identity.last4 ?? "no-last4"}`;
+
+                if (byBureau.has(bureauSlot)) {
+                    const existing = byBureau.get(bureauSlot);
 
                     // FAIL CLOSED ONLY ON A GENUINE IDENTITY CONFLICT.
                     //
@@ -832,7 +844,7 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
 
                     // The folded tradeline keeps the existing key (identity is
                     // unchanged), but adopts the winning observation and notes.
-                    byBureau.set(bureau, {
+                    byBureau.set(bureauSlot, {
                         ...existing,
                         observation: folded.observation,
                         vendor_identifiers: folded.vendor_identifiers,
@@ -871,7 +883,7 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
                     tlResolved.resolution === RESOLUTION.MATCHED ? "matched" : "minted"
                 ]++;
 
-                byBureau.set(bureau, {
+                byBureau.set(bureauSlot, {
                     stable_item_key: tlResolved.key,
                     ...candidateTradeline,
                     signatures: tlSigs.map((s) => s.value),
