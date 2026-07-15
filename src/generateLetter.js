@@ -62,7 +62,7 @@
  */
 
 import { verifyIdentity, formatAddress } from "./clientIdentity.js";
-import { selectVoice } from "./voice.js";
+import { selectVoice } from "./index.js";
 import { resolveRecipient } from "./recipientLibrary.js";
 import { createBureauFidelity, hasReported, NO_REPORTED_VALUE } from "./bureauFidelity.js";
 
