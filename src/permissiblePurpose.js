@@ -246,7 +246,10 @@ const DEROGATORY = /charge.?off|collection|repossession|foreclosure|settled|defa
  */
 export function evaluateTradelinePermissiblePurpose(ctx) {
     const { tradeline, furnisher, mixedFile = false } = ctx;
-    const obs = tradeline.observation ?? {};
+    // REASONS on the normalized layer (Bureau Fidelity Standard: this is
+    // Intelligence, which reads Layer 1). Falls back to the observation itself for
+    // any pre-two-layer fixture.
+    const obs = tradeline.observation?.normalized ?? tradeline.observation ?? {};
 
     const blocked = (blockedBy, reason) => ({
         eligible: false,
