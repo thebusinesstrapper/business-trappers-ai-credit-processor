@@ -8,12 +8,12 @@
  * split used everywhere else in this system.
  */
 
-import { analyzeCreditReport } from "./intelligence/analyzeCreditReport.js";
-import { decideDisputes } from "./intelligence/decideDisputes.js";
-import { selectStrategy } from "./intelligence/selectStrategy.js";
-import { buildDisputeChain } from "./intelligence/disputeChain.js";
-import { generateLetters } from "./intelligence/generateLetter.js";
-import { reconcile } from "./intelligence/reconcile.js";
+import { analyzeCreditReport } from "./analyzeCreditReport.js";
+import { decideDisputes } from "./decideDisputes.js";
+import { selectStrategy } from "./selectStrategy.js";
+import { buildDisputeChain } from "./disputeChain.js";
+import { generateLetters } from "./generateLetter.js";
+import { reconcile } from "./reconcile.js";
 
 /**
  * The pipeline AFTER capture. Pure: report + identity in, package out. No browser,
