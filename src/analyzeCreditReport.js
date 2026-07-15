@@ -359,23 +359,29 @@ function detectCrossBureauInconsistencies(account) {
         }
     };
 
+    // Cross-bureau comparison REASONS on the normalized layer (Bureau Fidelity
+    // Standard: comparison is Intelligence, and Intelligence reads Layer 1). The
+    // reported layer is for quoting, not comparing — comparing verbatim strings
+    // would make "$4,200.00" and "4200" look different when they are the same fact.
+    const xbNorm = (t) => t.observation?.normalized ?? t.observation ?? {};
+
     compare(
         "TL_XB_STATUS_INCONSISTENT",
-        (t) => normalizeStatus(t.observation?.status),
+        (t) => normalizeStatus(xbNorm(t).status),
         (v) => `"${v}"`,
         (vals) => distinct(vals).length > 1
     );
 
     compare(
         "TL_XB_BALANCE_INCONSISTENT",
-        (t) => toNumber(t.observation?.balance),
+        (t) => toNumber(xbNorm(t).balance),
         (v) => `a balance of ${v}`,
         (vals) => Math.max(...vals) - Math.min(...vals) > BALANCE_TOLERANCE_DOLLARS
     );
 
     compare(
         "TL_XB_PAST_DUE_INCONSISTENT",
-        (t) => toNumber(t.observation?.past_due),
+        (t) => toNumber(xbNorm(t).past_due),
         (v) => `past due of ${v}`,
         (vals) => Math.max(...vals) - Math.min(...vals) > BALANCE_TOLERANCE_DOLLARS
     );
@@ -384,7 +390,7 @@ function detectCrossBureauInconsistencies(account) {
     // both be right, and the item's expiry date is in dispute.
     compare(
         "TL_XB_DOFD_INCONSISTENT",
-        (t) => t.observation?.date_of_first_delinquency ?? null,
+        (t) => xbNorm(t).date_of_first_delinquency ?? null,
         (v) => `a DOFD of ${v}`,
         (vals) => distinct(vals).length > 1
     );
@@ -393,7 +399,7 @@ function detectCrossBureauInconsistencies(account) {
     compare(
         "TL_XB_OPENED_DATE_INCONSISTENT",
         (t) => {
-            const d = toDate(t.observation?.date_opened);
+            const d = toDate(xbNorm(t).date_opened);
             return d ? `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}` : null;
         },
         (v) => `an opened date of ${v}`,
