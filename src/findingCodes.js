@@ -205,6 +205,32 @@ export const FINDING_CODES = Object.freeze({
         summary: "The reported status conflicts with the account's own payment history grid.",
     },
 
+    // BASELINE REINVESTIGATION.
+    //
+    // This is NOT a defect. It asserts NOTHING about the account's accuracy.
+    //
+    // It records that a negative tradeline is eligible for the consumer's FCRA
+    // §611 right to dispute completeness and accuracy and demand a reasonable
+    // reinvestigation — a right that requires NO proof of error to exercise.
+    //
+    // Emitted ONLY when no fact-specific finding exists. A stronger, specific
+    // finding always supersedes it, and never produces a second dispute section.
+    TL_BASELINE_REINVESTIGATION: {
+        code: "TL_BASELINE_REINVESTIGATION",
+        severity: "MEDIUM",
+        level: "ITEM",
+        requires: "REPORT_ONLY",
+        description: "Negative tradeline eligible for baseline §611 reinvestigation. No specific defect identified.",
+    },
+
+    COL_BASELINE_REINVESTIGATION: {
+        code: "COL_BASELINE_REINVESTIGATION",
+        severity: "MEDIUM",
+        level: "ITEM",
+        requires: "REPORT_ONLY",
+        description: "Collection eligible for baseline §611 reinvestigation. No specific defect identified.",
+    },
+
     TL_BEYOND_REPORTING_PERIOD: {
         level: LEVEL.ITEM,
         severity: SEVERITY.CRITICAL,
@@ -212,6 +238,21 @@ export const FINDING_CODES = Object.freeze({
         summary:
             "The Date of First Delinquency is more than seven years old, yet the item " +
             "is still reported.",
+    },
+
+    // OBSOLESCENCE COULD NOT BE COMPUTED.
+    //
+    // This is NOT "the item is fine". It is "we cannot tell", and the difference
+    // is the whole guardrail. An obsolescence claim rests entirely on a date; if
+    // the date is missing, unreadable, or contested across bureaus, we have no
+    // ground to stand on and must not manufacture one.
+    TL_OBSOLESCENCE_INDETERMINATE: {
+        level: LEVEL.ITEM,
+        severity: SEVERITY.MEDIUM,
+        requires: REQUIRES.REPORT_ONLY,
+        summary:
+            "A derogatory item may be beyond its reporting period, but the controlling date is " +
+            "missing, unreadable, or disputed across bureaus, so the expiration cannot be computed.",
     },
 
     TL_DUPLICATE_WITHIN_BUREAU: {
@@ -375,6 +416,25 @@ export const FINDING_CODES = Object.freeze({
         severity: SEVERITY.HIGH,
         requires: REQUIRES.REPORT_ONLY,
         summary: "This bureau reports public record details that differ from other bureaus.",
+    },
+
+    PR_RECORD_TYPE_UNKNOWN: {
+        level: LEVEL.ITEM,
+        severity: SEVERITY.MEDIUM,
+        requires: REQUIRES.REPORT_ONLY,
+        summary:
+            "The public record's type cannot be identified from the report. Different record types " +
+            "carry different reporting periods and different legal treatment, so nothing can be " +
+            "asserted about it until the type is known.",
+    },
+
+    PR_OBSOLESCENCE_INDETERMINATE: {
+        level: LEVEL.ITEM,
+        severity: SEVERITY.MEDIUM,
+        requires: REQUIRES.REPORT_ONLY,
+        summary:
+            "A public record may be beyond its reporting period, but the record type or filing date " +
+            "cannot be established, so the applicable period cannot be calculated.",
     },
 
     PR_BEYOND_REPORTING_PERIOD: {
