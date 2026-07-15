@@ -26,7 +26,7 @@
 
 import { successResponse, errorResponse } from "./response.js";
 import { runMilestone6 } from "./milestone6.js";
-import { verifyIdentity } from "./intelligence/clientIdentity.js";
+import { verifyIdentity } from "./clientIdentity.js";
 
 import { runPipeline } from "./pipeline.js";
 
