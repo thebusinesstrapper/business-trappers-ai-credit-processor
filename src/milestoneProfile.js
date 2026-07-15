@@ -14,7 +14,7 @@ import { launchBrowser } from "./browserbase.js";
 import { loginToCRC } from "./crcLogin.js";
 import { openClient } from "./openClient.js";
 import { readClientProfile } from "./crcClientProfile.js";
-import { verifyIdentity } from "./intelligence/clientIdentity.js";
+import { verifyIdentity } from "./clientIdentity.js";
 
 export async function runProfileRead(data = {}) {
     let browser;
