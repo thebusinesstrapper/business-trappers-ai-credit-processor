@@ -592,7 +592,12 @@ function buildObservation(liability, basis, sharedWith, track) {
 
             account_status: raw.account_status,
             account_type: raw.account_type,
-            account_status_type: raw.account_status_type,
+            account_status_type: scalarText(raw.account_status_type),
+            // Verbatim bureau current-rating (Layer 2). On ListAndStack this carries
+            // the reportable status word (e.g. "CollectionOrChargeOff") when
+            // @RawAccountStatus is absent. Scalarized because _CURRENT_RATING may be
+            // a nested object. Quoting-eligible for Bureau Fidelity.
+            current_rating: scalarText(raw.current_rating),
             industry: raw.industry,
             responsibility: raw.responsibility,
 
