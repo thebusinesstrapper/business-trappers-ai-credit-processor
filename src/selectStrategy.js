@@ -60,31 +60,64 @@ export const MAX_ROUNDS = 6; // AI Processing Decision Engine v1.0. Six, not fiv
  * table. They are only reachable through EARNED escalation, below.
  */
 const DECISION_TO_STRATEGY = Object.freeze({
-    "BT-DM-0002": { strategy: "BT-ST-0004", name: "Unauthorized Inquiry" },          // duplicate inquiry
-    "BT-DM-0004": { strategy: "BT-ST-0003", name: "Personal Information Correction" },
-    "BT-DM-0006": { strategy: "BT-ST-0003", name: "Personal Information Correction" },
-    "BT-DM-0007": { strategy: "BT-ST-0009", name: "Mixed File Resolution" },
-    "BT-DM-0008": { strategy: "BT-ST-0005", name: "Collection Validation" },
-    "BT-DM-0010": { strategy: "BT-ST-0005", name: "Collection Validation" },
-    "BT-DM-0011": { strategy: "BT-ST-0006", name: "Charge-Off Investigation" },
-    "BT-DM-0013": { strategy: "BT-ST-0006", name: "Charge-Off Investigation" },      // re-aging
-    "BT-DM-0014": { strategy: "BT-ST-0007", name: "Payment History Correction" },
-    "BT-DM-0018": { strategy: "BT-ST-0001", name: "Bureau Investigation" },
-    "BT-DM-0019": { strategy: "BT-ST-0001", name: "Bureau Investigation" },
-    "BT-DM-0028": { strategy: "BT-ST-0003", name: "Personal Information Correction" },
-    "BT-DM-0029": { strategy: "BT-ST-0001", name: "Bureau Investigation" },          // reinsertion
-    "BT-DM-0031": { strategy: "BT-ST-0001", name: "Bureau Investigation" },
-    "BT-DM-0033": { strategy: "BT-ST-0010", name: "Metro 2 Accuracy Review" },
-    "BT-DM-0034": { strategy: "BT-ST-0006", name: "Charge-Off Investigation" },
-    "BT-DM-0051": { strategy: "BT-ST-0001", name: "Bureau Investigation" },          // obsolete
-
-    // BT-DM-0054 — BASELINE REINVESTIGATION.
-    // The consumer's §611 right to dispute completeness and accuracy. Asserts no
-    // defect. Always the WEAKEST path: any fact-specific finding supersedes it,
-    // and the Analysis Engine only emits it when nothing specific was found.
-    "BT-DM-0054": { strategy: "BT-ST-0001", name: "Bureau Investigation" },
-    "BT-DM-0052": { strategy: "BT-ST-0001", name: "Bureau Investigation" },          // stale inquiry
-    "BT-DM-0053": { strategy: "BT-ST-0001", name: "Bureau Investigation" },          // public record defect
+    // GOVERNED Decision -> Strategy — Code Alignment Map v1.0 / Master Governance Matrix v1.0.
+    // All 55 governed decisions. A decision not reached by any finding is still
+    // defined here so its chain is governed the moment it becomes reachable.
+    "BT-DM-0001": { strategy: "BT-ST-0004" },
+    "BT-DM-0002": { strategy: "BT-ST-0004" },
+    "BT-DM-0003": { strategy: "BT-ST-0008" },
+    "BT-DM-0004": { strategy: "BT-ST-0003" },
+    "BT-DM-0005": { strategy: "BT-ST-0003" },
+    "BT-DM-0006": { strategy: "BT-ST-0003" },
+    "BT-DM-0007": { strategy: "BT-ST-0009" },
+    "BT-DM-0008": { strategy: "BT-ST-0005" },
+    "BT-DM-0009": { strategy: "BT-ST-0005" },
+    "BT-DM-0010": { strategy: "BT-ST-0005" },
+    "BT-DM-0011": { strategy: "BT-ST-0006" },
+    "BT-DM-0012": { strategy: "BT-ST-0006" },
+    "BT-DM-0013": { strategy: "BT-ST-0001" },
+    "BT-DM-0014": { strategy: "BT-ST-0007" },
+    "BT-DM-0015": { strategy: "BT-ST-0007" },
+    "BT-DM-0016": { strategy: "BT-ST-0007" },
+    "BT-DM-0017": { strategy: "BT-ST-0001" },
+    "BT-DM-0018": { strategy: "BT-ST-0001" },
+    "BT-DM-0019": { strategy: "BT-ST-0001" },
+    "BT-DM-0020": { strategy: "BT-ST-0012" },
+    "BT-DM-0021": { strategy: "BT-ST-0001" },
+    "BT-DM-0022": { strategy: "BT-ST-0001" },
+    "BT-DM-0023": { strategy: "BT-ST-0001" },
+    "BT-DM-0024": { strategy: "BT-ST-0001" },
+    "BT-DM-0025": { strategy: "BT-ST-0001" },
+    "BT-DM-0026": { strategy: "BT-ST-0008" },
+    "BT-DM-0027": { strategy: "BT-ST-0008" },
+    "BT-DM-0028": { strategy: "BT-ST-0003" },
+    "BT-DM-0029": { strategy: "BT-ST-0001" },
+    "BT-DM-0030": { strategy: "BT-ST-0001" },
+    "BT-DM-0031": { strategy: "BT-ST-0001" },
+    "BT-DM-0032": { strategy: "BT-ST-0002" },
+    "BT-DM-0033": { strategy: "BT-ST-0010" },
+    "BT-DM-0034": { strategy: "BT-ST-0006" },
+    "BT-DM-0035": { strategy: "BT-ST-0001" },
+    "BT-DM-0036": { strategy: "BT-ST-0001" },
+    "BT-DM-0037": { strategy: "BT-ST-0001" },
+    "BT-DM-0038": { strategy: "BT-ST-0002" },
+    "BT-DM-0039": { strategy: "BT-ST-0002" },
+    "BT-DM-0040": { strategy: "BT-ST-0001" },
+    "BT-DM-0041": { strategy: "BT-ST-0013" },
+    "BT-DM-0042": { strategy: "BT-ST-0002" },
+    "BT-DM-0043": { strategy: "BT-ST-0011" },
+    "BT-DM-0044": { strategy: "BT-ST-0011" },
+    "BT-DM-0045": { strategy: "BT-ST-0014" },
+    "BT-DM-0046": { strategy: "BT-ST-0015" },
+    "BT-DM-0047": { strategy: "BT-ST-0001" },
+    "BT-DM-0048": { strategy: "BT-ST-0001" },
+    "BT-DM-0049": { strategy: "BT-ST-0001" },
+    "BT-DM-0050": { strategy: "BT-ST-0016" },
+    "BT-DM-0051": { strategy: "BT-ST-0001" },
+    "BT-DM-0052": { strategy: "BT-ST-0004" },
+    "BT-DM-0053": { strategy: "BT-ST-0001" },
+    "BT-DM-0054": { strategy: "BT-ST-0001" },
+    "BT-DM-0055": { strategy: "BT-ST-0004" },
 });
 
 const STRATEGY_NO_FURTHER_ACTION = { strategy: "BT-ST-0016", name: "No Further Action" };
@@ -103,74 +136,86 @@ const STRATEGY_NO_FURTHER_ACTION = { strategy: "BT-ST-0016", name: "No Further A
  * supported; correction where deletion is not the appropriate remedy.
  */
 export const REMEDY = Object.freeze({
-    DELETE: "Delete this account from my credit file.",
-    DELETE_INQUIRY: "Delete this inquiry from my credit file.",
-    DELETE_DUPLICATE: "Delete the duplicate entry.",
-    CORRECT: "Correct the reporting for this account.",
-    REINVESTIGATE: "Conduct a reasonable reinvestigation and delete or correct this account if it cannot be verified as complete and accurate.",
-    REINVESTIGATE_COLLECTION: "Conduct a reasonable reinvestigation and delete or correct this collection account if it cannot be verified as complete and accurate.",
-    // NOTE: there is deliberately NO "validate this debt" remedy for a CRA.
-    // Debt validation is an FDCPA process owed by a DEBT COLLECTOR. A credit
-    // bureau is not a collector and has no validation duty — demanding one from
-    // Equifax is a category error, and it invites the reply that they are not
-    // the right recipient. What a CRA owes is a reasonable REINVESTIGATION
-    // under FCRA §611.
-    METHOD_OF_VERIFICATION:
-        "Provide the method of verification used, including the name and address of the furnisher " +
-        "contacted and the procedure used to verify this account. If it cannot be verified, delete it.",
-    UPDATE: "Update the reporting to reflect the correction you previously confirmed.",
-    DELETE_AND_NOTIFY: "Delete this account and confirm in writing that it will not be reinserted.",
+    // GOVERNED REMEDY CATALOG — verbatim from Legal Remedy Standards v2.0 /
+    // Code Alignment Map v1.0. These are the ONLY approved remedy strings.
+    // No unconditional "delete this account" remedy exists: deletion is always
+    // conditional on non-verification unless a decision's governed contract says otherwise.
+    REINVESTIGATE_CONDITIONAL: "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected.",
+    PERSONAL_INFO_CORRECT: "Correct or remove the inaccurate personal-information entry.",
+    REMOVE_DUPLICATE: "Remove the duplicate reporting while preserving the correctly reported account or inquiry.",
+    UPDATE_VERIFIED: "Update the reporting to reflect the verified current information; delete only if it cannot be accurately corrected.",
+    PERMISSIBLE_PURPOSE: "Investigate permissible purpose and remove the inquiry only if authorization or another permissible purpose cannot be verified.",
+    OBSOLESCENCE_GATED: "Delete only when the applicable reporting period can be affirmatively calculated and has expired; otherwise route to review or request verification without alleging obsolescence.",
+    IDENTITY_THEFT_BLOCK: "Block or remove identity-theft information only after required consumer documentation and identity verification are satisfied.",
+    ESCALATION_REMEDY: "Apply the approved escalation remedy supported by prior dispute history, response evidence, and contractual or statutory prerequisites.",
+    NO_REMEDY: "No dispute remedy. Preserve the item and document the reason.",
 });
 
-const REMEDY_BY_STRATEGY = Object.freeze({
-    "BT-ST-0001": REMEDY.REINVESTIGATE,          // Bureau Investigation
-    "BT-ST-0002": REMEDY.REINVESTIGATE,          // Furnisher Investigation
-    "BT-ST-0003": REMEDY.CORRECT,                // Personal Information
-    "BT-ST-0004": REMEDY.DELETE_INQUIRY,         // Inquiry
-    "BT-ST-0005": REMEDY.REINVESTIGATE_COLLECTION, // Collection — CRA reinvestigation, NOT FDCPA validation
-    "BT-ST-0006": REMEDY.DELETE,                 // Charge-Off Investigation
-    "BT-ST-0007": REMEDY.CORRECT,                // Payment History
-    "BT-ST-0009": REMEDY.DELETE,                 // Mixed File
-    "BT-ST-0010": REMEDY.DELETE,                 // Metro 2 — an inconsistent record is unverifiable
-    "BT-ST-0011": REMEDY.METHOD_OF_VERIFICATION, // Failure to Investigate — HOW did you verify it?
-    "BT-ST-0012": REMEDY.UPDATE,                 // Failure to Update
-    "BT-ST-0013": REMEDY.DELETE_AND_NOTIFY,      // Notice & Cure (reinsertion)
-    "BT-ST-0016": null,                          // No Further Action
-});
-
-/**
- * DECISION-LEVEL REMEDY OVERRIDES. These take precedence over the strategy.
- *
- * Strategy alone is too coarse. An OBSOLETE account and a garden-variety
- * cross-bureau variance both route to BT-ST-0001 (Bureau Investigation), but
- * they want completely different things:
- *
- *   - A variance wants REINVESTIGATION: check it, delete if unverifiable.
- *   - An obsolete account wants DELETION, FULL STOP. It is past its reporting
- *     period. Verifying it changes NOTHING — an accurate obsolete item is still
- *     an obsolete item, and asking the bureau to "delete it if it cannot be
- *     verified" invites the answer "we verified it; it stays." We would have
- *     handed them the escape hatch ourselves.
- */
 const REMEDY_BY_DECISION = Object.freeze({
-    "BT-DM-0054": REMEDY.REINVESTIGATE,    // Baseline — asks for reinvestigation, asserts nothing
-    "BT-DM-0051": REMEDY.DELETE,           // Obsolete — deletion is not conditional on accuracy
-    "BT-DM-0018": REMEDY.DELETE_DUPLICATE, // Duplicate tradeline
-    "BT-DM-0010": REMEDY.DELETE_DUPLICATE, // Duplicate collection
-
-    // COMPLIANCE-GATED (BT-DM-0052). The gate forbids asserting that deletion is
-    // legally REQUIRED on the basis of age alone. We may ask them to confirm the
-    // inquiry is still properly reportable, and to remove it if it is not — a
-    // request, conditioned on their own verification, asserting no legal duty.
-    "BT-DM-0052": "Confirm that this inquiry remains properly reportable and, if it does not, remove it.",
+    // GOVERNED per-decision remedy contract — the authoritative source.
+    // remedyFor() resolves from THIS table (decision-indexed), per governance.
+    "BT-DM-0001": REMEDY.PERMISSIBLE_PURPOSE,
+    "BT-DM-0002": REMEDY.REMOVE_DUPLICATE,
+    "BT-DM-0003": REMEDY.IDENTITY_THEFT_BLOCK,
+    "BT-DM-0004": REMEDY.PERSONAL_INFO_CORRECT,
+    "BT-DM-0005": REMEDY.PERSONAL_INFO_CORRECT,
+    "BT-DM-0006": REMEDY.PERSONAL_INFO_CORRECT,
+    "BT-DM-0007": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0008": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0009": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0010": REMEDY.REMOVE_DUPLICATE,
+    "BT-DM-0011": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0012": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0013": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0014": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0015": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0016": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0017": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0018": REMEDY.REMOVE_DUPLICATE,
+    "BT-DM-0019": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0020": REMEDY.UPDATE_VERIFIED,
+    "BT-DM-0021": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0022": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0023": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0024": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0025": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0026": REMEDY.IDENTITY_THEFT_BLOCK,
+    "BT-DM-0027": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0028": REMEDY.PERSONAL_INFO_CORRECT,
+    "BT-DM-0029": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0030": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0031": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0032": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0033": "Conduct a reasonable reinvestigation; correct or update the reporting as necessary, and delete the item only if it cannot be verified or accurately corrected.",
+    "BT-DM-0034": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0035": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0036": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0037": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0038": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0039": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0040": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0041": REMEDY.ESCALATION_REMEDY,
+    "BT-DM-0042": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0043": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0044": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0045": REMEDY.ESCALATION_REMEDY,
+    "BT-DM-0046": REMEDY.ESCALATION_REMEDY,
+    "BT-DM-0047": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0048": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0049": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0050": REMEDY.NO_REMEDY,
+    "BT-DM-0051": REMEDY.OBSOLESCENCE_GATED,
+    "BT-DM-0052": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0053": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0054": REMEDY.REINVESTIGATE_CONDITIONAL,
+    "BT-DM-0055": REMEDY.PERMISSIBLE_PURPOSE,
 });
 
 export function remedyFor(strategyId, decisionRecord) {
-    return (
-        REMEDY_BY_DECISION[decisionRecord] ??
-        REMEDY_BY_STRATEGY[strategyId] ??
-        REMEDY.REINVESTIGATE
-    );
+    // GOVERNED: the remedy is a per-decision contract (Code Alignment Map v1.0).
+    // Resolve from the decision. The fail-closed default is the conditional
+    // reinvestigation remedy — NEVER an unconditional deletion demand.
+    return REMEDY_BY_DECISION[decisionRecord] ?? REMEDY.REINVESTIGATE_CONDITIONAL;
 }
 
 /**
