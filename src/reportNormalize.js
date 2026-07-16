@@ -256,6 +256,46 @@ const DEFINED_NOT_READ = Object.keys(FIELD).filter((f) => !READ_FIELDS.has(f));
  * field that is present-and-null on 108 rows and populated on 11 — like DOFD —
  * was reported as "not found" AND warned about, while working perfectly.
  */
+/**
+ * Resolve a field value to its scalar TEXT.
+ *
+ * MISMO/Array serializes some elements (e.g. _CURRENT_RATING) as an OBJECT whose
+ * text lives under a nested key — not as a bare string. Assigning that object to
+ * normalized.status stringified to "[object Object]" downstream, which the analyzer
+ * could not categorize. This pulls the text out of the known parser shapes and
+ * leaves plain strings (and numbers) untouched. Never String(object) — that is
+ * exactly the "[object Object]" defect.
+ *
+ * Returns a trimmed non-empty string, or null.
+ */
+function scalarText(value) {
+    if (value === null || value === undefined) return null;
+
+    // Already scalar: pass through unchanged.
+    if (typeof value === "string") {
+        const t = value.trim();
+        return t === "" ? null : t;
+    }
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+
+    if (typeof value === "object") {
+        // Known MISMO / xml-parser text carriers, in priority order. These mirror
+        // the shapes already handled elsewhere in this file (@_Text, @_Code, @_Value).
+        const candidates = [
+            value["@_Type"], value["@_Code"], value["@_Value"], value["@_Text"],
+            value["#text"], value["_Text"], value["@_TypeOtherDescription"],
+        ];
+        for (const c of candidates) {
+            if (typeof c === "string" && c.trim() !== "") return c.trim();
+            if (typeof c === "number") return String(c);
+        }
+    }
+
+    // Unknown object shape: do NOT stringify to "[object Object]". Fail closed to
+    // null so the coalesce falls through to the next status candidate.
+    return null;
+}
+
 function readField(node, fieldName, track) {
     for (const key of FIELD[fieldName]) {
         if (node && Object.prototype.hasOwnProperty.call(node, key)) {
@@ -607,7 +647,13 @@ function buildObservation(liability, basis, sharedWith, track) {
             // Coalesced status for REASONING only. Bureau Fidelity's verbatim
             // reported.account_status is untouched. Order: current rating (strongest
             // negativity signal) -> account status type -> raw account status.
-            status: raw.current_rating ?? raw.account_status_type ?? raw.account_status ?? null,
+            // Every candidate is scalarized (MISMO may nest the value as an object);
+            // fallback order unchanged: current rating -> account status type -> raw.
+            status:
+                scalarText(raw.current_rating) ??
+                scalarText(raw.account_status_type) ??
+                scalarText(raw.account_status) ??
+                null,
             account_status_type: raw.account_status_type,
 
             // Responsibility is NOT coerced — the Decision Engine interprets it
