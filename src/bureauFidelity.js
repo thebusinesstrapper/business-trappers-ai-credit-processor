@@ -81,7 +81,16 @@ function makeReportedView(tradeline) {
         // ---- Reported observation values (verbatim strings) ----
         balance: () => read(reported.balance),
         pastDue: () => read(reported.past_due),
-        status: () => read(reported.account_status),
+        // Bureau-reported status, VERBATIM. On ListAndStack @RawAccountStatus
+        // (account_status) is frequently absent; the bureau's reportable status
+        // then lives verbatim in current_rating ("CollectionOrChargeOff") or
+        // account_status_type ("Closed"). Quote the first present verbatim value.
+        // All three are Layer 2 reported strings — the reasoning/normalized layer
+        // is never consulted here.
+        status: () =>
+            read(reported.account_status)      !== NO_REPORTED_VALUE ? read(reported.account_status)
+          : read(reported.current_rating)      !== NO_REPORTED_VALUE ? read(reported.current_rating)
+          : read(reported.account_status_type),
         dateOfFirstDelinquency: () => read(reported.dofd),
         dateOpened: () => read(reported.date_opened),
 
