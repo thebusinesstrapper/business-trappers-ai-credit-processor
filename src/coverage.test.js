@@ -172,7 +172,7 @@ const body = synSections[0].text;
 
 check("disputes completeness AND accuracy", body.includes("completeness and accuracy"), true);
 check("requests a reasonable reinvestigation", /reasonable reinvestigation/i.test(body), true);
-check("conditions the remedy on verification", /cannot be verified as complete and accurate/i.test(body), true);
+check("conditions the remedy on verification", /delete the item only if it cannot be verified or accurately corrected/i.test(body), true);
 check("does NOT claim it is inaccurate", /is inaccurate|is false|is incorrect/i.test(body), false);
 check("does NOT claim it is unverifiable", /cannot be verified\.|is unverifiable/i.test(body), false);
 check("cites § 611", body.includes("§ 611"), true);
