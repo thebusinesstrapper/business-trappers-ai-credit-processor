@@ -61,7 +61,10 @@ export const STAGE = Object.freeze({
 const DEROGATORY = /charge.?off|collection|repossession|foreclosure|settled|default|written.?off|late|delinquen/i;
 
 function isNegative(tradeline) {
-    const obs = tradeline.observation ?? {};
+    // Read the normalized observation (coalesced status, numeric past_due) — the
+    // same layer the analyzer reads. The flat observation carries no coalesced
+    // status, so reading it here counted every tradeline as non-negative.
+    const obs = tradeline.observation?.normalized ?? tradeline.observation ?? {};
     const pastDue = Number(obs.past_due ?? 0);
 
     return DEROGATORY.test(String(obs.status ?? "")) || pastDue > 0;
@@ -96,7 +99,7 @@ export function reconcile({ report, analysis, decisions, strategies, letters }) 
                 kind,
                 furnisher: tradeline.furnisher ?? group.original_creditor ?? null,
                 maskedAccount: tradeline.masked_account ?? null,
-                status: tradeline.observation?.status ?? null,
+                status: (tradeline.observation?.normalized ?? tradeline.observation)?.status ?? null,
                 negative: isNegative(tradeline),
             });
         }
