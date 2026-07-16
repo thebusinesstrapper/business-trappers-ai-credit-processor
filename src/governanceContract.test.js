@@ -31,7 +31,7 @@ const GOVERNED = [
     ["BT-DM-0002", "BT-ST-0004", "BT-RN-0004", "BT-IN-0004", "BT-BP-0004", "VALIDATED_AUTOMATION", "Remove the duplicate reporting while preserving the correctly reported account or inquiry."],
     ["BT-DM-0004", "BT-ST-0003", "BT-RN-0001", "BT-IN-0001", "BT-BP-0001", "VALIDATED_AUTOMATION", "Correct or remove the inaccurate personal-information entry."],
     ["BT-DM-0006", "BT-ST-0003", "BT-RN-0001", "BT-IN-0001", "BT-BP-0001", "VALIDATED_AUTOMATION", "Correct or remove the inaccurate personal-information entry."],
-    ["BT-DM-0007", "BT-ST-0009", "BT-RN-0016", "BT-IN-0013", "BT-BP-0013", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
+    ["BT-DM-0007", "BT-ST-0009", "BT-RN-0016", "BT-IN-0013", "BT-BP-0009", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
     ["BT-DM-0008", "BT-ST-0005", "BT-RN-0007", "BT-IN-0006", "BT-BP-0006", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
     ["BT-DM-0010", "BT-ST-0005", "BT-RN-0007", "BT-IN-0006", "BT-BP-0006", "VALIDATED_AUTOMATION", "Remove the duplicate reporting while preserving the correctly reported account or inquiry."],
     ["BT-DM-0011", "BT-ST-0006", "BT-RN-0010", "BT-IN-0011", "BT-BP-0011", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
@@ -42,7 +42,7 @@ const GOVERNED = [
     ["BT-DM-0028", "BT-ST-0003", "BT-RN-0001", "BT-IN-0001", "BT-BP-0001", "VALIDATED_AUTOMATION", "Correct or remove the inaccurate personal-information entry."],
     ["BT-DM-0029", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
     ["BT-DM-0031", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
-    ["BT-DM-0033", "BT-ST-0010", "BT-RN-0018", "BT-IN-0015", "BT-BP-0015", "VALIDATED_AUTOMATION", DM33_REMEDY],
+    ["BT-DM-0033", "BT-ST-0010", "BT-RN-0018", "BT-IN-0015", "BT-BP-0010", "VALIDATED_AUTOMATION", DM33_REMEDY],
     ["BT-DM-0034", "BT-ST-0006", "BT-RN-0010", "BT-IN-0011", "BT-BP-0011", "VALIDATED_AUTOMATION", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
     ["BT-DM-0036", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
     ["BT-DM-0049", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
@@ -83,7 +83,7 @@ console.log("\n=== LIVE PATH (BT-DM-0033) RESOLVES TO GOVERNED CHAIN ===\n");
 const live = resolveChain("BT-DM-0033", "BT-ST-0010");
 check("live reason BT-RN-0018", live.reason, "BT-RN-0018");
 check("live instruction BT-IN-0015", live.instruction, "BT-IN-0015");
-check("live blueprint BT-BP-0015 (not BT-BP-0010)", live.blueprint, "BT-BP-0015");
+check("live blueprint BT-BP-0010 - Metro 2 Accuracy Review (not BT-BP-0015 Arbitration)", live.blueprint, "BT-BP-0010");
 check("live tier VALIDATED_AUTOMATION", live.tier, "VALIDATED_AUTOMATION");
 check("live remedy is conditional reinvestigation", live.remedy, DM33_REMEDY);
 check("live remedy is NOT unconditional deletion", /^Delete this account/.test(live.remedy), false);
