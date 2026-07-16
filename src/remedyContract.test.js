@@ -7,7 +7,7 @@
  * dispute that asks for nothing." Also proves the withhold rule still holds for a
  * strategy that genuinely has no approved remedy.
  */
-import { remedyFor, REMEDY } from "./intelligence/selectStrategy.js";
+import { remedyFor, REMEDY } from "./selectStrategy.js";
 
 let passed = 0, failed = 0;
 const check = (label, actual, expected) => {
@@ -19,10 +19,12 @@ const check = (label, actual, expected) => {
 console.log("\n=== BT-DM-0033 PRODUCES A NON-EMPTY APPROVED REMEDY ===\n");
 
 // TL_DEROGATORY_WITHOUT_DOFD -> BT-DM-0033 -> BT-ST-0010 (Metro 2 Accuracy Review).
-// An internally inconsistent record is unverifiable; the approved remedy is DELETE.
-const remedy = remedyFor("BT-ST-0010", "BT-DM-0033");
+// GOVERNED: the remedy is conditional reinvestigation (delete only if unverifiable) —
+// remedyFor is decision-indexed now; strategy arg retained for signature compat.
+    const remedy = remedyFor("BT-ST-0010", "BT-DM-0033");
 check("BT-ST-0010 remedy is non-empty", typeof remedy === "string" && remedy.length > 0, true);
-check("...is the approved DELETE remedy", remedy, REMEDY.DELETE);
+check("...is the governed conditional reinvestigation remedy", remedy, "Conduct a reasonable reinvestigation; correct or update the reporting as necessary, and delete the item only if it cannot be verified or accurately corrected.");
+check("...contains NO unconditional deletion demand", /^Delete this account/.test(remedy), false);
 check("...is not an object", typeof remedy, "string");
 
 console.log("\n=== FAIL-CLOSED: A TRULY UNMAPPED STRATEGY REMAINS WITHHELD ===\n");
@@ -34,9 +36,9 @@ console.log("\n=== FAIL-CLOSED: A TRULY UNMAPPED STRATEGY REMAINS WITHHELD ===\n
 // remedy so a genuine dispute is never silently blanked. Prove it never returns an
 // empty string or object for any resolvable strategy — the failure mode that would
 // let a blank slip past the guard.
-for (const sid of ["BT-ST-0001", "BT-ST-0005", "BT-ST-0006", "BT-ST-0010", "BT-ST-9999"]) {
-    const r = remedyFor(sid, undefined);
-    check(`remedyFor(${sid}) is a non-empty string`, typeof r === "string" && r.trim().length > 0, true);
+for (const dm of ["BT-DM-0031", "BT-DM-0008", "BT-DM-0033", "BT-DM-0999"]) {
+    const r = remedyFor(null, dm);
+    check(`remedyFor(${dm}) is a non-empty string`, typeof r === "string" && r.trim().length > 0, true);
 }
 
 // And the withhold guard's trigger is a genuinely absent remedy on the item — this
