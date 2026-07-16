@@ -110,6 +110,44 @@ function money(v) {
  */
 export const FIDELITY_MISSING_MARKER = "[REPORTED VALUE UNAVAILABLE — DO NOT SEND]";
 
+// Consumer-facing tokens that must NEVER appear in a finished letter body. A body
+// containing any of these is unsendable and must be withheld + routed to review.
+export const FORBIDDEN_LETTER_TOKENS = Object.freeze([
+    FIDELITY_MISSING_MARKER,   // "[REPORTED VALUE UNAVAILABLE — DO NOT SEND]"
+    "DO NOT SEND",
+    "undefined",
+    "null",
+]);
+
+/**
+ * Screen finished letters for unsendable content. Pure and side-effect free.
+ * Returns, for each letter, which forbidden tokens (if any) its body contains.
+ */
+export function screenLetterContent(letters) {
+    // The DO-NOT-SEND marker and "DO NOT SEND" are distinctive literals — substring
+    // matching is safe. But "null"/"undefined" appear inside ordinary words
+    // ("annulled", "fundamentally"), so those must match only as WHOLE TOKENS —
+    // the stringified-value defect always emits them standalone, never mid-word.
+    const literalTokens = [FIDELITY_MISSING_MARKER, "DO NOT SEND"];
+    const wholeWordTokens = [
+        { token: "undefined", re: /\bundefined\b/ },
+        { token: "null", re: /\bnull\b/ },
+    ];
+    return letters.map((letter) => {
+        const body = letter.body ?? "";
+        const hits = [
+            ...literalTokens.filter((tok) => body.includes(tok)),
+            ...wholeWordTokens.filter((w) => w.re.test(body)).map((w) => w.token),
+        ];
+        return {
+            bureau: letter.bureau,
+            bureauName: letter.bureauName,
+            stableItemKeys: letter.stableItemKeys ?? [],
+            hits,
+        };
+    });
+}
+
 function makeQuoter(reportedView) {
     // Each quoter method returns the verbatim reported string, or the loud marker.
     const q = (accessorValue) =>
@@ -810,14 +848,54 @@ export async function generateLetters(chain, analysis, context = {}) {
         }
     }
 
+    // ---- FINAL FAIL-CLOSED CONTENT GATE ------------------------------------
+    //
+    // A letter body must never reach a consumer or a bureau carrying an unresolved
+    // placeholder or a stringified absent value. If the Bureau Fidelity layer could
+    // not supply a reported value, the section text contains the DO-NOT-SEND marker
+    // (or, from a defect elsewhere, a literal "undefined"/"null"). Such a letter is
+    // WITHHELD and routed to human review — it is never certified sendable. This
+    // gate is checked against the OUTPUT, not the intent.
+    const contentFailures = [];
+    const sendableLetters = [];
+    for (const screened of screenLetterContent(letters)) {
+        const letter = letters.find((l) => l.bureau === screened.bureau);
+        if (screened.hits.length > 0) {
+            contentFailures.push({ letter: screened.bureauName, tokens: screened.hits });
+            // Withhold the whole letter for this bureau and flag for human review.
+            withheld.push({
+                bureau: screened.bureau,
+                bureauName: screened.bureauName,
+                reason:
+                    "Letter body contained an unresolved placeholder or absent value " +
+                    `(${screened.hits.join(", ")}). Withheld and routed to human review; not sendable.`,
+                requiresHumanReview: true,
+                stableItemKeys: screened.stableItemKeys,
+            });
+        } else {
+            sendableLetters.push(letter);
+        }
+    }
+
+    const ok = leaks.length === 0 && contentFailures.length === 0;
+
     return {
         schemaVersion: LETTER_SCHEMA_VERSION,
-        lettersOk: leaks.length === 0,
-        errors: leaks.length
-            ? [`CROSS-BUREAU LEAK: a letter referenced another bureau. ${JSON.stringify(leaks)}`]
-            : [],
+        lettersOk: ok,
+        errors: [
+            ...(leaks.length
+                ? [`CROSS-BUREAU LEAK: a letter referenced another bureau. ${JSON.stringify(leaks)}`]
+                : []),
+            ...(contentFailures.length
+                ? [`UNSENDABLE CONTENT: placeholder/absent value in letter body. ${JSON.stringify(contentFailures)}`]
+                : []),
+        ],
+        // Only letters that passed the content gate are returned as letters; the rest
+        // are in withheld. requiresHumanReview is raised whenever anything was withheld
+        // for content reasons.
+        requiresHumanReview: contentFailures.length > 0,
 
-        letters,
+        letters: sendableLetters,
         withheld,
 
         summary: {
