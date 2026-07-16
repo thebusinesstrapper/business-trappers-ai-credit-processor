@@ -1262,7 +1262,9 @@ export async function analyzeCreditReport(report, context = {}) {
 
     const clientSummary = {
         crcClientId: report.crc_client_id ?? null,
-        reportDate: report.report_date ?? null,
+        // The normalizer puts the date at report_metadata.report_date; the old
+        // top-level report.report_date never existed, so reportDate was always null.
+        reportDate: report.report_metadata?.report_date ?? report.report_date ?? null,
         modelVersion: report.model_version ?? null,
         underlyingAccounts: accounts.length,
         bureauTradelines: tradelines.length,
