@@ -75,7 +75,13 @@ check("approved closing text is exact",
 check("a closing renders the exact approved text",
     CLOSINGS.some((c) => renderClosing(c) === APPROVED_CLOSING_TEXT), true);
 check("every closing demands written results",
-    CLOSINGS.every((c) => /written results of your reinvestigation/i.test(renderClosing(c))), true);
+    CLOSINGS.every((c) => {
+        const t = renderClosing(c);
+        // Firm demand for written results — either "written results" or "in
+        // writing, the results". Both are firm; neither is soft.
+        return /written results of your reinvestigation/i.test(t) ||
+               /in writing, the results of your reinvestigation/i.test(t);
+    }), true);
 check("every closing demands the procedure",
     CLOSINGS.every((c) => /description of the procedure/i.test(renderClosing(c))), true);
 check("no closing thanks the reader",

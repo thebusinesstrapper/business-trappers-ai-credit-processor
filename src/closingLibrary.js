@@ -51,12 +51,14 @@ export const CLOSINGS = Object.freeze([
     },
     {
         id: "CLOSE-KRIS-002",
-        // Same firm substance, reworded lead-in for variation. The demand and
-        // the action expectation are unchanged and never softened.
+        // Firm results demand, distinct wording for deterministic variation. No
+        // soft "Please provide" lead-in and no redundant "in writing, the written
+        // results"; the demand is stated directly and is never softened. Kept
+        // textually distinct from CLOSE-KRIS-001 so no two letters read identically.
         paragraphs: [
-            "Please provide, in writing, the written results of your reinvestigation, an updated copy of my " +
-            "credit file, and a description of the procedure used to determine the accuracy and " +
-            "completeness of each disputed item.",
+            "Provide, in writing, the results of your reinvestigation, an updated copy of my credit " +
+            "file, and a description of the procedure used to determine the accuracy and completeness " +
+            "of each disputed item.",
             APPROVED_ACTION_EXPECTATION,
         ],
     },

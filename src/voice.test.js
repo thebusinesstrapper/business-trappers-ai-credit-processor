@@ -18,7 +18,7 @@ import { OPENINGS, renderOpening } from "./openingLibrary.js";
 import { TRANSITIONS } from "./transitionLibrary.js";
 import { CLOSINGS, renderClosing } from "./closingLibrary.js";
 import { selectVoice, combinationCount } from "./voice.js";
-import { APPROVED_GENERAL_OPENING_TEXT } from "./openingLibrary.js";
+import { APPROVED_GENERAL_OPENING_TEXT, FACT_SPECIFIC_OPENINGS } from "./openingLibrary.js";
 import { APPROVED_CLOSING_TEXT } from "./closingLibrary.js";
 import { resolveRecipient, supportedBureaus, BUREAUS } from "./recipientLibrary.js";
 import { APPROVED_BY_BUSINESS_TRAPPERS as OPENINGS_APPROVED, APPROVAL as OPENING_APPROVAL } from "./openingLibrary.js";
@@ -127,6 +127,32 @@ check("every closing demands written results", CLOSINGS.every((c) => /(written r
 check("every closing demands the procedure used", CLOSINGS.every((c) => /description of the procedure/i.test(renderClosing(c))), true);
 check("no opening uses soft courtesy language", OPENINGS.every((o) => !/I would appreciate|thank you|please investigate/i.test(renderOpening(o))), true);
 check("no closing uses a soft thank-you", CLOSINGS.every((c) => !/thank you|I would appreciate/i.test(renderClosing(c))), true);
+
+// PROHIBITED SOFT / REDUNDANT LANGUAGE — scan EVERY active opening (general and
+// fact-specific) and EVERY active closing. None may contain any of these.
+const PROHIBITED_PHRASES = [
+    "Please provide",
+    "I would appreciate",
+    "Thank you for your",
+    "Please investigate",
+    "in writing, the written results",
+];
+const allOpenings = [...OPENINGS, ...FACT_SPECIFIC_OPENINGS];
+for (const phrase of PROHIBITED_PHRASES) {
+    check(`no opening contains "${phrase}"`,
+        allOpenings.every((o) => !renderOpening(o).includes(phrase)), true);
+    check(`no closing contains "${phrase}"`,
+        CLOSINGS.every((c) => !renderClosing(c).includes(phrase)), true);
+}
+// CLOSE-KRIS-002 specifically must be the firm, non-redundant text.
+const close2 = CLOSINGS.find((c) => c.id === "CLOSE-KRIS-002");
+check("CLOSE-KRIS-002 exists", !!close2, true);
+check("CLOSE-KRIS-002 starts firm (no 'Please provide')",
+    /^Provide\b/.test(renderClosing(close2)) && !/^Please/.test(renderClosing(close2)), true);
+check("CLOSE-KRIS-002 has no redundant 'in writing, the written results'",
+    !/in writing, the written results/.test(renderClosing(close2)), true);
+check("all three closing IDs preserved",
+    CLOSINGS.map((c) => c.id).join(","), "CLOSE-KRIS-001,CLOSE-KRIS-002,CLOSE-KRIS-003");
 check("openings are KRIS_APPROVED_V1", OPENING_APPROVAL, "KRIS_APPROVED_V1");
 
 console.log("\n=== STRUCTURE ===\n");
