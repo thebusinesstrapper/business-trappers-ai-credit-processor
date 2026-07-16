@@ -29,19 +29,19 @@ const base = { "@_AccountOwnershipType": "Individual", "@_AccountOpenedDate": "2
 const out = normalizeReport(payload([
     { ...base, "@ArrayAccountIdentifier": "CO", "@TradelineHashSimple": "co",
       "@_AccountIdentifier": "****1111", "@_AccountStatusType": "Closed",
-      "_CURRENT_RATING": "CollectionOrChargeOff", "@IsChargeoffIndicator": "Y",
+      "_CURRENT_RATING": { "@_Type": "CollectionOrChargeOff" }, "@IsChargeoffIndicator": "Y",
       "@_DerogatoryDataIndicator": "Y", "@_PastDueAmount": "4200",
       "@_FirstDelinquencyDate": "2022-01-10",
       _CREDITOR: { "@_Name": "CAP ONE AUTO" }, CREDIT_REPOSITORY: { "@_SourceType": "TransUnion" } },
     { ...base, "@ArrayAccountIdentifier": "LT", "@TradelineHashSimple": "lt",
       "@_AccountIdentifier": "****2222", "@_AccountStatusType": "Open",
-      "_CURRENT_RATING": "Late30Days", "@IsClosedIndicator": "N",
+      "_CURRENT_RATING": { "@_Type": "Late30Days" }, "@IsClosedIndicator": "N",
       "@_DerogatoryDataIndicator": "Y",
       "_LATE_COUNT": { "@_30Days": "2", "@_60Days": "1" },
       _CREDITOR: { "@_Name": "BARCLAYS BANK DELAWARE" }, CREDIT_REPOSITORY: { "@_SourceType": "Experian" } },
     { ...base, "@ArrayAccountIdentifier": "CL", "@TradelineHashSimple": "cl",
       "@_AccountIdentifier": "****3333", "@_AccountStatusType": "Open",
-      "_CURRENT_RATING": "Current", "@IsClosedIndicator": "N", "@IsChargeoffIndicator": "N",
+      "_CURRENT_RATING": { "@_Type": "Current" }, "@IsClosedIndicator": "N", "@IsChargeoffIndicator": "N",
       "@_DerogatoryDataIndicator": "N", "@_PastDueAmount": "0",
       _CREDITOR: { "@_Name": "NAVY FEDERAL CR UNION" }, CREDIT_REPOSITORY: { "@_SourceType": "Equifax" } },
 ]), { crcClientId: "15" });
@@ -52,10 +52,10 @@ const [co, lt, cl] = out.report.accounts
     .map((a) => a.bureau_tradelines[0]);
 // sorted: CL, CO, LT
 const byId = Object.fromEntries(out.report.accounts.map(a => [a.array_account_identifier, a.bureau_tradelines[0]]));
-check("charge-off status populated", byId.CO.observation.normalized.status !== null, true);
-check("late status populated", byId.LT.observation.normalized.status !== null, true);
-check("clean status populated", byId.CL.observation.normalized.status !== null, true);
-check("none universally null", [byId.CO, byId.LT, byId.CL].every(t => t.observation.normalized.status), true);
+check("charge-off status = CollectionOrChargeOff", byId.CO.observation.normalized.status, "CollectionOrChargeOff");
+check("late status = Late30Days", byId.LT.observation.normalized.status, "Late30Days");
+check("clean status = Current", byId.CL.observation.normalized.status, "Current");
+check("no status is [object Object]", [byId.CO, byId.LT, byId.CL].every(t => t.observation.normalized.status !== "[object Object]"), true);
 
 const a = await analyzeCreditReport(out.report, { clientIdentity: { crcClientId: "15", state: "FL" } });
 
