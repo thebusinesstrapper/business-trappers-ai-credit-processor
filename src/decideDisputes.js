@@ -431,9 +431,23 @@ function decideItem(item, { mixedFile, observationsByItemKey }) {
     // expected to change — rather than from an invented confidence percentage.
     const primary = records[0];
 
-    let tier = automationTierFor(primary.evidenceClass);
+    // GOVERNED: resolve the automation tier from the DECISION RECORD (Master
+    // Governance Matrix v1.0), passing evidence class only as a provisional
+    // fallback for any ungoverned decision.
+    let tier = automationTierFor(primary.record, primary.evidenceClass);
     const humanReviewReasons = [];
     const appliedOverrides = [];
+
+    // GOVERNED GLOBAL GATE: an INDETERMINATE fact may never become an affirmative
+    // allegation and must route to review, regardless of the decision's baseline
+    // tier. This DEMOTES only; it never grants autonomy.
+    if (primary.evidenceClass === "INDETERMINATE") {
+        tier = applyOverride(tier, AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED);
+        appliedOverrides.push("INDETERMINATE_EVIDENCE");
+        humanReviewReasons.push(
+            "Evidence is indeterminate; routed to review so no indeterminate fact becomes an affirmative allegation."
+        );
+    }
 
     // Overrides DEMOTE ONLY. Nothing can talk this engine into more autonomy.
     if (mixedFile) {
