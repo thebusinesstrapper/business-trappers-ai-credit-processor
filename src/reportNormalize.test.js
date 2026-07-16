@@ -497,5 +497,57 @@ check("...distinct masked accounts preserved", last4s.length === new Set(last4s)
 // Report order preserved: 9526 (row 0) before 6571 (row 1).
 check("...preserved in report order", aidTu[0].source_row_index < aidTu[1].source_row_index, true);
 
+console.log("\n=== STATUS SOURCE: FIELD-CONTRACT REGRESSION (live-report shape) ===\n");
+
+// The live report carries NO @RawAccountStatus. Status lives in @_AccountStatusType
+// and _CURRENT_RATING. Before the fix, normalized.status was null and EVERY
+// tradeline looked non-negative. These fixtures use the real field shape.
+
+// 1. CHARGE-OFF — _CURRENT_RATING = "CollectionOrChargeOff", no @RawAccountStatus.
+const chargeoff = normalizeReport(payload([
+    liability({
+        "@_AccountIdentifier": "****1111", "@RawAccountStatus": undefined,
+        "@_AccountStatusType": "Closed", "_CURRENT_RATING": "CollectionOrChargeOff",
+        "@IsChargeoffIndicator": "Y", "@_DerogatoryDataIndicator": "Y",
+        "@_PastDueAmount": "4200", "@_FirstDelinquencyDate": "2022-01-10",
+        _CREDITOR: { "@_Name": "CAP ONE AUTO" },
+        CREDIT_REPOSITORY: { "@_SourceType": "TransUnion" },
+    }),
+]), { crcClientId: "15" });
+const coTl = chargeoff.report.accounts[0].bureau_tradelines[0];
+check("charge-off: status populated (not null)", coTl.observation.normalized.status !== null, true);
+check("charge-off: status carries the rating word", /CHARGEOFF|COLLECTIONORCHARGEOFF|COLLECTION/i.test(coTl.observation.normalized.status), true);
+check("charge-off: reported.account_status untouched (fidelity)", "account_status" in coTl.observation.reported, true);
+
+// 2. OPEN ACCOUNT WITH HISTORICAL 30/60 LATES — currently open, derog history.
+const lates = normalizeReport(payload([
+    liability({
+        "@_AccountIdentifier": "****2222", "@RawAccountStatus": undefined,
+        "@_AccountStatusType": "Open", "_CURRENT_RATING": "Late30Days",
+        "@IsClosedIndicator": "N", "@_DerogatoryDataIndicator": "Y",
+        "_LATE_COUNT": { "@_30Days": "2", "@_60Days": "1", "@_90Days": "0" },
+        _CREDITOR: { "@_Name": "BARCLAYS BANK DELAWARE" },
+        CREDIT_REPOSITORY: { "@_SourceType": "Experian" },
+    }),
+]), { crcClientId: "15" });
+const lateTl = lates.report.accounts[0].bureau_tradelines[0];
+check("late account: status populated (not null)", lateTl.observation.normalized.status !== null, true);
+
+// 3. CLEAN POSITIVE — open, current, no derog. Must stay non-negative.
+const clean = normalizeReport(payload([
+    liability({
+        "@_AccountIdentifier": "****3333", "@RawAccountStatus": undefined,
+        "@_AccountStatusType": "Open", "_CURRENT_RATING": "Current",
+        "@IsClosedIndicator": "N", "@IsChargeoffIndicator": "N",
+        "@IsCollectionIndicator": "N", "@_DerogatoryDataIndicator": "N",
+        "@_PastDueAmount": "0",
+        _CREDITOR: { "@_Name": "NAVY FEDERAL CR UNION" },
+        CREDIT_REPOSITORY: { "@_SourceType": "Equifax" },
+    }),
+]), { crcClientId: "15" });
+const cleanTl = clean.report.accounts[0].bureau_tradelines[0];
+check("clean positive: status populated", cleanTl.observation.normalized.status !== null, true);
+check("clean positive: status is Current", /CURRENT/i.test(cleanTl.observation.normalized.status), true);
+
 console.log(`\n${passed} passed, ${failed} failed.\n`);
 if (failed > 0) process.exit(1);
