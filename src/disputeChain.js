@@ -32,25 +32,62 @@ export const CHAIN_SCHEMA_VERSION = "BT-CHAIN-1.0";
 // ===========================================================================
 
 const REASON_BY_DECISION = Object.freeze({
-    "BT-DM-0002": { reason: "BT-RN-0005", name: "Duplicate Inquiry" },
-    "BT-DM-0004": { reason: "BT-RN-0001", name: "Incorrect Name" },
-    "BT-DM-0006": { reason: "BT-RN-0003", name: "Incorrect Employer" },
-    "BT-DM-0007": { reason: "BT-RN-0016", name: "Mixed File" },
-    "BT-DM-0008": { reason: "BT-RN-0007", name: "Third-Party Collection" },
-    "BT-DM-0010": { reason: "BT-RN-0009", name: "Duplicate Collection" },
-    "BT-DM-0011": { reason: "BT-RN-0010", name: "Incorrect Balance" },
-    "BT-DM-0013": { reason: "BT-RN-0013", name: "Re-aged Account" },
-    "BT-DM-0014": { reason: "BT-RN-0012", name: "Incorrect Payment History" },
-    "BT-DM-0018": { reason: "BT-RN-0014", name: "Duplicate Tradeline" },
-    "BT-DM-0019": { reason: "BT-RN-0011", name: "Incorrect Account Status" },
-    "BT-DM-0028": { reason: "BT-RN-0002", name: "Incorrect Address" },
-    "BT-DM-0029": { reason: "BT-RN-0022", name: "Cannot Verify" },
-    "BT-DM-0031": { reason: "BT-RN-0022", name: "Cannot Verify" },
-    "BT-DM-0033": { reason: "BT-RN-0018", name: "Metro 2 Inconsistency" },
-    "BT-DM-0034": { reason: "BT-RN-0013", name: "Re-aged Account" },
-    "BT-DM-0051": { reason: "BT-RN-0022", name: "Cannot Verify" },
-    "BT-DM-0052": { reason: "BT-RN-0022", name: "Cannot Verify" },
-    "BT-DM-0053": { reason: "BT-RN-0022", name: "Cannot Verify" },
+    // GOVERNED Decision -> Reason — Code Alignment Map v1.0 / Reason Library v2.0.
+    "BT-DM-0001": { reason: "BT-RN-0004" },
+    "BT-DM-0002": { reason: "BT-RN-0004" },
+    "BT-DM-0003": { reason: "BT-RN-0017" },
+    "BT-DM-0004": { reason: "BT-RN-0001" },
+    "BT-DM-0005": { reason: "BT-RN-0001" },
+    "BT-DM-0006": { reason: "BT-RN-0001" },
+    "BT-DM-0007": { reason: "BT-RN-0016" },
+    "BT-DM-0008": { reason: "BT-RN-0007" },
+    "BT-DM-0009": { reason: "BT-RN-0007" },
+    "BT-DM-0010": { reason: "BT-RN-0007" },
+    "BT-DM-0011": { reason: "BT-RN-0010" },
+    "BT-DM-0012": { reason: "BT-RN-0010" },
+    "BT-DM-0013": { reason: "BT-RN-0022" },
+    "BT-DM-0014": { reason: "BT-RN-0012" },
+    "BT-DM-0015": { reason: "BT-RN-0012" },
+    "BT-DM-0016": { reason: "BT-RN-0012" },
+    "BT-DM-0017": { reason: "BT-RN-0022" },
+    "BT-DM-0018": { reason: "BT-RN-0022" },
+    "BT-DM-0019": { reason: "BT-RN-0022" },
+    "BT-DM-0020": { reason: "BT-RN-0020" },
+    "BT-DM-0021": { reason: "BT-RN-0022" },
+    "BT-DM-0022": { reason: "BT-RN-0022" },
+    "BT-DM-0023": { reason: "BT-RN-0022" },
+    "BT-DM-0024": { reason: "BT-RN-0022" },
+    "BT-DM-0025": { reason: "BT-RN-0022" },
+    "BT-DM-0026": { reason: "BT-RN-0017" },
+    "BT-DM-0027": { reason: "BT-RN-0017" },
+    "BT-DM-0028": { reason: "BT-RN-0001" },
+    "BT-DM-0029": { reason: "BT-RN-0022" },
+    "BT-DM-0030": { reason: "BT-RN-0022" },
+    "BT-DM-0031": { reason: "BT-RN-0022" },
+    "BT-DM-0032": { reason: "BT-RN-0022" },
+    "BT-DM-0033": { reason: "BT-RN-0018" },
+    "BT-DM-0034": { reason: "BT-RN-0010" },
+    "BT-DM-0035": { reason: "BT-RN-0022" },
+    "BT-DM-0036": { reason: "BT-RN-0022" },
+    "BT-DM-0037": { reason: "BT-RN-0022" },
+    "BT-DM-0038": { reason: "BT-RN-0022" },
+    "BT-DM-0039": { reason: "BT-RN-0022" },
+    "BT-DM-0040": { reason: "BT-RN-0022" },
+    "BT-DM-0041": { reason: "BT-RN-0023" },
+    "BT-DM-0042": { reason: "BT-RN-0022" },
+    "BT-DM-0043": { reason: "BT-RN-0019" },
+    "BT-DM-0044": { reason: "BT-RN-0019" },
+    "BT-DM-0045": { reason: "BT-RN-0024" },
+    "BT-DM-0046": { reason: "BT-RN-0025" },
+    "BT-DM-0047": { reason: "BT-RN-0022" },
+    "BT-DM-0048": { reason: "BT-RN-0022" },
+    "BT-DM-0049": { reason: "BT-RN-0022" },
+    "BT-DM-0050": { reason: "BT-RN-0026" },
+    "BT-DM-0051": { reason: "BT-RN-0022" },
+    "BT-DM-0052": { reason: "BT-RN-0004" },
+    "BT-DM-0053": { reason: "BT-RN-0022" },
+    "BT-DM-0054": { reason: "BT-RN-0022" },
+    "BT-DM-0055": { reason: "BT-RN-0004" },
 });
 
 // Escalation strategies carry their own reasons, which OVERRIDE the decision's.
@@ -99,24 +136,23 @@ export function selectReason(itemStrategy) {
 // ===========================================================================
 
 const INSTRUCTION_BY_REASON = Object.freeze({
-    "BT-RN-0001": { instruction: "BT-IN-0001", name: "Remove Incorrect Name" },
-    "BT-RN-0002": { instruction: "BT-IN-0002", name: "Remove Incorrect Address" },
-    "BT-RN-0003": { instruction: "BT-IN-0003", name: "Remove Incorrect Employer" },
-    "BT-RN-0005": { instruction: "BT-IN-0005", name: "Investigate Duplicate Inquiry" },
-    "BT-RN-0007": { instruction: "BT-IN-0006", name: "Validate Collection" },
-    "BT-RN-0009": { instruction: "BT-IN-0006", name: "Validate Collection" },
-    "BT-RN-0010": { instruction: "BT-IN-0011", name: "Correct Balance" },
-    "BT-RN-0011": { instruction: "BT-IN-0010", name: "Correct Account Status" },
-    "BT-RN-0012": { instruction: "BT-IN-0009", name: "Correct Payment History" },
-    "BT-RN-0013": { instruction: "BT-IN-0008", name: "Correct Charge-Off Status" },
-    "BT-RN-0014": { instruction: "BT-IN-0012", name: "Remove Duplicate Tradeline" },
-    "BT-RN-0016": { instruction: "BT-IN-0013", name: "Resolve Mixed File" },
-    "BT-RN-0018": { instruction: "BT-IN-0015", name: "Metro 2 Accuracy Review" },
-    "BT-RN-0019": { instruction: "BT-IN-0018", name: "Failure to Investigate Escalation" },
-    "BT-RN-0020": { instruction: "BT-IN-0019", name: "Failure to Update Escalation" },
-    "BT-RN-0022": { instruction: "BT-IN-0016", name: "Bureau Reinvestigation" },
-    "BT-RN-0023": { instruction: "BT-IN-0020", name: "Notice & Cure" },
-    "BT-RN-0026": { instruction: "BT-IN-0023", name: "No Further Action" },
+    // GOVERNED Reason -> Instruction — derived from the governed decision rows
+    // (Code Alignment Map v1.0 / Instruction Library v2.0). Internally consistent.
+    "BT-RN-0001": { instruction: "BT-IN-0001" },
+    "BT-RN-0004": { instruction: "BT-IN-0004" },
+    "BT-RN-0007": { instruction: "BT-IN-0006" },
+    "BT-RN-0010": { instruction: "BT-IN-0011" },
+    "BT-RN-0012": { instruction: "BT-IN-0009" },
+    "BT-RN-0016": { instruction: "BT-IN-0013" },
+    "BT-RN-0017": { instruction: "BT-IN-0014" },
+    "BT-RN-0018": { instruction: "BT-IN-0015" },
+    "BT-RN-0019": { instruction: "BT-IN-0018" },
+    "BT-RN-0020": { instruction: "BT-IN-0019" },
+    "BT-RN-0022": { instruction: "BT-IN-0016" },
+    "BT-RN-0023": { instruction: "BT-IN-0020" },
+    "BT-RN-0024": { instruction: "BT-IN-0021" },
+    "BT-RN-0025": { instruction: "BT-IN-0022" },
+    "BT-RN-0026": { instruction: "BT-IN-0023" },
 });
 
 export function selectInstruction(reason) {
@@ -146,23 +182,22 @@ export function selectInstruction(reason) {
 // ===========================================================================
 
 const BLUEPRINT_BY_INSTRUCTION = Object.freeze({
-    "BT-IN-0001": { blueprint: "BT-BP-0003", name: "Personal Information Correction" },
-    "BT-IN-0002": { blueprint: "BT-BP-0003", name: "Personal Information Correction" },
-    "BT-IN-0003": { blueprint: "BT-BP-0003", name: "Personal Information Correction" },
-    "BT-IN-0005": { blueprint: "BT-BP-0004", name: "Unauthorized Inquiry" },
-    "BT-IN-0006": { blueprint: "BT-BP-0005", name: "Collection Validation" },
-    "BT-IN-0008": { blueprint: "BT-BP-0006", name: "Charge-Off Investigation" },
-    "BT-IN-0009": { blueprint: "BT-BP-0007", name: "Payment History Correction" },
-    "BT-IN-0010": { blueprint: "BT-BP-0001", name: "Bureau Reinvestigation" },
-    "BT-IN-0011": { blueprint: "BT-BP-0001", name: "Bureau Reinvestigation" },
-    "BT-IN-0012": { blueprint: "BT-BP-0001", name: "Bureau Reinvestigation" },
-    "BT-IN-0013": { blueprint: "BT-BP-0009", name: "Mixed File Resolution" },
-    "BT-IN-0015": { blueprint: "BT-BP-0010", name: "Metro 2 Accuracy Review" },
-    "BT-IN-0016": { blueprint: "BT-BP-0001", name: "Bureau Reinvestigation" },
-    "BT-IN-0018": { blueprint: "BT-BP-0011", name: "Failure to Conduct Reasonable Investigation" },
-    "BT-IN-0019": { blueprint: "BT-BP-0012", name: "Failure to Update Reporting" },
-    "BT-IN-0020": { blueprint: "BT-BP-0013", name: "Notice & Cure" },
-    "BT-IN-0023": { blueprint: "BT-BP-0016", name: "No Further Action" },
+    // GOVERNED Instruction -> Blueprint — Code Alignment Map v1.0 / Letter Blueprint Library v2.0.
+    "BT-IN-0001": { blueprint: "BT-BP-0001" },
+    "BT-IN-0004": { blueprint: "BT-BP-0004" },
+    "BT-IN-0006": { blueprint: "BT-BP-0006" },
+    "BT-IN-0009": { blueprint: "BT-BP-0009" },
+    "BT-IN-0011": { blueprint: "BT-BP-0011" },
+    "BT-IN-0013": { blueprint: "BT-BP-0013" },
+    "BT-IN-0014": { blueprint: "BT-BP-0014" },
+    "BT-IN-0015": { blueprint: "BT-BP-0015" },
+    "BT-IN-0016": { blueprint: "BT-BP-0001" },
+    "BT-IN-0018": { blueprint: "BT-BP-0011" },
+    "BT-IN-0019": { blueprint: "BT-BP-0012" },
+    "BT-IN-0020": { blueprint: "BT-BP-0013" },
+    "BT-IN-0021": { blueprint: "BT-BP-0014" },
+    "BT-IN-0022": { blueprint: "BT-BP-0015" },
+    "BT-IN-0023": { blueprint: "BT-BP-0016" },
 });
 
 export function selectBlueprint(instruction) {
@@ -192,6 +227,8 @@ export async function buildDisputeChain(strategies) {
     }
 
     const items = strategies.itemStrategies.map((itemStrategy) => {
+        // Baseline items carry the flag through the chain so the Letter Engine
+        // knows to assert nothing.
         const reason = selectReason(itemStrategy);
         const instruction = selectInstruction(reason);
         const blueprint = selectBlueprint(instruction);
@@ -207,7 +244,9 @@ export async function buildDisputeChain(strategies) {
             furnisher: itemStrategy.furnisher,
 
             decisionRecord: itemStrategy.decisionRecord,
+            baseline: !!itemStrategy.baseline,
             strategy: itemStrategy.strategy,
+            requestedRemedy: itemStrategy.requestedRemedy ?? null,
             reason,
             instruction,
             blueprint,
