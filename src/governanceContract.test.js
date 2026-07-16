@@ -23,7 +23,7 @@ const check = (label, actual, expected) => {
     ok ? passed++ : failed++;
 };
 
-const DM33_REMEDY = "Conduct a reasonable reinvestigation; correct or update the reporting as necessary, and delete the item only if it cannot be verified or accurately corrected.";
+const DM33_REMEDY = "Conduct a reasonable reinvestigation; correct or update the reporting as necessary, and delete the item if it cannot be verified or accurately corrected.";
 
 // [decision, strategy, reason, instruction, blueprint, tier, remedy]
 // Transcribed from Code Alignment Map v1.0 (production-reachable decisions).
@@ -31,26 +31,26 @@ const GOVERNED = [
     ["BT-DM-0002", "BT-ST-0004", "BT-RN-0004", "BT-IN-0004", "BT-BP-0004", "VALIDATED_AUTOMATION", "Remove the duplicate reporting while preserving the correctly reported account or inquiry."],
     ["BT-DM-0004", "BT-ST-0003", "BT-RN-0001", "BT-IN-0001", "BT-BP-0001", "VALIDATED_AUTOMATION", "Correct or remove the inaccurate personal-information entry."],
     ["BT-DM-0006", "BT-ST-0003", "BT-RN-0001", "BT-IN-0001", "BT-BP-0001", "VALIDATED_AUTOMATION", "Correct or remove the inaccurate personal-information entry."],
-    ["BT-DM-0007", "BT-ST-0009", "BT-RN-0016", "BT-IN-0013", "BT-BP-0009", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
-    ["BT-DM-0008", "BT-ST-0005", "BT-RN-0007", "BT-IN-0006", "BT-BP-0006", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
+    ["BT-DM-0007", "BT-ST-0009", "BT-RN-0016", "BT-IN-0013", "BT-BP-0009", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
+    ["BT-DM-0008", "BT-ST-0005", "BT-RN-0007", "BT-IN-0006", "BT-BP-0006", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
     ["BT-DM-0010", "BT-ST-0005", "BT-RN-0007", "BT-IN-0006", "BT-BP-0006", "VALIDATED_AUTOMATION", "Remove the duplicate reporting while preserving the correctly reported account or inquiry."],
-    ["BT-DM-0011", "BT-ST-0006", "BT-RN-0010", "BT-IN-0011", "BT-BP-0011", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
-    ["BT-DM-0013", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
-    ["BT-DM-0014", "BT-ST-0007", "BT-RN-0012", "BT-IN-0009", "BT-BP-0009", "VALIDATED_AUTOMATION", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
+    ["BT-DM-0011", "BT-ST-0006", "BT-RN-0010", "BT-IN-0011", "BT-BP-0011", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
+    ["BT-DM-0013", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
+    ["BT-DM-0014", "BT-ST-0007", "BT-RN-0012", "BT-IN-0009", "BT-BP-0009", "VALIDATED_AUTOMATION", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
     ["BT-DM-0018", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "VALIDATED_AUTOMATION", "Remove the duplicate reporting while preserving the correctly reported account or inquiry."],
-    ["BT-DM-0019", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "VALIDATED_AUTOMATION", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
+    ["BT-DM-0019", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "VALIDATED_AUTOMATION", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
     ["BT-DM-0028", "BT-ST-0003", "BT-RN-0001", "BT-IN-0001", "BT-BP-0001", "VALIDATED_AUTOMATION", "Correct or remove the inaccurate personal-information entry."],
-    ["BT-DM-0029", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
-    ["BT-DM-0031", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
+    ["BT-DM-0029", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
+    ["BT-DM-0031", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
     ["BT-DM-0033", "BT-ST-0010", "BT-RN-0018", "BT-IN-0015", "BT-BP-0010", "VALIDATED_AUTOMATION", DM33_REMEDY],
-    ["BT-DM-0034", "BT-ST-0006", "BT-RN-0010", "BT-IN-0011", "BT-BP-0011", "VALIDATED_AUTOMATION", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
-    ["BT-DM-0036", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
-    ["BT-DM-0049", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
+    ["BT-DM-0034", "BT-ST-0006", "BT-RN-0010", "BT-IN-0011", "BT-BP-0011", "VALIDATED_AUTOMATION", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
+    ["BT-DM-0036", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
+    ["BT-DM-0049", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
     ["BT-DM-0050", "BT-ST-0016", "BT-RN-0026", "BT-IN-0023", "BT-BP-0016", "NO_ACTION", "No dispute remedy. Preserve the item and document the reason."],
     ["BT-DM-0051", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Delete only when the applicable reporting period can be affirmatively calculated and has expired; otherwise route to review or request verification without alleging obsolescence."],
-    ["BT-DM-0052", "BT-ST-0004", "BT-RN-0004", "BT-IN-0004", "BT-BP-0004", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
-    ["BT-DM-0053", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
-    ["BT-DM-0054", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected."],
+    ["BT-DM-0052", "BT-ST-0004", "BT-RN-0004", "BT-IN-0004", "BT-BP-0004", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
+    ["BT-DM-0053", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
+    ["BT-DM-0054", "BT-ST-0001", "BT-RN-0022", "BT-IN-0016", "BT-BP-0001", "REVIEW_DEFAULT", "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected."],
 ];
 
 // Resolve a decision's chain the way the pipeline does.

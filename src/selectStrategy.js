@@ -140,10 +140,10 @@ export const REMEDY = Object.freeze({
     // Code Alignment Map v1.0. These are the ONLY approved remedy strings.
     // No unconditional "delete this account" remedy exists: deletion is always
     // conditional on non-verification unless a decision's governed contract says otherwise.
-    REINVESTIGATE_CONDITIONAL: "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item only if it cannot be verified or accurately corrected.",
+    REINVESTIGATE_CONDITIONAL: "Conduct a reasonable reinvestigation; correct or update inaccurate/incomplete reporting, and delete the item if it cannot be verified or accurately corrected.",
     PERSONAL_INFO_CORRECT: "Correct or remove the inaccurate personal-information entry.",
     REMOVE_DUPLICATE: "Remove the duplicate reporting while preserving the correctly reported account or inquiry.",
-    UPDATE_VERIFIED: "Update the reporting to reflect the verified current information; delete only if it cannot be accurately corrected.",
+    UPDATE_VERIFIED: "Update the reporting to reflect the verified current information; delete if it cannot be accurately corrected.",
     PERMISSIBLE_PURPOSE: "Investigate permissible purpose and remove the inquiry only if authorization or another permissible purpose cannot be verified.",
     OBSOLESCENCE_GATED: "Delete only when the applicable reporting period can be affirmatively calculated and has expired; otherwise route to review or request verification without alleging obsolescence.",
     IDENTITY_THEFT_BLOCK: "Block or remove identity-theft information only after required consumer documentation and identity verification are satisfied.",
@@ -186,7 +186,7 @@ const REMEDY_BY_DECISION = Object.freeze({
     "BT-DM-0030": REMEDY.REINVESTIGATE_CONDITIONAL,
     "BT-DM-0031": REMEDY.REINVESTIGATE_CONDITIONAL,
     "BT-DM-0032": REMEDY.REINVESTIGATE_CONDITIONAL,
-    "BT-DM-0033": "Conduct a reasonable reinvestigation; correct or update the reporting as necessary, and delete the item only if it cannot be verified or accurately corrected.",
+    "BT-DM-0033": "Conduct a reasonable reinvestigation; correct or update the reporting as necessary, and delete the item if it cannot be verified or accurately corrected.",
     "BT-DM-0034": REMEDY.REINVESTIGATE_CONDITIONAL,
     "BT-DM-0035": REMEDY.REINVESTIGATE_CONDITIONAL,
     "BT-DM-0036": REMEDY.REINVESTIGATE_CONDITIONAL,

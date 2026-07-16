@@ -14,6 +14,7 @@ import { selectStrategy } from "./selectStrategy.js";
 import { buildDisputeChain } from "./disputeChain.js";
 import { generateLetters } from "./generateLetter.js";
 import { reconcile } from "./reconcile.js";
+import { exportLetterResult } from "./letterRenderer.js";
 
 /**
  * The pipeline AFTER capture. Pure: report + identity in, package out. No browser,
@@ -57,12 +58,54 @@ export async function runPipeline(report, identity = null) {
         letters: letterResult,
     });
 
-    return {
+    // STAGE 7: EXPORT (presentation artifacts for Credit Cloud retrieval).
+    // Renders a client-ready DOCX + PDF for each SENDABLE letter, applying the
+    // fixed formatting standard. exportLetterResult is fail-closed: if the result
+    // is not certified sendable (letters_ok !== true), it exports nothing; and it
+    // never touches withheld/content-gated letters. Nothing is sent or uploaded
+    // here — this milestone only produces the files and their metadata.
+    const clientName =
+        identity?.name ??
+        [identity?.firstName, identity?.lastName].filter(Boolean).join(" ") ??
+        "client";
+    const round = Math.max(1, ...(letterResult.letters ?? []).map((l) => l.round ?? 1));
+    const exportResult = await exportLetterResult(letterResult, {
+        clientName,
+        round,
+        date: report?.report_metadata?.report_date ?? new Date().toISOString().slice(0, 10),
+    });
+
+    // The JSON response carries METADATA ONLY (filenames + byte counts). The binary
+    // buffers live on a non-enumerated field so the ordinary M7 JSON stays free of
+    // base64 blobs; a later upload step can read pipelineResult.export_artifacts.
+    const exportMetadata = exportResult.exported.map((e) => ({
+        bureau: e.bureau,
+        bureauName: e.bureauName,
+        docx: e.docx,   // { filename, bytes }
+        pdf: e.pdf,     // { filename, bytes }
+    }));
+
+    const result = {
         analysis_summary: analysis.clientSummary ?? null,
         item_decisions: decisions.itemDecisions ?? [],
         letters: letterResult.letters ?? [],
         withheld: letterResult.withheld ?? [],
         letters_ok: letterResult.lettersOk ?? false,
         reconciliation,
+        // Metadata only — safe to serialize into the M7 response.
+        export: {
+            rendererVersion: "BT-LETTER-RENDERER-1.0",
+            count: exportMetadata.length,
+            files: exportMetadata,
+        },
     };
+
+    // Binary buffers, kept OFF the JSON response. Non-enumerable so JSON.stringify
+    // and object spreads skip it; a dedicated save/upload step accesses it directly.
+    Object.defineProperty(result, "export_artifacts", {
+        value: exportResult.exported,
+        enumerable: false,
+    });
+
+    return result;
 }

@@ -5,81 +5,73 @@
  * Confidential & Proprietary.
  *
  * ###########################################################################
- * ##  STATUS: V1 MINIMAL — sufficient to unblock production validation.    ##
+ * ##  STATUS: KRIS_APPROVED_V1                                             ##
+ * ##  Approval date: 2026-07-16                                            ##
  * ##                                                                       ##
- * ##  Deliberately SMALL. The permitted surface of a closing is narrow:    ##
- * ##  ask for the results in writing, thank the reader. Nothing else is    ##
- * ##  allowed, so there is little left to vary.                            ##
+ * ##  Incorporates the firm results-demand closing Kris approved on        ##
+ * ##  2026-07-16. SUPERSEDES the prior soft "thank you" closings, which    ##
+ * ##  are retired from the production selection pool.                      ##
  * ###########################################################################
  *
  * ===========================================================================
- * SAME HARD CONSTRAINT. The closing is where letters go wrong most often,
- * because it is where a writer reaches for leverage:
- *
- *   THREATS      "If this is not resolved I will be forced to take legal action."
- *                The Writing Style Guide forbids threats, and the Letter
- *                Generation Engine's Never Rules forbid threatening litigation.
- *                It is also a commitment made on the consumer's behalf that she
- *                never authorized and may not want.
- *
- *   DEADLINES    "You have 30 days to respond or the items must be deleted."
- *                This states a legal conclusion as though it were automatic. It
- *                is not, and asserting it is a legal claim the Closing Library —
- *                which holds no authorities — has no business making.
- *
- *   PROMISES     "I look forward to these items being removed."
- *                Presumes the outcome of an investigation that has not happened.
- *
- *   HISTORY      "I should not have to write to you again."
- *                False for a first-round letter.
- *
- * A closing may ask for the results in writing and thank the reader. That is
- * the whole permitted surface — and it is enough. A calm, professional close is
- * more credible than a threatened one, and it keeps the record clean if the
- * matter ever does escalate.
+ * KRIS FIRM-LANGUAGE RULES (enforced by test):
+ *   - Demand the written results, an updated file copy, and the procedure.
+ *   - State the expectation that each item be corrected, updated, or deleted
+ *     per the reinvestigation results.
+ *   - NO soft thank-you paragraph. NO "I would appreciate". NO gratitude for
+ *     legally required action. Nothing that makes the demand sound optional.
  *
  * The signature block is NOT part of this library. It is identity, and identity
  * comes from CRC.
  * ===========================================================================
  */
 
-export const CLOSING_LIBRARY_VERSION = "BT-CLOSING-LIB-1.0";
+export const CLOSING_LIBRARY_VERSION = "BT-CLOSING-LIB-1.1";
 
-// Machine-readable. The Letter Engine surfaces this on every letter so a
-// placeholder library can never be mistaken for an approved one.
+// Machine-readable. Surfaced on every letter.
 export const APPROVED_BY_BUSINESS_TRAPPERS = true;
-export const APPROVAL = "V1_MINIMAL";
+export const APPROVAL = "KRIS_APPROVED_V1";
+export const APPROVAL_DATE = "2026-07-16";
+
+/**
+ * The approved firm closing. Two paragraphs: the results demand, then the
+ * expectation of action. Used verbatim.
+ */
+const APPROVED_RESULTS_DEMAND =
+    "Provide the written results of your reinvestigation, an updated copy of my credit file, " +
+    "and a description of the procedure used to determine the accuracy and completeness of each disputed item.";
+
+const APPROVED_ACTION_EXPECTATION =
+    "I expect each item to be corrected, updated, or deleted as required by the results of your reinvestigation.";
 
 export const CLOSINGS = Object.freeze([
     {
-        id: "CLOSE-001",
+        id: "CLOSE-KRIS-001",
+        paragraphs: [APPROVED_RESULTS_DEMAND, APPROVED_ACTION_EXPECTATION],
+    },
+    {
+        id: "CLOSE-KRIS-002",
+        // Same firm substance, reworded lead-in for variation. The demand and
+        // the action expectation are unchanged and never softened.
         paragraphs: [
-            "Please provide the results of your investigation in writing.",
-            "Thank you for your attention to this matter.",
+            "Please provide, in writing, the written results of your reinvestigation, an updated copy of my " +
+            "credit file, and a description of the procedure used to determine the accuracy and " +
+            "completeness of each disputed item.",
+            APPROVED_ACTION_EXPECTATION,
         ],
     },
     {
-        id: "CLOSE-002",
+        id: "CLOSE-KRIS-003",
         paragraphs: [
-            "I would appreciate receiving the results of your investigation in writing once it is complete.",
-            "Thank you for your time.",
-        ],
-    },
-    {
-        id: "CLOSE-003",
-        paragraphs: [
-            "When your investigation is complete, please provide the results to me in writing.",
-            "Thank you for your help with this.",
-        ],
-    },
-    {
-        id: "CLOSE-004",
-        paragraphs: [
-            "I ask that the results of your investigation be provided to me in writing.",
-            "Thank you for your prompt attention to this matter.",
+            "Provide the written results of your reinvestigation, an updated copy of my credit file, and " +
+            "a description of the procedure you used to determine the accuracy and completeness of each disputed item.",
+            "I expect each item to be corrected, updated, or deleted as the results of your reinvestigation require.",
         ],
     },
 ]);
+
+/** The approved closing text, exported for tests/verification. */
+export const APPROVED_CLOSING_TEXT = [APPROVED_RESULTS_DEMAND, APPROVED_ACTION_EXPECTATION].join("\n\n");
 
 /** Render a closing as text. */
 export function renderClosing(entry) {

@@ -133,11 +133,23 @@ export function screenLetterContent(letters) {
         { token: "undefined", re: /\bundefined\b/ },
         { token: "null", re: /\bnull\b/ },
     ];
+    // KRIS FIRM-LANGUAGE GATE (2026-07-16). These consumer-facing patterns are
+    // prohibited in production letters: the "only" conditional-deletion clause,
+    // and soft/courtesy phrasing that makes a legally required action sound
+    // optional. Case-insensitive; matched only in finished letter prose.
+    const prohibitedLanguage = [
+        { token: "delete the item only if", re: /delete the item only if/i },
+        { token: "delete only if", re: /delete only if/i },
+        { token: "I would appreciate", re: /I would appreciate/i },
+        { token: "thank you for your", re: /thank you for your/i },
+        { token: "please investigate", re: /please investigate/i },
+    ];
     return letters.map((letter) => {
         const body = letter.body ?? "";
         const hits = [
             ...literalTokens.filter((tok) => body.includes(tok)),
             ...wholeWordTokens.filter((w) => w.re.test(body)).map((w) => w.token),
+            ...prohibitedLanguage.filter((w) => w.re.test(body)).map((w) => w.token),
         ];
         return {
             bureau: letter.bureau,
@@ -612,7 +624,7 @@ export async function generateLetters(chain, analysis, context = {}) {
                         ``,
                         AUTH.REINVESTIGATION,
                         ``,
-                        `Requested action: If the information cannot be verified as complete and accurate, please delete or correct the reporting.`,
+                        `Requested action: Conduct a reasonable reinvestigation; correct or update the reporting as necessary, and delete the item if it cannot be verified or accurately corrected.`,
                     ].join("\n"),
                 });
                 continue;
@@ -753,6 +765,8 @@ export async function generateLetters(chain, analysis, context = {}) {
                 baseline: specced.some((x) => /_BASELINE_REINVESTIGATION$/.test(x.finding.code)),
                 complianceGated: specced.some((x) => x.spec.complianceGated),
                 unspeccedFindings: unspecced.map((f) => f.code),
+                // Finding codes on this section, for the fact-specific opening gate.
+                findingCodes: specced.map((x) => x.finding.code),
                 text: lines.join("\n"),
             });
         }
@@ -769,11 +783,33 @@ export async function generateLetters(chain, analysis, context = {}) {
         // — and a bureau letter carries first-round and escalated accounts side by
         // side. "As I told you previously" would be false for the new ones.
         // Per-account history lives in the account section, where it is true.
+        // ---- FACT-SPECIFIC OPENING GATE -------------------------------------
+        //
+        // The Kris-approved Metro 2 missing-DOFD opening makes a shared-defect
+        // statement about EVERY tradeline in the letter. It may be used ONLY when
+        // that statement is true of every disputed section — i.e. BOTH:
+        //   (a) every disputed (non-baseline) section is BT-DM-0033, AND
+        //   (b) every one of those sections carries TL_DEROGATORY_WITHOUT_DOFD
+        //       ("CollectionOrChargeOff" status with no Date of First Delinquency).
+        // If a letter mixes reasons, sharedDefect is null and the engine falls
+        // back to the general firm opening. This is the ONLY place the fact-specific
+        // opening can be enabled; the voice library never self-selects it.
+        const disputedSections = sections.filter((sec) => !sec.baseline);
+        const everyMetro2Dofd =
+            disputedSections.length > 0 &&
+            disputedSections.every(
+                (sec) =>
+                    sec.decisionRecord === "BT-DM-0033" &&
+                    (sec.findingCodes ?? []).includes("TL_DEROGATORY_WITHOUT_DOFD")
+            );
+        const sharedDefect = everyMetro2Dofd ? "metro2_missing_dofd" : null;
+
         const voice = selectVoice({
             crcClientId: identity.crcClientId,
             bureau,
             round,
             reportDate: context.reportDate ?? null,
+            sharedDefect,
         });
 
         const body = [

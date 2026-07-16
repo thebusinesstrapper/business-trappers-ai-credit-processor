@@ -23,7 +23,7 @@ console.log("\n=== BT-DM-0033 PRODUCES A NON-EMPTY APPROVED REMEDY ===\n");
 // remedyFor is decision-indexed now; strategy arg retained for signature compat.
     const remedy = remedyFor("BT-ST-0010", "BT-DM-0033");
 check("BT-ST-0010 remedy is non-empty", typeof remedy === "string" && remedy.length > 0, true);
-check("...is the governed conditional reinvestigation remedy", remedy, "Conduct a reasonable reinvestigation; correct or update the reporting as necessary, and delete the item only if it cannot be verified or accurately corrected.");
+check("...is the governed conditional reinvestigation remedy", remedy, "Conduct a reasonable reinvestigation; correct or update the reporting as necessary, and delete the item if it cannot be verified or accurately corrected.");
 check("...contains NO unconditional deletion demand", /^Delete this account/.test(remedy), false);
 check("...is not an object", typeof remedy, "string");
 
