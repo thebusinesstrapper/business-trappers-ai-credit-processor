@@ -135,8 +135,8 @@ const metro2 = decisionFor(result, "bt_tl_metro2");
 check("Metro 2 contradiction -> dispute candidate", metro2.outcome, OUTCOME.DISPUTE_CANDIDATE);
 check("...governed by BT-DM-0033", metro2.primaryDecision.record, "BT-DM-0033");
 check("...evidence class SELF_EVIDENT", metro2.decisionRecords[0].evidenceClass, "SELF_EVIDENT");
-check("...confidence 97", metro2.confidence, 97);
-check("...fully automated", metro2.automationTier, "FULLY_AUTOMATED");
+check("...no numeric confidence exists", "confidence" in metro2, false);
+check("...governed tier VALIDATED_AUTOMATION", metro2.automationTier, "VALIDATED_AUTOMATION");
 check("...no human review needed", metro2.humanReview, false);
 
 console.log("\n=== CONSTITUTIONAL EXCLUSIONS (these protect the client) ===\n");
@@ -159,7 +159,7 @@ check("inquiry -> REQUIRES_CONSUMER_INPUT", inq.outcome, OUTCOME.REQUIRES_CONSUM
 check("...NOT a dispute", inq.decisionRecords.length, 0);
 check("...and no BT-DM-0001 asserted", inq.primaryDecision, null);
 
-console.log("\n=== Library gaps are surfaced, never force-fitted ===\n");
+console.log("\n=== NEW Decision Records: obsolete items are now first-class ===\n");
 
 const staleReport = JSON.parse(JSON.stringify(report));
 staleReport.accounts = [
@@ -189,9 +189,17 @@ const staleResult = await decideDisputes(staleAnalysis, { report: staleReport })
 const obsolete = decisionFor(staleResult, "bt_tl_obsolete");
 
 check("obsolete item detected by Analysis", staleAnalysis.tradelines[0].findings.some((f) => f.code === "TL_BEYOND_REPORTING_PERIOD"), true);
-check("library gap recorded", staleResult.libraryGaps.some((g) => g.code === "TL_BEYOND_REPORTING_PERIOD"), true);
-check("...finding NOT discarded", obsolete.outcome !== OUTCOME.NO_ACTION, true);
-check("...routed to human review", obsolete.humanReview, true);
+check("governed by BT-DM-0051 (NEW)", obsolete.primaryDecision.record, "BT-DM-0051");
+check("...named Obsolete Derogatory Reporting", obsolete.primaryDecision.name, "Obsolete Derogatory Reporting");
+check("...evidence SELF_EVIDENT", obsolete.evidenceClass, "SELF_EVIDENT");
+check("...a real dispute candidate, not a manual-review escape", obsolete.outcome, OUTCOME.DISPUTE_CANDIDATE);
+check("...NO library gaps remain", staleResult.libraryGaps.length, 0);
+
+// The 180-day grace period. An item at 7y2m is NOT yet obsolete.
+const notYetReport = JSON.parse(JSON.stringify(staleReport));
+notYetReport.accounts[0].bureau_tradelines[0].observation.date_of_first_delinquency = "2019-04-01"; // ~7.3y
+const notYet = await analyzeCreditReport(notYetReport, { asOf: ASOF });
+check("7.3 years -> NOT flagged obsolete (FCRA 180-day grace)", notYet.tradelines[0].findings.some((f) => f.code === "TL_BEYOND_REPORTING_PERIOD"), false);
 
 console.log("\n=== MIXED FILE poisons every item beneath it ===\n");
 
@@ -206,8 +214,10 @@ check("blocker raised", mixedResult.reportLevel.blockers[0].blocker, "MIXED_FILE
 check("BT-DM-0007 is FIRST priority", mixedResult.reportLevel.decisions[0].record, "BT-DM-0007");
 
 const metro2Mixed = decisionFor(mixedResult, "bt_tl_metro2");
-check("the SAME 97-confidence item now needs review", metro2Mixed.humanReview, true);
-check("...confidence capped at 60", metro2Mixed.confidence, 60);
+check("the SAME self-evident item now needs review", metro2Mixed.humanReview, true);
+check("...evidence class is UNCHANGED (stable taxonomy)", metro2Mixed.evidenceClass, "SELF_EVIDENT");
+check("...but POLICY demotes it", metro2Mixed.automationTier, "HUMAN_REVIEW_REQUIRED");
+check("...via a named override", metro2Mixed.appliedOverrides.includes("MIXED_FILE"), true);
 check("...no longer a dispute candidate", metro2Mixed.outcome, OUTCOME.HUMAN_REVIEW);
 
 console.log("\n=== Without the report, exclusions CANNOT be checked ===\n");
@@ -232,6 +242,87 @@ check("identical input -> identical output", JSON.stringify(r1) === JSON.stringi
 
 console.log("\n=== THE REASONING CHAIN (Kris reads this) ===\n");
 console.log(metro2.reasoningChain.join("\n"));
+
+console.log("\n=== OWNERSHIP: THE CHECK USED TO FAIL OPEN ===\n");
+
+const { KNOWN_RESPONSIBILITY_VALUES } = await import("./decideDisputes.js");
+
+// The vocabulary was READ OFF the live payload (119 rows), not invented.
+check("vocabulary from production", KNOWN_RESPONSIBILITY_VALUES.length, 4);
+check("...includes AuthorizedUser", KNOWN_RESPONSIBILITY_VALUES.includes("AuthorizedUser"), true);
+check("...includes Terminated", KNOWN_RESPONSIBILITY_VALUES.includes("Terminated"), true);
+
+/** A derogatory tradeline whose ONLY variable is responsibility. */
+const ownReport = (responsibility) => ({
+    crc_client_id: "15",
+    model_version: "BT-CRM-1.1",
+    report_metadata: { report_date: "2026-07-13", bureaus_present: ["transunion"] },
+    accounts: [{
+        stable_account_key: "bt_ac_own",
+        bureau_tradelines: [{
+            stable_item_key: "bt_tl_own",
+            bureau: "transunion",
+            furnisher: "CHASE",
+            masked_account: "****1234",
+            observation: {
+                responsibility,
+                status: "ChargeOff",
+                balance: 4200,
+                past_due: 500,
+                date_opened: "2019-03-01",
+            },
+        }],
+    }],
+    collections: [],
+    inquiries: [],
+    public_records: [],
+});
+
+const ownDecide = async (responsibility) => {
+    const r = ownReport(responsibility);
+    const a = await analyzeCreditReport(r, { asOf: ASOF });
+    return { result: await decideDisputes(a, { report: r }), report: r };
+};
+
+// The live value. \\s* matches zero spaces, so "AuthorizedUser" is caught.
+const au2 = await ownDecide("AuthorizedUser");
+check("AuthorizedUser -> EXCLUDED", au2.result.itemDecisions[0].outcome, "EXCLUDED");
+check("...by the Constitution", au2.result.itemDecisions[0].exclusion.rule, "CONSTITUTION_NEVER_DISPUTE_AUTHORIZED_USER");
+
+// ---- THE HOLE THAT WAS THERE ------------------------------------------------
+//
+// A null responsibility previously fell through the regex, returned null, and the
+// tradeline WAS DISPUTED. The one field that tells us whether an account is the
+// consumer's to dispute was allowed to be MISSING — and its ABSENCE was read as
+// PERMISSION.
+//
+// An authorized-user tradeline usually carries someone else's GOOD history.
+// Disputing it invites its deletion and the consumer loses history that was
+// helping her. Stopping costs one human review. Guessing destroys that history
+// irreversibly, in her name.
+const nullResp = await ownDecide(null);
+const nullItem = nullResp.result.itemDecisions[0];
+
+check("null responsibility -> EXCLUDED, not disputed", nullItem.outcome, "EXCLUDED");
+check("...rule names the gap", nullItem.exclusion.rule, "RESPONSIBILITY_UNKNOWN");
+check("...routed to Human Exception (BT-DM-0049)", nullItem.primaryDecision.record, "BT-DM-0049");
+check("...absence is not evidence of ownership", /ABSENT value is not evidence/.test(nullItem.exclusion.reason), true);
+
+// A value Array starts emitting tomorrow would fail the AuthorizedUser regex and
+// be silently disputed. Now it is recognisable AS unrecognised.
+const novel = await ownDecide("SomeNewOwnershipType");
+check("unrecognised value -> EXCLUDED", novel.result.itemDecisions[0].outcome, "EXCLUDED");
+check("...rule names it", novel.result.itemDecisions[0].exclusion.rule, "RESPONSIBILITY_UNRECOGNISED");
+
+// The known-good values still flow through normally — the guard must not become a
+// blanket refusal.
+for (const value of ["Individual", "JointContractualLiability", "Terminated"]) {
+    const ok = await ownDecide(value);
+    const item = ok.result.itemDecisions[0];
+
+    check(`${value} -> not blocked by the ownership guard`,
+        ["RESPONSIBILITY_UNKNOWN", "RESPONSIBILITY_UNRECOGNISED"].includes(item.exclusion?.rule ?? ""), false);
+}
 
 console.log(`\n${passed} passed, ${failed} failed.\n`);
 
