@@ -1,6 +1,6 @@
 /**
  * coverage.test.js
- * Run: node src/intelligence/coverage.test.js
+ * Run: node src/coverage.test.js
  *
  * THE BUSINESS TRAPPERS COVERAGE RULING.
  *
@@ -38,7 +38,21 @@ const identity = fromCrcProfile(
 );
 
 const tl = (key, bureau, furnisher, masked, observation) => ({
-    stable_item_key: key, bureau, furnisher, masked_account: masked, observation,
+    stable_item_key: key, bureau, furnisher, masked_account: masked,
+    // Two-layer observation (Bureau Fidelity). The flat fields describe the
+    // reasoning-layer values; the reported layer carries the verbatim strings the
+    // letter quotes. account_status mirrors the status so the section can quote it.
+    observation: {
+        ...observation,
+        reported: {
+            account_status: observation.status ?? null,
+            balance: observation.balance ?? null,
+            past_due: observation.past_due ?? null,
+            dofd: observation.date_of_first_delinquency ?? null,
+            date_opened: observation.date_opened ?? null,
+        },
+        normalized: { ...observation },
+    },
 });
 
 const report = {
