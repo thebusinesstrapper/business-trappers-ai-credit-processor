@@ -77,6 +77,12 @@ const DECISION_TO_STRATEGY = Object.freeze({
     "BT-DM-0033": { strategy: "BT-ST-0010", name: "Metro 2 Accuracy Review" },
     "BT-DM-0034": { strategy: "BT-ST-0006", name: "Charge-Off Investigation" },
     "BT-DM-0051": { strategy: "BT-ST-0001", name: "Bureau Investigation" },          // obsolete
+
+    // BT-DM-0054 — BASELINE REINVESTIGATION.
+    // The consumer's §611 right to dispute completeness and accuracy. Asserts no
+    // defect. Always the WEAKEST path: any fact-specific finding supersedes it,
+    // and the Analysis Engine only emits it when nothing specific was found.
+    "BT-DM-0054": { strategy: "BT-ST-0001", name: "Bureau Investigation" },
     "BT-DM-0052": { strategy: "BT-ST-0001", name: "Bureau Investigation" },          // stale inquiry
     "BT-DM-0053": { strategy: "BT-ST-0001", name: "Bureau Investigation" },          // public record defect
 });
@@ -101,8 +107,14 @@ export const REMEDY = Object.freeze({
     DELETE_INQUIRY: "Delete this inquiry from my credit file.",
     DELETE_DUPLICATE: "Delete the duplicate entry.",
     CORRECT: "Correct the reporting for this account.",
-    REINVESTIGATE: "Reinvestigate this account and delete it if it cannot be verified.",
-    VALIDATE: "Provide validation of this debt, or delete it.",
+    REINVESTIGATE: "Conduct a reasonable reinvestigation and delete or correct this account if it cannot be verified as complete and accurate.",
+    REINVESTIGATE_COLLECTION: "Conduct a reasonable reinvestigation and delete or correct this collection account if it cannot be verified as complete and accurate.",
+    // NOTE: there is deliberately NO "validate this debt" remedy for a CRA.
+    // Debt validation is an FDCPA process owed by a DEBT COLLECTOR. A credit
+    // bureau is not a collector and has no validation duty — demanding one from
+    // Equifax is a category error, and it invites the reply that they are not
+    // the right recipient. What a CRA owes is a reasonable REINVESTIGATION
+    // under FCRA §611.
     METHOD_OF_VERIFICATION:
         "Provide the method of verification used, including the name and address of the furnisher " +
         "contacted and the procedure used to verify this account. If it cannot be verified, delete it.",
@@ -115,7 +127,7 @@ const REMEDY_BY_STRATEGY = Object.freeze({
     "BT-ST-0002": REMEDY.REINVESTIGATE,          // Furnisher Investigation
     "BT-ST-0003": REMEDY.CORRECT,                // Personal Information
     "BT-ST-0004": REMEDY.DELETE_INQUIRY,         // Inquiry
-    "BT-ST-0005": REMEDY.VALIDATE,               // Collection Validation
+    "BT-ST-0005": REMEDY.REINVESTIGATE_COLLECTION, // Collection — CRA reinvestigation, NOT FDCPA validation
     "BT-ST-0006": REMEDY.DELETE,                 // Charge-Off Investigation
     "BT-ST-0007": REMEDY.CORRECT,                // Payment History
     "BT-ST-0009": REMEDY.DELETE,                 // Mixed File
@@ -141,6 +153,7 @@ const REMEDY_BY_STRATEGY = Object.freeze({
  *     handed them the escape hatch ourselves.
  */
 const REMEDY_BY_DECISION = Object.freeze({
+    "BT-DM-0054": REMEDY.REINVESTIGATE,    // Baseline — asks for reinvestigation, asserts nothing
     "BT-DM-0051": REMEDY.DELETE,           // Obsolete — deletion is not conditional on accuracy
     "BT-DM-0018": REMEDY.DELETE_DUPLICATE, // Duplicate tradeline
     "BT-DM-0010": REMEDY.DELETE_DUPLICATE, // Duplicate collection
@@ -475,6 +488,7 @@ export async function selectStrategy(decisions, context = {}) {
 
         return {
             ...base,
+            baseline: !!decision.baseline,
             strategy: selected,
             requestedRemedy: remedyFor(selected.strategy, decision.primaryDecision?.record),
             round: nextRound,
