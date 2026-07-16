@@ -110,6 +110,10 @@ export const FIELD = Object.freeze({
     last_payment_date: ["@LastPaymentDate"],
 
     raw_account_status: ["@RawAccountStatus"],
+    // The bureau's current rating word — the strongest status signal on ListAndStack
+    // reports (e.g. "CollectionOrChargeOff"). @RawAccountStatus is frequently absent;
+    // this and account_status_type carry the real status.
+    current_rating: ["@_CurrentRatingType", "_CURRENT_RATING", "@_CurrentRating"],
     raw_account_type: ["@RawAccountType"],
     raw_industry_text: ["@RawIndustryText"],
 
@@ -218,7 +222,7 @@ const READ_FIELDS = new Set([
     "is_student_loan", "is_fed_guaranteed_student_loan", "masked_account",
     "account_status_type", "consumer_disputed", "derogatory", "date_opened",
     "date_reported", "date_closed", "dofd", "credit_limit", "high_balance",
-    "responsibility",
+    "responsibility", "current_rating",
 ]);
 
 // Defined in FIELD but not read. Surfaced in completeness so it is visible, not
@@ -504,6 +508,7 @@ function buildObservation(liability, basis, sharedWith, track) {
         last_payment_date: readField(liability, "last_payment_date", track),
 
         account_status: readField(liability, "raw_account_status", track),
+        current_rating: readField(liability, "current_rating", track),
         account_type: readField(liability, "raw_account_type", track),
         industry: readField(liability, "raw_industry_text", track),
         account_status_type: readField(liability, "account_status_type", track),
@@ -599,7 +604,10 @@ function buildObservation(liability, basis, sharedWith, track) {
             // on this; letters use reported.account_status (Layer 2) verbatim. Kept
             // as the raw string here — normalizeStatus() in the analyzer maps it —
             // so the two layers never share a coercion the letter could inherit.
-            status: raw.account_status,
+            // Coalesced status for REASONING only. Bureau Fidelity's verbatim
+            // reported.account_status is untouched. Order: current rating (strongest
+            // negativity signal) -> account status type -> raw account status.
+            status: raw.current_rating ?? raw.account_status_type ?? raw.account_status ?? null,
             account_status_type: raw.account_status_type,
 
             // Responsibility is NOT coerced — the Decision Engine interprets it
