@@ -88,6 +88,26 @@ export const EVIDENCE_CLASS = Object.freeze({
             "alone. It is an observation, not a proof.",
     },
 
+    // THE CONSUMER'S RIGHT TO DISPUTE — not a claim about the facts.
+    //
+    // Distinct from every other class here, which grade EVIDENCE OF A DEFECT.
+    // This one asserts no defect at all. It records that the consumer disputes
+    // the completeness and accuracy of the reporting and asks for a reasonable
+    // reinvestigation — a right FCRA §611 grants WITHOUT any requirement to
+    // prove error first.
+    //
+    // The letter it produces must therefore never say the item IS inaccurate,
+    // false, or unverifiable. It says the consumer DISPUTES it. That statement
+    // is true by construction, and it is the only one we are entitled to make.
+    CONSUMER_DISPUTE: {
+        id: "CONSUMER_DISPUTE",
+        rank: 1,
+        label: "Consumer dispute (no defect asserted)",
+        definition:
+            "The consumer exercises the FCRA §611 right to dispute completeness and accuracy. " +
+            "No defect is alleged and none needs to be.",
+    },
+
     // "WE CANNOT TELL." Distinct from CIRCUMSTANTIAL — that is weak evidence FOR
     // something. This is the ABSENCE of the evidence an assertion would require.
     //
@@ -124,6 +144,79 @@ export const AUTOMATION_TIER = Object.freeze({
     NEVER_AUTOMATED: "NEVER_AUTOMATED",
 });
 
+// ---- GOVERNED AUTOMATION TIERS (authoritative) --------------------------
+// The Master Governance Matrix v1.0 assigns an automation tier PER DECISION,
+// not per evidence class. These five governed names are the authoritative
+// tiers; the evidence-class policy below is retained only as a provisional
+// fallback for any decision not present in the governed map.
+export const GOVERNED_TIER = Object.freeze({
+    CONSUMER_INPUT: "CONSUMER_INPUT",
+    VALIDATED_AUTOMATION: "VALIDATED_AUTOMATION",
+    REVIEW_DEFAULT: "REVIEW_DEFAULT",
+    HUMAN_REVIEW: "HUMAN_REVIEW",
+    NO_ACTION: "NO_ACTION",
+});
+
+const TIER_BY_DECISION = Object.freeze({
+    // GOVERNED per-decision automation tier — Master Governance Matrix v1.0 /
+    // Code Alignment Map v1.0. Replaces evidence-class-derived tiering.
+    "BT-DM-0001": GOVERNED_TIER.CONSUMER_INPUT,
+    "BT-DM-0002": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0003": GOVERNED_TIER.HUMAN_REVIEW,
+    "BT-DM-0004": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0005": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0006": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0007": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0008": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0009": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0010": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0011": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0012": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0013": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0014": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0015": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0016": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0017": GOVERNED_TIER.CONSUMER_INPUT,
+    "BT-DM-0018": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0019": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0020": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0021": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0022": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0023": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0024": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0025": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0026": GOVERNED_TIER.HUMAN_REVIEW,
+    "BT-DM-0027": GOVERNED_TIER.HUMAN_REVIEW,
+    "BT-DM-0028": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0029": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0030": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0031": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0032": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0033": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0034": GOVERNED_TIER.VALIDATED_AUTOMATION,
+    "BT-DM-0035": GOVERNED_TIER.HUMAN_REVIEW,
+    "BT-DM-0036": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0037": GOVERNED_TIER.HUMAN_REVIEW,
+    "BT-DM-0038": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0039": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0040": GOVERNED_TIER.HUMAN_REVIEW,
+    "BT-DM-0041": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0042": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0043": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0044": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0045": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0046": GOVERNED_TIER.HUMAN_REVIEW,
+    "BT-DM-0047": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0048": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0049": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0050": GOVERNED_TIER.NO_ACTION,
+    "BT-DM-0051": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0052": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0053": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0054": GOVERNED_TIER.REVIEW_DEFAULT,
+    "BT-DM-0055": GOVERNED_TIER.CONSUMER_INPUT,
+});
+
 /**
  * PROVISIONAL POLICY — v1, pre-production.
  *
@@ -144,6 +237,7 @@ export const AUTOMATION_POLICY = Object.freeze({
         HISTORICAL:        AUTOMATION_TIER.FULL_AUTOMATION,
         IDENTITY:          AUTOMATION_TIER.AUTOMATED_WITH_VALIDATION,
         CROSS_BUREAU:      AUTOMATION_TIER.AUTOMATED_WITH_VALIDATION,
+        CONSUMER_DISPUTE:  AUTOMATION_TIER.AUTOMATED_WITH_VALIDATION,
         CIRCUMSTANTIAL:    AUTOMATION_TIER.PROCESSOR_REVIEW,
         INDETERMINATE:     AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED,
         REQUIRES_CONSUMER: AUTOMATION_TIER.NEVER_AUTOMATED,
@@ -224,15 +318,33 @@ export function complianceGateFor(record) {
 }
 
 const TIER_RANK = Object.freeze({
+    // Legacy evidence-class tiers (retained for the provisional fallback path).
     FULL_AUTOMATION: 4,
     AUTOMATED_WITH_VALIDATION: 3,
     PROCESSOR_REVIEW: 2,
     HUMAN_REVIEW_REQUIRED: 1,
     NEVER_AUTOMATED: 0,
+    // GOVERNED tiers (Master Governance Matrix v1.0), ranked so overrides still
+    // DEMOTE correctly. Higher = more autonomy. HUMAN_REVIEW and NO_ACTION are the
+    // most restrictive; VALIDATED_AUTOMATION is the highest governed autonomy.
+    VALIDATED_AUTOMATION: 3,
+    REVIEW_DEFAULT: 2,
+    CONSUMER_INPUT: 1,
+    HUMAN_REVIEW: 1,
+    NO_ACTION: 0,
 });
 
-export function automationTierFor(evidenceClassId) {
-    return AUTOMATION_POLICY.byEvidenceClass[evidenceClassId] ?? AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED;
+export function automationTierFor(decisionRecordId, evidenceClassId = null) {
+    // GOVERNED-FIRST: the per-decision tier from the Master Governance Matrix is
+    // authoritative. If a decision is not governed (should not happen for
+    // production-reachable decisions), fall back to the provisional evidence-class
+    // policy, then to the most cautious tier. This never PROMOTES autonomy.
+    const governed = TIER_BY_DECISION[decisionRecordId];
+    if (governed) return governed;
+    if (evidenceClassId) {
+        return AUTOMATION_POLICY.byEvidenceClass[evidenceClassId] ?? AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED;
+    }
+    return AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED;
 }
 
 /** Overrides demote only. Returns the MORE cautious of the two tiers. */
@@ -241,9 +353,17 @@ export function applyOverride(tier, overrideTier) {
 }
 
 export function requiresHumanReview(tier) {
-    return tier === AUTOMATION_TIER.PROCESSOR_REVIEW ||
+    // Legacy evidence-class tiers.
+    if (tier === AUTOMATION_TIER.PROCESSOR_REVIEW ||
         tier === AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED ||
-        tier === AUTOMATION_TIER.NEVER_AUTOMATED;
+        tier === AUTOMATION_TIER.NEVER_AUTOMATED) return true;
+    // GOVERNED tiers that require a human before anything proceeds. VALIDATED_AUTOMATION
+    // and REVIEW_DEFAULT permit a draft; HUMAN_REVIEW and CONSUMER_INPUT do not, and
+    // NO_ACTION produces no dispute at all.
+    if (tier === GOVERNED_TIER.HUMAN_REVIEW ||
+        tier === GOVERNED_TIER.CONSUMER_INPUT ||
+        tier === GOVERNED_TIER.NO_ACTION) return true;
+    return false;
 }
 
 // ===========================================================================
@@ -276,6 +396,10 @@ export const FINDING_TO_DECISION = Object.freeze({
     // category is identified, the controlling date is present and readable, the
     // period is calculable, and expiry has indisputably passed. Where any of that
     // fails, it emits *_OBSOLESCENCE_INDETERMINATE instead — see below.
+    // BT-DM-0054 — Baseline Reinvestigation. Asserts no defect.
+    TL_BASELINE_REINVESTIGATION:  { record: "BT-DM-0054", name: "Baseline Reinvestigation", evidence: "CONSUMER_DISPUTE" },
+    COL_BASELINE_REINVESTIGATION: { record: "BT-DM-0054", name: "Baseline Reinvestigation", evidence: "CONSUMER_DISPUTE" },
+
     TL_BEYOND_REPORTING_PERIOD: { record: "BT-DM-0051", name: "Obsolete Derogatory Reporting", evidence: "SELF_EVIDENT" },
     PR_BEYOND_REPORTING_PERIOD: { record: "BT-DM-0051", name: "Obsolete Derogatory Reporting", evidence: "SELF_EVIDENT" },
 
