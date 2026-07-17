@@ -933,6 +933,91 @@ export async function discoverM8CrcV2(data = {}) {
             .replace(/([?&](token|sig|signature|key|auth|sessionid|session_id)=)[^&\s]+/gi, "$1REDACTED")
             .slice(0, 300);
         const relevant = (u) => !/browserbase\.com|cometondemand\.net|intercom/i.test(u || "");
+        // The exact CRC library-letter generation endpoint. Its response decides
+        // whether the editor will have anything to populate.
+        const isGenerationEndpoint = (u) => /\/api\/clients\/\d+\/letters\/\d+\/generate-letters/i.test(u || "");
+
+        // Shared holder for the generation request/response diagnostics.
+        const generation = {
+            responseStatus: null,
+            responseUrl: null,
+            responseBody: null,      // sanitized
+            requestPayloadShape: null,
+            requestHeadersShape: null,
+            nonOkObserved: false,
+        };
+
+        // Report only the STRUCTURE of a JSON payload — field names, types, array
+        // lengths, blank/null/missing — never the actual consumer values. For any
+        // populated string it reports only { type:"string", blank, length }.
+        const shapeOf = (value, depth = 0) => {
+            if (depth > 4) return { type: "…" };
+            if (value === null) return { type: "null" };
+            if (Array.isArray(value)) {
+                return { type: "array", length: value.length,
+                    items: value.length ? shapeOf(value[0], depth + 1) : null };
+            }
+            const t = typeof value;
+            if (t === "object") {
+                const keys = Object.keys(value);
+                const fields = {};
+                for (const k of keys) fields[k] = shapeOf(value[k], depth + 1);
+                return { type: "object", keys, fields };
+            }
+            if (t === "string") return { type: "string", blank: value.trim() === "", length: value.length };
+            if (t === "number") return { type: "number" };
+            if (t === "boolean") return { type: "boolean" };
+            return { type: t };
+        };
+
+        // Sanitize a validation body: keep only validation-useful keys; drop any
+        // consumer PII. Whitelist of safe keys; everything else is dropped.
+        const SAFE_BODY_KEYS = new Set([
+            "message", "error", "errors", "error_code", "errorCode", "code",
+            "status", "statusCode", "validation", "fields", "field", "missing",
+            "missing_fields", "detail", "details", "title", "type",
+        ]);
+        const sanitizeBody = (body) => {
+            if (body == null) return null;
+            if (typeof body === "string") {
+                // Plain-text body: cap length, redact obvious PII-ish tokens.
+                return body
+                    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[REDACTED_EMAIL]")
+                    .replace(/\b\d{3,}\b/g, "[REDACTED_NUM]")
+                    .slice(0, 1500);
+            }
+            if (typeof body !== "object") return body;
+            const walk = (obj, depth = 0) => {
+                if (depth > 5 || obj == null) return null;
+                if (Array.isArray(obj)) return obj.slice(0, 20).map((x) => walk(x, depth + 1));
+                if (typeof obj !== "object") {
+                    if (typeof obj === "string") {
+                        // keep short validation-ish strings; redact long/PII-ish ones
+                        if (obj.length > 120) return "[REDACTED_LONG_STRING]";
+                        return obj.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[REDACTED_EMAIL]");
+                    }
+                    return obj;
+                }
+                const out = {};
+                for (const k of Object.keys(obj)) {
+                    if (SAFE_BODY_KEYS.has(k) || /error|message|valid|missing|field|code|detail|title/i.test(k)) {
+                        out[k] = walk(obj[k], depth + 1);
+                    }
+                }
+                return out;
+            };
+            return walk(body);
+        };
+
+        // Safe header-name presence map (names + exists), never values.
+        const headersShape = (headers) => {
+            const SENSITIVE = /authorization|cookie|token|session|x-csrf|x-xsrf|api-key|secret/i;
+            const out = {};
+            for (const name of Object.keys(headers || {})) {
+                out[name.toLowerCase()] = SENSITIVE.test(name) ? "present(redacted)" : "present";
+            }
+            return out;
+        };
 
         const onRequest = (req) => {
             const u = req.url();
@@ -943,17 +1028,48 @@ export async function discoverM8CrcV2(data = {}) {
                 resourceType: req.resourceType(),
                 tSinceClickMs: Date.now() - clickT0,
             });
+            // For the generation request, capture ONLY the payload structure and
+            // safe header-name presence — never the actual values.
+            if (isGenerationEndpoint(u)) {
+                try {
+                    const raw = req.postData();
+                    if (raw) {
+                        let parsed = null;
+                        try { parsed = JSON.parse(raw); } catch { parsed = null; }
+                        generation.requestPayloadShape = parsed
+                            ? shapeOf(parsed)
+                            : { type: "non-json", length: raw.length };
+                    } else {
+                        generation.requestPayloadShape = { type: "empty" };
+                    }
+                } catch { generation.requestPayloadShape = { type: "unreadable" }; }
+                try { generation.requestHeadersShape = headersShape(req.headers()); } catch { /* ignore */ }
+            }
         };
         const onResponse = async (res) => {
             const u = res.url();
             if (!relevant(u)) return;
+            const status = res.status();
             netResponses.push({
                 method: res.request().method(),
                 url: sanitizeUrl(u),
-                status: res.status(),
+                status,
                 resourceType: res.request().resourceType(),
                 tSinceClickMs: Date.now() - clickT0,
             });
+            // For the generation endpoint, capture the sanitized body NOW (bodies
+            // can't be read after the fact). Any non-2xx is the decisive blocker.
+            if (isGenerationEndpoint(u)) {
+                generation.responseStatus = status;
+                generation.responseUrl = sanitizeUrl(u);
+                if (status < 200 || status >= 300) generation.nonOkObserved = true;
+                let body = null;
+                try { body = await res.json(); }
+                catch {
+                    try { body = await res.text(); } catch { body = null; }
+                }
+                generation.responseBody = sanitizeBody(body);
+            }
         };
         const onFailed = (req) => {
             const u = req.url();
@@ -1301,6 +1417,11 @@ export async function discoverM8CrcV2(data = {}) {
                 readyIndex = readyCandidates.length > 1 ? -2 : -1; // -2 marks ambiguity
             }
 
+            // Short-circuit: an explicit non-2xx generation response means the
+            // backend rejected generation; the editor will never populate. Stop
+            // polling immediately rather than waiting out the full timeout.
+            if (generation.nonOkObserved) break;
+
             await page.waitForTimeout(CONFIRM_INTERVAL_MS);
         }
 
@@ -1318,7 +1439,29 @@ export async function discoverM8CrcV2(data = {}) {
         report.failedGenerationRequests = netFailed;
         report.froalaCandidates = lastSnapshot;
 
-        // If the generation request explicitly FAILED and no editor populated.
+        // Surface the generation request/response diagnostics.
+        report.generationResponseStatus = generation.responseStatus;
+        report.generationResponseUrl = generation.responseUrl;
+        report.generationErrorResponseBody = generation.responseBody;
+        report.generationRequestPayloadShape = generation.requestPayloadShape;
+        report.generationRequestHeadersShape = generation.requestHeadersShape;
+
+        // DECISIVE: any NON-2xx generation response means CRC rejected generation.
+        // Stop here with the accurate stage — not editor_population — and include
+        // the sanitized body + request shape.
+        if (generation.responseStatus != null &&
+            (generation.responseStatus < 200 || generation.responseStatus >= 300)) {
+            report.blockedStage = "library_generation_request";
+            report.blockedReason =
+                `CRC rejected the library-letter generation request with status ${generation.responseStatus}`;
+            report.blockingGaps.push("library_generation_request_rejected");
+            report.finalEditorPageText = (await page.evaluate(() => document.body?.innerText || "")
+                .catch(() => "")).slice(0, 3000);
+            report.artifacts.push(await shot(page, "05-generation-rejected"));
+            return report;
+        }
+
+        // If the generation request explicitly FAILED (network) and no editor populated.
         if (readyIndex < 0 && netFailed.length > 0) {
             report.blockedStage = "library_generation_request";
             report.blockedReason = "CRC library-letter generation request failed";
