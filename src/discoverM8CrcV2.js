@@ -269,21 +269,63 @@ function normalizeFieldValue(v) {
 }
 
 /**
- * Enter a value into an ordinary MUI text input and POSITIVELY CONFIRM it stuck.
+ * Resolve the input that belongs to a specific field by its EXACT label, scoped
+ * to that field's own MuiFormControl/MuiTextField wrapper.
  *
- * CRC's form is React-controlled; a bare fill() can complete without React
- * registering the value (which is exactly why generation was rejected with
- * "Please enter required fields" while the fields read blank). So we type with a
- * per-character delay, Tab to blur, and read inputValue() back. If that still
- * doesn't match, we fall back to a native value setter that dispatches bubbled
- * input/change/blur events, then verify once more. Returns confirmed:true only
- * if the normalized resulting value exactly equals the intended value.
+ * CRC repeats id="outlined-basic" across Company/City/ZIP and duplicates label
+ * text, so a global getByLabel(...).first() can resolve several fields to the
+ * SAME input (that is how ZIP overwrote Company Name). This binds to the input
+ * inside the ONE visible wrapper whose <label> text exactly matches. Requires
+ * exactly one matching visible wrapper; otherwise returns { ok:false }.
+ *
+ * Returns { ok, input (Locator), wrapperLabel, inputIndex } where inputIndex is
+ * the field's position within the page's full input list — used later for the
+ * pairwise-distinct check.
  */
-async function enterTextConfirmed(page, labelRe, value) {
-    const result = { label: String(labelRe), intended: value, confirmed: false, resultingValue: null };
+async function resolveFieldByWrapper(page, exactLabel) {
+    // Find the index (within all inputs) of the input whose closest form-control
+    // wrapper has a <label> whose normalized text equals exactLabel exactly.
+    const match = await page.evaluate((wanted) => {
+        const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+        const inputs = Array.from(document.querySelectorAll("input"));
+        const hits = [];
+        inputs.forEach((el, idx) => {
+            const fc = el.closest(".MuiFormControl-root, .MuiTextField-root");
+            if (!fc) return;
+            const label = norm(fc.querySelector("label")?.textContent || "");
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            const visible = style.display !== "none" && style.visibility !== "hidden" &&
+                rect.width > 0 && rect.height > 0;
+            if (label === wanted && visible) hits.push(idx);
+        });
+        return { hits };
+    }, exactLabel).catch(() => ({ hits: [] }));
+
+    if (!match || match.hits.length === 0) {
+        return { ok: false, error: `no visible wrapper with label "${exactLabel}"`, wrapperLabel: exactLabel };
+    }
+    if (match.hits.length > 1) {
+        return { ok: false, error: `multiple (${match.hits.length}) visible wrappers with label "${exactLabel}"`, wrapperLabel: exactLabel, inputIndexes: match.hits };
+    }
+    const inputIndex = match.hits[0];
+    return { ok: true, input: page.locator("input").nth(inputIndex), wrapperLabel: exactLabel, inputIndex };
+}
+
+/**
+ * Enter a value into an ordinary MUI text input, bound to its OWN wrapper by
+ * exact label, and POSITIVELY CONFIRM it stuck. type+Tab first; native
+ * setter + bubbled input/change/blur as fallback. Returns confirmed:true only if
+ * the normalized resulting value exactly equals the intended value, and carries
+ * the resolved inputIndex for the pairwise-distinct check.
+ */
+async function enterTextConfirmed(page, exactLabel, value) {
+    const result = { label: exactLabel, intended: value, confirmed: false, resultingValue: null, inputIndex: null };
     try {
-        const field = page.getByLabel(labelRe).first();
-        if (!(await field.count())) { result.error = "field not found"; return result; }
+        const resolved = await resolveFieldByWrapper(page, exactLabel);
+        if (!resolved.ok) { result.error = resolved.error; result.inputIndexes = resolved.inputIndexes; return result; }
+        const field = resolved.input;
+        result.inputIndex = resolved.inputIndex;
 
         await field.click({ timeout: 8000 });
         await field.fill("");                          // clear
@@ -292,7 +334,7 @@ async function enterTextConfirmed(page, labelRe, value) {
         result.resultingValue = normalizeFieldValue(await field.inputValue().catch(() => ""));
         if (result.resultingValue === normalizeFieldValue(value)) {
             result.confirmed = true;
-            result.method = "type+tab";
+            result.method = "wrapper-scoped type+tab";
             return result;
         }
 
@@ -307,7 +349,7 @@ async function enterTextConfirmed(page, labelRe, value) {
         }, value);
         result.resultingValue = normalizeFieldValue(await field.inputValue().catch(() => ""));
         result.confirmed = result.resultingValue === normalizeFieldValue(value);
-        result.method = "native-setter+events";
+        result.method = "wrapper-scoped native-setter+events";
         if (!result.confirmed) result.error = `resulting "${result.resultingValue}" != intended "${value}"`;
         return result;
     } catch (error) {
@@ -603,10 +645,10 @@ export async function discoverM8CrcV2(data = {}) {
         // blank. Text inputs: type+Tab, read back, native-setter fallback. Address
         // is a MUI combobox (discovered), so it uses the option/Enter/Tab path.
         // State keeps the existing combobox+value-confirm.
-        const companyResult = await enterTextConfirmed(page, /company name/i, DISCOVERY_RECIPIENT.companyName);
+        const companyResult = await enterTextConfirmed(page, "Company Name *", DISCOVERY_RECIPIENT.companyName);
         const addressResult = await enterAddressConfirmed(page, DISCOVERY_RECIPIENT.address);
-        const cityResult = await enterTextConfirmed(page, /city/i, DISCOVERY_RECIPIENT.city);
-        const zipResult = await enterTextConfirmed(page, /zip/i, DISCOVERY_RECIPIENT.zip);
+        const cityResult = await enterTextConfirmed(page, "City *", DISCOVERY_RECIPIENT.city);
+        const zipResult = await enterTextConfirmed(page, "Zip Code *", DISCOVERY_RECIPIENT.zip);
         const stateResult = await selectFromAutocombo(
             page,
             page.locator('input[role="combobox"]').last(),
@@ -644,6 +686,77 @@ export async function discoverM8CrcV2(data = {}) {
                 `${unconfirmed.join(", ")}. Stopping before clicking Generate Library Letter.`;
             report.blockingGaps.push("recipient_fields_unconfirmed");
             report.artifacts.push(await shot(page, "04b-recipient-unconfirmed"));
+            return report;
+        }
+
+        // ---- COLLECTIVE PRE-CLICK VERIFICATION (pairwise-distinct) ---------
+        // Re-resolve all five required fields FRESH by wrapper+label and read
+        // their values in one snapshot. This guarantees each field is a DISTINCT
+        // DOM input (the previous bug had ZIP overwrite Company Name because two
+        // fields resolved to the same input). Company/City/ZIP must be pairwise
+        // distinct element handles; City and ZIP must be non-blank; Company must
+        // not equal City or ZIP.
+        const companyBind = await resolveFieldByWrapper(page, "Company Name *");
+        const cityBind = await resolveFieldByWrapper(page, "City *");
+        const zipBind = await resolveFieldByWrapper(page, "Zip Code *");
+        const addressInput = page.getByLabel(/^address\s*\*?$/i).first();
+        const stateInput = page.locator('input[role="combobox"]').last();
+
+        const readVal = async (loc) => normalizeFieldValue(await loc.inputValue().catch(() => ""));
+        const bindings = [
+            { field: "companyName", bind: companyBind, value: await (companyBind.ok ? readVal(companyBind.input) : "") },
+            { field: "address", bind: { ok: true, wrapperLabel: "Address *", inputIndex: "combobox" }, value: await readVal(addressInput) },
+            { field: "city", bind: cityBind, value: await (cityBind.ok ? readVal(cityBind.input) : "") },
+            { field: "state", bind: { ok: true, wrapperLabel: "State*", inputIndex: "combobox" }, value: await readVal(stateInput) },
+            { field: "zip", bind: zipBind, value: await (zipBind.ok ? readVal(zipBind.input) : "") },
+        ];
+        report.recipientElementBindings = bindings.map((b) => ({
+            field: b.field,
+            wrapperLabel: b.bind.wrapperLabel,
+            inputIndex: b.bind.inputIndex ?? null,
+            elementIdentity: b.bind.inputIndex ?? null,
+            resultingValue: b.value,
+        }));
+
+        // Pairwise-distinct check for the three ordinary inputs.
+        const ordinaryIdx = [companyBind.inputIndex, cityBind.inputIndex, zipBind.inputIndex];
+        const allResolved = companyBind.ok && cityBind.ok && zipBind.ok;
+        const distinct = new Set(ordinaryIdx).size === ordinaryIdx.length;
+        if (!allResolved || !distinct) {
+            report.blockedStage = "recipient_binding";
+            report.blockedReason = "Multiple recipient fields resolved to the same DOM input";
+            report.blockingGaps.push("recipient_fields_same_element");
+            report.artifacts.push(await shot(page, "04c-recipient-binding-collision"));
+            return report;
+        }
+
+        // Exact expected values + non-blank + Company != City/ZIP.
+        const expected = {
+            companyName: DISCOVERY_RECIPIENT.companyName,
+            address: DISCOVERY_RECIPIENT.address,
+            city: DISCOVERY_RECIPIENT.city,
+            state: DISCOVERY_RECIPIENT.state,
+            zip: DISCOVERY_RECIPIENT.zip,
+        };
+        const snapshot = Object.fromEntries(bindings.map((b) => [b.field, b.value]));
+        const valuesMatch =
+            snapshot.companyName === expected.companyName &&
+            snapshot.address.includes(expected.address) &&
+            snapshot.city === expected.city &&
+            snapshot.state.includes(expected.state) &&
+            snapshot.zip === expected.zip;
+        const sanity =
+            snapshot.city !== "" && snapshot.zip !== "" &&
+            snapshot.companyName !== snapshot.city &&
+            snapshot.companyName !== snapshot.zip;
+        report.recipientPreClickSnapshot = snapshot;
+        if (!valuesMatch || !sanity) {
+            report.blockedStage = "recipient_validation";
+            report.blockedReason =
+                "Pre-click recipient snapshot did not match the required values " +
+                "(or Company/City/ZIP collision detected). Stopping before generation.";
+            report.blockingGaps.push("recipient_preclick_snapshot_mismatch");
+            report.artifacts.push(await shot(page, "04d-recipient-snapshot-mismatch"));
             return report;
         }
 
@@ -742,14 +855,18 @@ export async function discoverM8CrcV2(data = {}) {
             report.blockedStage = "recipient_validation";
             report.blockedReason = "CRC rejected one or more required recipient fields";
             report.blockingGaps.push("crc_required_field_error_after_click");
-            // Capture the ACTUAL post-click values of every recipient control.
+            // Capture the ACTUAL post-click values of every recipient control,
+            // read fresh from each field's own wrapper (label -> its input),
+            // rather than trusting a global scan.
             report.postClickRecipientValues = await page.evaluate(() => {
+                const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
                 const out = {};
-                for (const el of document.querySelectorAll("input")) {
+                const inputs = Array.from(document.querySelectorAll("input"));
+                inputs.forEach((el, idx) => {
                     const fc = el.closest(".MuiFormControl-root, .MuiTextField-root");
-                    const label = fc ? (fc.querySelector("label")?.textContent || "").trim() : null;
-                    if (label) out[label] = el.value;
-                }
+                    const label = fc ? norm(fc.querySelector("label")?.textContent || "") : null;
+                    if (label) out[`${label} [input#${idx}]`] = el.value;
+                });
                 return out;
             }).catch(() => null);
             report.artifacts.push(await shot(page, "05-recipient-rejected"));
