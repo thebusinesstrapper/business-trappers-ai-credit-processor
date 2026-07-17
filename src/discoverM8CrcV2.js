@@ -602,7 +602,7 @@ export async function discoverM8CrcV2(data = {}) {
         const catResult = await selectFromAutocombo(page, categoryCombo, "All");
         // Letter Name is the next combobox.
         const letterCombo = page.locator('input[role="combobox"]').nth(1);
-        const letterResult = await selectFromAutocombo(page, letterCombo, "Basic Dispute For Collections");
+        const letterResult = await selectFromAutocombo(page, letterCombo, "Basic Dispute for Collections");
         report.wizardSelections = { category: catResult, letterName: letterResult };
         // Record the INITIAL letter-name result for diagnostics. We deliberately
         // do NOT fail here on a merely "dirty" value (e.g. placeholder still
@@ -622,7 +622,7 @@ export async function discoverM8CrcV2(data = {}) {
         if (!letterNameDirtyValue) {
             report.blockedStage = "letter_name_selection";
             report.blockedReason =
-                `Letter Name option "Basic Dispute For Collections" could not be found or clicked ` +
+                `Letter Name option "Basic Dispute for Collections" could not be found or clicked ` +
                 `(${letterResult.error ?? "unknown error"}). Stopping before generation.`;
             report.blockingGaps.push("letter_name_option_unavailable");
             report.artifacts.push(await shot(page, "03b-letter-name-option-unavailable"));
@@ -632,12 +632,12 @@ export async function discoverM8CrcV2(data = {}) {
         // ---- STAGE 3b: LETTER NAME EXACT-VALUE STABILIZATION ----------------
         // The substring confirmation inside selectFromAutocombo can pass while the
         // combobox still shows the placeholder concatenated with the option
-        // (e.g. "Select a LetterBasic Dispute For Collections"). In that state CRC
+        // (e.g. "Select a LetterBasic Dispute for Collections"). In that state CRC
         // has NOT committed the selection and never renders the outlined
         // "Generate Library Letter" button (safeCount:0). So here we require the
         // combobox's NORMALIZED displayed value to EQUAL exactly the target, poll
         // for two consecutive clean checks, and reselect once if needed.
-        const LETTER_NAME_EXACT = "Basic Dispute For Collections";
+        const LETTER_NAME_EXACT = "Basic Dispute for Collections";
         const LETTER_NAME_TIMEOUT_MS = 15000;
         const letterNameValueTimeline = [];
         let letterNameReselected = false;
@@ -693,7 +693,7 @@ export async function discoverM8CrcV2(data = {}) {
         if (!letterNameStable) {
             report.blockedStage = "letter_name_stabilization";
             report.blockedReason =
-                "Letter Name did not stabilize to exact value Basic Dispute For Collections";
+                "Letter Name did not stabilize to exact value Basic Dispute for Collections";
             report.blockingGaps.push("letter_name_not_stabilized");
             report.artifacts.push(await shot(page, "03c-letter-name-not-stabilized"));
             return report;
