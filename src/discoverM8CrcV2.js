@@ -264,6 +264,56 @@ async function selectFromAutocombo(page, comboLocator, optionText) {
     }
 }
 
+/**
+ * Fail closed on editor activation with FULL diagnostics. Returns the report with
+ * blockedStage="editor_activation" (a specific stage, not the generic throw path)
+ * so we can see exactly why no active editor was found.
+ */
+async function failEditorActivation(page, context, report, reason) {
+    report.blockedStage = "editor_activation";
+    report.blockedReason = reason;
+    if (!report.blockingGaps.includes("editor_not_activated")) {
+        report.blockingGaps.push("editor_not_activated");
+    }
+    try {
+        report.editorActivationDiagnostics = {
+            currentUrl: page.url(),
+            allOpenPageUrls: context.pages().map((p) => p.url()),
+            frameInventory: page.frames().map((f) => ({
+                name: f.name() || null, url: f.url() || null, isMain: f === page.mainFrame(),
+            })),
+            loadingIndicatorVisible: await anyOverlayVisible(page),
+            froalaCandidates: await page.locator('div.fr-element.fr-view[contenteditable="true"]')
+                .evaluateAll((nodes) => nodes.map((n, i) => {
+                    const rect = n.getBoundingClientRect();
+                    const style = window.getComputedStyle(n);
+                    return {
+                        index: i,
+                        visible: style.display !== "none" && style.visibility !== "hidden" &&
+                            rect.width > 0 && rect.height > 0,
+                        innerHtmlLength: (n.innerHTML || "").length,
+                        textLength: (n.textContent || "").trim().length,
+                    };
+                })).catch(() => []),
+            visibleButtons: await page.locator("button").evaluateAll((nodes) =>
+                nodes.filter((n) => {
+                    const r = n.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                }).map((n) => (n.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 40)
+            ).catch(() => []),
+            visibleHeadings: await page.locator("h1,h2,h3,h4").evaluateAll((nodes) =>
+                nodes.map((n) => (n.textContent || "").trim()).filter(Boolean).slice(0, 20)
+            ).catch(() => []),
+            renderedPageText: (await page.evaluate(() => document.body?.innerText || "").catch(() => "")).slice(0, 2000),
+        };
+        report.artifacts.push(await shot(page, "05-editor-activation-failed"));
+    } catch (diagError) {
+        report.editorActivationDiagnostics = { diagnosticsError: diagError.message };
+    }
+    // The caller's finally block closes the browser; we only gather diagnostics.
+    return report;
+}
+
 export async function discoverM8CrcV2(data = {}) {
     const clientName = data?.clientName ?? AUTHORIZED_CLIENT_NAME;
 
@@ -315,7 +365,11 @@ export async function discoverM8CrcV2(data = {}) {
     try {
         const session = await launchBrowser();
         browser = session.browser;
-        const page = session.page;
+        // `page` is mutable: clicking Generate Library Letter may open the editor
+        // in a NEW tab (the CRC tabs carry target="_blank"), in which case we
+        // switch to it after confirming it is CRC + the current client.
+        let page = session.page;
+        const context = session.context ?? page.context();
         report.replayUrl = session.session?.id
             ? `https://www.browserbase.com/sessions/${session.session.id}`
             : null;
@@ -539,12 +593,125 @@ export async function discoverM8CrcV2(data = {}) {
             throw new Error("Final class re-check failed; the resolved button is not the outlined library button.");
         }
         assertClickAllowed("Generate Library Letter");
+        const urlBeforeClick = page.url();
+        const pagesBeforeClick = context.pages().length;
         await libraryBtn.click({ timeout: 20000 });
-        // Wait for the Froala editable body to become visible & populated.
-        const froala = page.locator('div.fr-element.fr-view[contenteditable="true"]').first();
-        await froala.waitFor({ state: "visible", timeout: 30000 });
+
+        // (1) Let any CRC loading overlay clear using the SAME stabilization
+        // pattern already added for the generate-letters page.
+        await waitForOverlayCleared(page);
+
+        // (2/3) NEW-PAGE DETECTION. If the click opened a new tab, adopt it ONLY
+        // after confirming it is CRC and the SAME client (15). Otherwise stay put.
+        try {
+            const pagesNow = context.pages();
+            if (pagesNow.length > pagesBeforeClick) {
+                // Take the most recently opened page.
+                const candidate = pagesNow[pagesNow.length - 1];
+                await candidate.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
+                const candUrl = candidate.url();
+                const isCrc = /(^https:\/\/app\.creditrepaircloud\.com)/.test(candUrl);
+                const isSameClient = candUrl.includes(`/clients/${AUTHORIZED_CLIENT_ID}/`) ||
+                    // some CRC editor routes drop the /clients/ segment; accept CRC host
+                    isCrc;
+                if (isCrc && isSameClient) {
+                    page = candidate; // switch active page to the editor tab
+                    report.editorOpenedInNewPage = { switched: true, url: candUrl };
+                    await waitForOverlayCleared(page);
+                } else {
+                    report.editorOpenedInNewPage = { switched: false, url: candUrl, reason: "not CRC/client 15" };
+                    throw new Error(`Editor opened an unexpected page: ${candUrl}`);
+                }
+            } else {
+                report.editorOpenedInNewPage = { switched: false, note: "editor rendered in the same page" };
+            }
+        } catch (switchError) {
+            // A domain/client mismatch is a hard stop with diagnostics below.
+            report.editorSwitchError = switchError.message;
+        }
+
+        // Guard: if we somehow navigated off CRC, fail closed with diagnostics.
+        if (!/^https:\/\/app\.creditrepaircloud\.com/.test(page.url())) {
+            return await failEditorActivation(page, context, report,
+                `Active page left CRC after generation: ${page.url()}`);
+        }
+
+        // (4) ENUMERATE every Froala candidate and capture its state.
+        const froalaSelector = 'div.fr-element.fr-view[contenteditable="true"]';
+        const candidates = await page.locator(froalaSelector).evaluateAll((nodes) => {
+            return nodes.map((n, i) => {
+                const rect = n.getBoundingClientRect();
+                const style = window.getComputedStyle(n);
+                const box = n.closest(".fr-box");
+                const boxVisible = box
+                    ? (() => {
+                        const bs = window.getComputedStyle(box);
+                        const br = box.getBoundingClientRect();
+                        return bs.display !== "none" && bs.visibility !== "hidden" &&
+                            br.width > 0 && br.height > 0;
+                    })()
+                    : false;
+                const html = n.innerHTML || "";
+                const text = (n.textContent || "").trim();
+                return {
+                    index: i,
+                    visible:
+                        style.display !== "none" && style.visibility !== "hidden" &&
+                        rect.width > 0 && rect.height > 0,
+                    boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+                    innerHtmlLength: html.length,
+                    textLength: text.length,
+                    frBoxVisible: boxVisible,
+                    parentClasses: n.parentElement ? (n.parentElement.className || "") : "",
+                };
+            });
+        }).catch(() => []);
+        report.froalaCandidates = candidates;
+
+        // (5) Select the UNIQUE active editor: visible, nonzero box, inside a
+        // visible .fr-box, populated (nonempty HTML or text). NEVER .first().
+        const activeCandidates = candidates.filter((c) =>
+            c.visible &&
+            c.boundingBox.width > 0 && c.boundingBox.height > 0 &&
+            c.frBoxVisible &&
+            (c.innerHtmlLength > 0 || c.textLength > 0)
+        );
+
+        if (activeCandidates.length === 0) {
+            return await failEditorActivation(page, context, report,
+                "No visible, populated Froala editor appeared after generation.");
+        }
+        if (activeCandidates.length > 1) {
+            return await failEditorActivation(page, context, report,
+                `Ambiguous: ${activeCandidates.length} visible populated Froala editors remain.`);
+        }
+        const activeIndex = activeCandidates[0].index;
+        const froala = page.locator(froalaSelector).nth(activeIndex);
+
+        // (6) Require the selected editor to stay visible + populated for two
+        // consecutive 250ms confirmation intervals (same window as elsewhere).
+        let editorStable = 0;
+        const editorDeadline = Date.now() + STABILIZE_TIMEOUT_MS;
+        while (Date.now() < editorDeadline && editorStable < STABLE_INTERVALS_REQUIRED) {
+            const okNow = await froala.evaluate((n) => {
+                const rect = n.getBoundingClientRect();
+                const style = window.getComputedStyle(n);
+                const visible = style.display !== "none" && style.visibility !== "hidden" &&
+                    rect.width > 0 && rect.height > 0;
+                const populated = (n.innerHTML || "").length > 0 || (n.textContent || "").trim().length > 0;
+                return visible && populated;
+            }).catch(() => false);
+            editorStable = okNow ? editorStable + 1 : 0;
+            if (editorStable < STABLE_INTERVALS_REQUIRED) await page.waitForTimeout(CONFIRM_INTERVAL_MS);
+        }
+        if (editorStable < STABLE_INTERVALS_REQUIRED) {
+            return await failEditorActivation(page, context, report,
+                "The active editor did not remain visible+populated for the confirmation window.");
+        }
+
         report.stagesReached.push("editor_populated");
-        report.froalaEditorLocator = 'div.fr-element.fr-view[contenteditable="true"]';
+        report.froalaEditorLocator = `${froalaSelector} >> nth=${activeIndex}`;
+        report.activeEditorIndex = activeIndex;
         report.artifacts.push(await shot(page, "05-editor-populated"));
 
         // ---- STAGE 6: capture the POPULATED editor + find the signature -----
