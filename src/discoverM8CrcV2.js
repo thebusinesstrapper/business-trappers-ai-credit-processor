@@ -204,20 +204,63 @@ async function shot(page, name) {
  * listbox, click the exact option. Returns what it selected (or an error).
  * This is READ/INPUT to a draft form only — it persists nothing.
  */
+function normalizeComboValue(value) {
+    // MUI Autocomplete inputs can retain the placeholder concatenated with the
+    // chosen label (e.g. "Select a LetterBureau No Response"). Normalize
+    // whitespace so we can substring-check the chosen option robustly.
+    return (value ?? "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Drive a MUI Autocomplete combobox and CONFIRM the selection from the
+ * resulting displayed value.
+ *
+ * The portal option can disappear the instant it is chosen — before Playwright
+ * finishes its click/visibility wait — which surfaces as a timeout even though
+ * the value was actually set. So the source of truth is the combobox's own
+ * resulting value: we treat the selection as successful ONLY if the normalized
+ * input value contains the requested option text exactly. Otherwise we FAIL
+ * CLOSED (ok:false) and the caller must not proceed.
+ */
 async function selectFromAutocombo(page, comboLocator, optionText) {
+    const input = comboLocator.first();
+    const method = "type-then-click-option[role=option]+value-confirm";
     try {
-        const input = comboLocator.first();
         await input.click({ timeout: 10000 });
         await input.fill("");                       // clear "Select a ..."
         await input.type(optionText, { delay: 20 }); // let MUI filter
-        // MUI renders options into a portal <ul role="listbox"><li role="option">
-        const option = page.getByRole("option", { name: optionText, exact: false }).first();
-        await option.waitFor({ state: "visible", timeout: 10000 });
-        const chosen = (await option.textContent().catch(() => optionText)) || optionText;
-        await option.click({ timeout: 10000 });
-        return { ok: true, selected: chosen.trim(), method: "type-then-click-option[role=option]" };
+        // Try to click the exact visible option. This may legitimately time out
+        // if the portal option vanishes on selection — that is NOT a failure by
+        // itself; the value check below is authoritative.
+        try {
+            const option = page.getByRole("option", { name: optionText, exact: false }).first();
+            await option.waitFor({ state: "visible", timeout: 10000 });
+            await option.click({ timeout: 10000 });
+        } catch (clickError) {
+            // Swallow — fall through to the value-based confirmation.
+            void clickError;
+        }
+        // AUTHORITATIVE CONFIRMATION: read the combobox's resulting value.
+        // Poll briefly so a just-committed value has time to render.
+        let resulting = "";
+        const deadline = Date.now() + 4000;
+        do {
+            resulting = normalizeComboValue(await input.inputValue().catch(() => ""));
+            if (resulting.includes(optionText)) break;
+            await page.waitForTimeout(200);
+        } while (Date.now() < deadline);
+
+        if (resulting.includes(optionText)) {
+            return { ok: true, selected: optionText, resultingValue: resulting, method };
+        }
+        return {
+            ok: false,
+            error: `Combobox value "${resulting}" does not contain the requested "${optionText}".`,
+            resultingValue: resulting,
+            method,
+        };
     } catch (error) {
-        return { ok: false, error: error.message, method: "type-then-click-option[role=option]" };
+        return { ok: false, error: error.message, method };
     }
 }
 
@@ -358,6 +401,18 @@ export async function discoverM8CrcV2(data = {}) {
         const letterResult = await selectFromAutocombo(page, letterCombo, "Bureau No Response");
         report.wizardSelections = { category: catResult, letterName: letterResult };
 
+        // FAIL CLOSED: do not proceed unless the Letter Name is positively
+        // confirmed as "Bureau No Response" from the combobox's resulting value.
+        if (!letterResult.ok) {
+            report.blockedStage = "letter_name_selection";
+            report.blockedReason =
+                `Letter Name not positively confirmed as "Bureau No Response" ` +
+                `(resulting value: "${letterResult.resultingValue ?? "?"}"). Stopping before generation.`;
+            report.blockingGaps.push("letter_name_not_confirmed");
+            report.artifacts.push(await shot(page, "03b-letter-name-unconfirmed"));
+            return report;
+        }
+
         // ---- STAGE 4: map the recipient fields, then fill them --------------
         // V1 could not map Company/Address/City/ZIP (shared id="outlined-basic",
         // no labels). Map them positionally by their surrounding MUI label text.
@@ -408,14 +463,80 @@ export async function discoverM8CrcV2(data = {}) {
         report.artifacts.push(await shot(page, "04-recipient-filled"));
 
         // ---- STAGE 5: click GENERATE LIBRARY LETTER (the outlined one) ------
-        // Assert we are clicking the outlined library button, NOT the green AI one.
-        const libraryBtn = page.getByRole("button", { name: /generate library letter/i }).first();
-        const libraryBtnInfo = await describe(libraryBtn);
-        if (!libraryBtnInfo || /containedSuccess/i.test(libraryBtnInfo.classes ?? "")) {
+        //
+        // Both "Generate Library Letter" and "Generate Unique AI Letter" render
+        // more than once (discovery showed count:2 each), so .first() is unsafe —
+        // it previously grabbed a green (contained) duplicate and aborted. Instead
+        // we ENUMERATE every button and pick the UNIQUE safe candidate by exact
+        // text + class + enabled + visible, and separately assert the dangerous AI
+        // button is a DIFFERENT element. Fail closed on any ambiguity.
+        const buttonScan = await page.locator("button").evaluateAll((nodes) => {
+            return nodes.map((n, i) => {
+                const rect = n.getBoundingClientRect();
+                const style = window.getComputedStyle(n);
+                return {
+                    i,
+                    text: (n.textContent || "").replace(/\s+/g, " ").trim(),
+                    classes: n.className && n.className.toString ? n.className.toString() : "",
+                    disabled: n.disabled === true || n.getAttribute("aria-disabled") === "true",
+                    visible:
+                        style.display !== "none" &&
+                        style.visibility !== "hidden" &&
+                        rect.width > 0 && rect.height > 0,
+                };
+            });
+        });
+
+        // Safe candidates: exact text, outlined (NOT contained / containedSuccess),
+        // enabled, visible.
+        const safeCandidates = buttonScan.filter((b) =>
+            b.text === "Generate Library Letter" &&
+            /MuiButton-outlined/.test(b.classes) &&
+            !/MuiButton-contained/.test(b.classes) &&
+            !/MuiButton-containedSuccess/.test(b.classes) &&
+            !b.disabled &&
+            b.visible
+        );
+        // Dangerous candidates: the green AI button, enumerated separately.
+        const aiCandidates = buttonScan.filter((b) =>
+            b.text === "Generate Unique AI Letter" &&
+            /MuiButton-contained(Success)?/.test(b.classes)
+        );
+
+        report.libraryButtonDisambiguation = {
+            safeCandidateIndexes: safeCandidates.map((b) => b.i),
+            aiCandidateIndexes: aiCandidates.map((b) => b.i),
+            safeCount: safeCandidates.length,
+            aiCount: aiCandidates.length,
+        };
+
+        if (safeCandidates.length === 0) {
+            throw new Error("No safe outlined 'Generate Library Letter' button found. Failing closed.");
+        }
+        if (safeCandidates.length > 1) {
             throw new Error(
-                "Refusing to click: the 'Generate Library Letter' match looked like the green " +
-                "containedSuccess (AI) button. Aborting to avoid the AI generator."
+                `Ambiguous: ${safeCandidates.length} visible outlined 'Generate Library Letter' ` +
+                `buttons found. Failing closed rather than guessing.`
             );
+        }
+        const safe = safeCandidates[0];
+        // The safe candidate must NOT be the same DOM element as any AI button.
+        if (aiCandidates.some((ai) => ai.i === safe.i)) {
+            throw new Error("Safe candidate shares an element index with the AI button. Failing closed.");
+        }
+        if (safe.text !== "Generate Library Letter") {
+            throw new Error(`Selected button text "${safe.text}" is not exactly "Generate Library Letter".`);
+        }
+
+        // Bind a Playwright handle to EXACTLY that enumerated element (same index
+        // in the same button list) and verify its class one more time before click.
+        const libraryBtn = page.locator("button").nth(safe.i);
+        const confirmClasses = await libraryBtn.getAttribute("class").catch(() => "");
+        if (
+            !/MuiButton-outlined/.test(confirmClasses ?? "") ||
+            /MuiButton-contained/.test(confirmClasses ?? "")
+        ) {
+            throw new Error("Final class re-check failed; the resolved button is not the outlined library button.");
         }
         assertClickAllowed("Generate Library Letter");
         await libraryBtn.click({ timeout: 20000 });
