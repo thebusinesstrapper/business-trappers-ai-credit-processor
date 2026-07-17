@@ -599,18 +599,18 @@ export async function discoverM8CrcV2(data = {}) {
 
         // ---- STAGE 3: select Category + Letter Name (MUI autocompletes) -----
         const categoryCombo = page.locator('input[role="combobox"]').first(); // Category was :r1s1:
-        const catResult = await selectFromAutocombo(page, categoryCombo, "Credit Bureau Letters");
+        const catResult = await selectFromAutocombo(page, categoryCombo, "All");
         // Letter Name is the next combobox.
         const letterCombo = page.locator('input[role="combobox"]').nth(1);
-        const letterResult = await selectFromAutocombo(page, letterCombo, "Bureau No Response");
+        const letterResult = await selectFromAutocombo(page, letterCombo, "Basic Dispute For Collections");
         report.wizardSelections = { category: catResult, letterName: letterResult };
 
         // FAIL CLOSED: do not proceed unless the Letter Name is positively
-        // confirmed as "Bureau No Response" from the combobox's resulting value.
+        // confirmed as "Basic Dispute For Collections" from the combobox's resulting value.
         if (!letterResult.ok) {
             report.blockedStage = "letter_name_selection";
             report.blockedReason =
-                `Letter Name not positively confirmed as "Bureau No Response" ` +
+                `Letter Name not positively confirmed as "Basic Dispute For Collections" ` +
                 `(resulting value: "${letterResult.resultingValue ?? "?"}"). Stopping before generation.`;
             report.blockingGaps.push("letter_name_not_confirmed");
             report.artifacts.push(await shot(page, "03b-letter-name-unconfirmed"));
