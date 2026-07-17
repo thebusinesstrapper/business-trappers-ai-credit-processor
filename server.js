@@ -13,6 +13,7 @@ import { runClientProfileSpike } from "./src/spikeClientProfileRun.js";
 import { runProfileRead } from "./src/milestoneProfile.js";
 import { runMilestone6 } from "./src/milestone6.js";
 import { runMilestone7 } from "./src/milestone7.js";
+import { discoverM8Crc } from "./src/discoverM8Crc.js"; // TEMPORARY — M8 discovery only
 import { extractSkeletonNode, buildLiabilityMap, buildFieldMap, buildCollisionMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
 
 dotenv.config();
@@ -337,6 +338,20 @@ app.post("/milestone-7", async (req, res) => {
 
     }
 
+});
+
+// TEMPORARY — M8 read-only discovery. Remove after discovery is complete.
+app.post("/discover-m8-crc", async (req, res) => {
+    try {
+        const result = await discoverM8Crc(req.body);
+        res.json(result);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+        });
+    }
 });
 
 /**
