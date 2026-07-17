@@ -264,6 +264,114 @@ async function selectFromAutocombo(page, comboLocator, optionText) {
     }
 }
 
+function normalizeFieldValue(v) {
+    return (v ?? "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Enter a value into an ordinary MUI text input and POSITIVELY CONFIRM it stuck.
+ *
+ * CRC's form is React-controlled; a bare fill() can complete without React
+ * registering the value (which is exactly why generation was rejected with
+ * "Please enter required fields" while the fields read blank). So we type with a
+ * per-character delay, Tab to blur, and read inputValue() back. If that still
+ * doesn't match, we fall back to a native value setter that dispatches bubbled
+ * input/change/blur events, then verify once more. Returns confirmed:true only
+ * if the normalized resulting value exactly equals the intended value.
+ */
+async function enterTextConfirmed(page, labelRe, value) {
+    const result = { label: String(labelRe), intended: value, confirmed: false, resultingValue: null };
+    try {
+        const field = page.getByLabel(labelRe).first();
+        if (!(await field.count())) { result.error = "field not found"; return result; }
+
+        await field.click({ timeout: 8000 });
+        await field.fill("");                          // clear
+        await field.type(value, { delay: 25 });        // per-character -> React onChange
+        await field.press("Tab");                      // blur/change validation
+        result.resultingValue = normalizeFieldValue(await field.inputValue().catch(() => ""));
+        if (result.resultingValue === normalizeFieldValue(value)) {
+            result.confirmed = true;
+            result.method = "type+tab";
+            return result;
+        }
+
+        // Fallback: native setter + bubbled events (defeats controlled-input traps).
+        await field.evaluate((el, v) => {
+            const proto = Object.getPrototypeOf(el);
+            const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+            if (setter) setter.call(el, v); else el.value = v;
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+            el.dispatchEvent(new Event("blur", { bubbles: true }));
+        }, value);
+        result.resultingValue = normalizeFieldValue(await field.inputValue().catch(() => ""));
+        result.confirmed = result.resultingValue === normalizeFieldValue(value);
+        result.method = "native-setter+events";
+        if (!result.confirmed) result.error = `resulting "${result.resultingValue}" != intended "${value}"`;
+        return result;
+    } catch (error) {
+        result.error = error.message;
+        return result;
+    }
+}
+
+/**
+ * Enter the ADDRESS, which discovery proved is a MUI combobox (role="combobox",
+ * label "Address *") — not a plain input. Fail-closed sequence: focus, clear,
+ * type the address, look for a matching role="option"; if present select it;
+ * otherwise try Enter then Tab; then CONFIRM the resulting displayed value
+ * contains the intended address. Returns confirmed accordingly.
+ */
+async function enterAddressConfirmed(page, value) {
+    const result = { label: "Address *", intended: value, confirmed: false, resultingValue: null };
+    try {
+        // The Address combobox is the one whose form-control label is "Address".
+        const addr = page.getByLabel(/^address\s*\*?$/i).first();
+        if (!(await addr.count())) { result.error = "address combobox not found"; return result; }
+
+        await addr.click({ timeout: 8000 });
+        await addr.fill("");
+        await addr.type(value, { delay: 25 });
+
+        // 3-4. If an option appears, select the best match.
+        let selectedVia = null;
+        const option = page.getByRole("option", { name: value, exact: false }).first();
+        if (await option.count().catch(() => 0)) {
+            try {
+                await option.waitFor({ state: "visible", timeout: 4000 });
+                await option.click({ timeout: 4000 });
+                selectedVia = "option-click";
+            } catch { /* fall through */ }
+        }
+        // 5. Otherwise confirm the raw text with Enter, then Tab.
+        if (!selectedVia) {
+            await addr.press("Enter").catch(() => {});
+            await addr.press("Tab").catch(() => {});
+            selectedVia = "enter-tab";
+        }
+
+        // 6. Positively verify the resulting displayed value contains the address.
+        let resulting = normalizeFieldValue(await addr.inputValue().catch(() => ""));
+        if (!resulting.includes(value)) {
+            // brief poll in case the combobox commits a beat later
+            const deadline = Date.now() + 3000;
+            while (Date.now() < deadline && !resulting.includes(value)) {
+                await page.waitForTimeout(200);
+                resulting = normalizeFieldValue(await addr.inputValue().catch(() => ""));
+            }
+        }
+        result.resultingValue = resulting;
+        result.selectedVia = selectedVia;
+        result.confirmed = resulting.includes(value);
+        if (!result.confirmed) result.error = `address value "${resulting}" does not contain "${value}"`;
+        return result;
+    } catch (error) {
+        result.error = error.message;
+        return result;
+    }
+}
+
 /**
  * Fail closed on editor activation with FULL diagnostics. Returns the report with
  * blockedStage="editor_activation" (a specific stage, not the generic throw path)
@@ -489,32 +597,55 @@ export async function discoverM8CrcV2(data = {}) {
             }).filter((f) => f.label || f.required || f.role === "combobox");
         }).catch(() => null);
 
-        // Fill by label where possible; each is INPUT to a draft, persists nothing.
-        const fillByLabel = async (labelRe, value) => {
-            if (value === "") return { label: String(labelRe), skipped: "empty" };
-            try {
-                const field = page.getByLabel(labelRe).first();
-                if (await field.count()) {
-                    await field.fill(value, { timeout: 8000 });
-                    return { label: String(labelRe), ok: true };
-                }
-            } catch (error) {
-                return { label: String(labelRe), ok: false, error: error.message };
-            }
-            return { label: String(labelRe), ok: false, error: "not found" };
-        };
+        // Enter each required field with POSITIVE value confirmation. A bare
+        // fill() completing is NOT proof CRC accepted the value — the prior run
+        // was rejected with "Please enter required fields" while the fields read
+        // blank. Text inputs: type+Tab, read back, native-setter fallback. Address
+        // is a MUI combobox (discovered), so it uses the option/Enter/Tab path.
+        // State keeps the existing combobox+value-confirm.
+        const companyResult = await enterTextConfirmed(page, /company name/i, DISCOVERY_RECIPIENT.companyName);
+        const addressResult = await enterAddressConfirmed(page, DISCOVERY_RECIPIENT.address);
+        const cityResult = await enterTextConfirmed(page, /city/i, DISCOVERY_RECIPIENT.city);
+        const zipResult = await enterTextConfirmed(page, /zip/i, DISCOVERY_RECIPIENT.zip);
+        const stateResult = await selectFromAutocombo(
+            page,
+            page.locator('input[role="combobox"]').last(),
+            DISCOVERY_RECIPIENT.state
+        );
         report.recipientFillResults = {
-            companyName: await fillByLabel(/company name/i, DISCOVERY_RECIPIENT.companyName),
-            address: await fillByLabel(/^address/i, DISCOVERY_RECIPIENT.address),
-            city: await fillByLabel(/city/i, DISCOVERY_RECIPIENT.city),
-            zip: await fillByLabel(/zip/i, DISCOVERY_RECIPIENT.zip),
-            state: await selectFromAutocombo(
-                page,
-                page.locator('input[role="combobox"]').last(),
-                DISCOVERY_RECIPIENT.state
-            ),
+            companyName: companyResult,
+            address: addressResult,
+            city: cityResult,
+            zip: zipResult,
+            state: stateResult,
         };
         report.artifacts.push(await shot(page, "04-recipient-filled"));
+
+        // ---- PRE-GENERATION GATE -------------------------------------------
+        // Every required recipient field must be positively confirmed BEFORE we
+        // click Generate Library Letter. State is confirmed via its resulting
+        // value ("TX"); the rest via their confirmed flags.
+        const recipientConfirmed = {
+            companyName: { intended: DISCOVERY_RECIPIENT.companyName, confirmed: companyResult.confirmed === true, resulting: companyResult.resultingValue },
+            address: { intended: DISCOVERY_RECIPIENT.address, confirmed: addressResult.confirmed === true, resulting: addressResult.resultingValue },
+            city: { intended: DISCOVERY_RECIPIENT.city, confirmed: cityResult.confirmed === true, resulting: cityResult.resultingValue },
+            state: { intended: DISCOVERY_RECIPIENT.state, confirmed: stateResult.ok === true && normalizeFieldValue(stateResult.resultingValue ?? "").includes(DISCOVERY_RECIPIENT.state), resulting: stateResult.resultingValue },
+            zip: { intended: DISCOVERY_RECIPIENT.zip, confirmed: zipResult.confirmed === true, resulting: zipResult.resultingValue },
+        };
+        report.recipientConfirmed = recipientConfirmed;
+
+        const unconfirmed = Object.entries(recipientConfirmed)
+            .filter(([, v]) => !v.confirmed)
+            .map(([k]) => k);
+        if (unconfirmed.length > 0) {
+            report.blockedStage = "recipient_validation";
+            report.blockedReason =
+                `Required recipient field(s) not positively confirmed before generation: ` +
+                `${unconfirmed.join(", ")}. Stopping before clicking Generate Library Letter.`;
+            report.blockingGaps.push("recipient_fields_unconfirmed");
+            report.artifacts.push(await shot(page, "04b-recipient-unconfirmed"));
+            return report;
+        }
 
         // ---- STAGE 5: click GENERATE LIBRARY LETTER (the outlined one) ------
         //
@@ -600,6 +731,30 @@ export async function discoverM8CrcV2(data = {}) {
         // (1) Let any CRC loading overlay clear using the SAME stabilization
         // pattern already added for the generate-letters page.
         await waitForOverlayCleared(page);
+
+        // ---- POST-CLICK RECIPIENT VALIDATION -------------------------------
+        // If CRC rejected the form, it shows "Please enter required fields" and
+        // never advances to the editor. Detect that FIRST — do not wait 30s for a
+        // Froala editor that will never populate.
+        const requiredFieldError = await page.getByText(/please enter required fields/i)
+            .first().isVisible().catch(() => false);
+        if (requiredFieldError) {
+            report.blockedStage = "recipient_validation";
+            report.blockedReason = "CRC rejected one or more required recipient fields";
+            report.blockingGaps.push("crc_required_field_error_after_click");
+            // Capture the ACTUAL post-click values of every recipient control.
+            report.postClickRecipientValues = await page.evaluate(() => {
+                const out = {};
+                for (const el of document.querySelectorAll("input")) {
+                    const fc = el.closest(".MuiFormControl-root, .MuiTextField-root");
+                    const label = fc ? (fc.querySelector("label")?.textContent || "").trim() : null;
+                    if (label) out[label] = el.value;
+                }
+                return out;
+            }).catch(() => null);
+            report.artifacts.push(await shot(page, "05-recipient-rejected"));
+            return report;
+        }
 
         // (2/3) NEW-PAGE DETECTION. If the click opened a new tab, adopt it ONLY
         // after confirming it is CRC and the SAME client (15). Otherwise stay put.
