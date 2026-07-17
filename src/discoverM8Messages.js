@@ -25,9 +25,16 @@ const AUTHORIZED_CLIENT_NAME = "Elizabeth Kelley";
 
 // Never click anything that could send/submit/upload during discovery.
 const FORBIDDEN = [/submit/i, /^send\b/i, /upload/i, /attach/i, /mail/i, /print/i, /delete/i];
+// Exact-text navigation controls that OPEN the compose form. These do not send,
+// submit, upload, or write anything by themselves, so they are explicitly
+// allowed even though their text contains "Send".
+const ALLOWED_NAV_LABELS = new Set(["Send New Message", "New Message"]);
 function assertNoForbidden(label) {
+    const trimmed = (label ?? "").trim();
+    // Allow the known-safe navigation openers verbatim.
+    if (ALLOWED_NAV_LABELS.has(trimmed)) return;
     for (const re of FORBIDDEN) {
-        if (re.test((label ?? "").trim())) {
+        if (re.test(trimmed)) {
             throw new Error(`DISCOVERY SAFETY: refused to click "${label}".`);
         }
     }
@@ -170,7 +177,15 @@ export async function discoverM8Messages(data = {}) {
         // existing thread). Requires a client recipient field, subject, body
         // editor, and a Submit button — and that we are NOT in an existing
         // conversation/Reply view.
-        const verifyComposeForm = async () => {
+        // After clicking "Send New Message" there is a brief loading spinner and
+        // the compose form renders asynchronously. So we POLL for the real
+        // compose elements to appear (element-appearance-driven, not a fixed
+        // sleep) up to COMPOSE_RENDER_TIMEOUT_MS, and only conclude
+        // "not confirmed" once that wait expires.
+        const COMPOSE_RENDER_TIMEOUT_MS = 15000;
+        const COMPOSE_POLL_MS = 300;
+
+        const readComposeState = async () => {
             const subj = page.getByLabel(/subject/i).or(page.getByPlaceholder(/subject/i)).first();
             const body = page.locator('div.fr-element.fr-view[contenteditable="true"]')
                 .or(page.locator("textarea")).first();
@@ -184,8 +199,7 @@ export async function discoverM8Messages(data = {}) {
             const hasBody = (await body.count()) > 0 && await body.isVisible().catch(() => false);
             const hasClient = (await client.count()) > 0 && await client.isVisible().catch(() => false);
             const hasSubmit = (await submit.count()) > 0 && await submit.isVisible().catch(() => false);
-            // Reply-mode / existing-conversation signal: a visible "Reply" control
-            // or the message-history scroll container being the active editor area.
+            // Reply-mode / existing-conversation signal.
             const replyVisible = await page.getByRole("button", { name: /^reply$/i })
                 .first().isVisible().catch(() => false);
 
@@ -193,6 +207,18 @@ export async function discoverM8Messages(data = {}) {
                 hasSubject, hasBody, hasClient, hasSubmit, replyVisible,
                 ok: hasSubject && hasBody && hasClient && hasSubmit && !replyVisible,
             };
+        };
+
+        const verifyComposeForm = async () => {
+            const deadline = Date.now() + COMPOSE_RENDER_TIMEOUT_MS;
+            let state = await readComposeState();
+            // Wait for the spinner/async render: poll until the compose elements
+            // are present OR the timeout expires. Do NOT conclude failure early.
+            while (!state.ok && Date.now() < deadline) {
+                await page.waitForTimeout(COMPOSE_POLL_MS);
+                state = await readComposeState();
+            }
+            return state;
         };
 
         // Attempt 1: "Send New Message". Attempt 2 (if not confirmed): "New Message".
