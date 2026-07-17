@@ -42,6 +42,81 @@ const DISCOVERY_RECIPIENT = Object.freeze({
 });
 
 // ---------------------------------------------------------------------------
+// CRC PAGE STABILIZATION (reused pattern).
+//
+// This mirrors the proven marker-set stabilization used by
+// src/importAuditState.js -> waitForStableMarkers(): poll at a fixed interval,
+// and require STABLE_INTERVALS_REQUIRED consecutive confirming snapshots within
+// a timeout before trusting the page; ANY change resets the count; if it never
+// settles, FAIL CLOSED. Same constants (250ms interval, 2 intervals, 20s).
+//
+// The only difference is polarity: importAuditState waits for a marker set to
+// APPEAR and hold; here we wait for CRC's loading overlay to be ABSENT and hold,
+// then confirm the target link is visible. We NEVER declare the link missing
+// while a loading overlay is still on screen.
+// ---------------------------------------------------------------------------
+const CONFIRM_INTERVAL_MS = 250;         // same interval as importAuditState.js
+const STABLE_INTERVALS_REQUIRED = 2;     // same confirmation window
+const STABILIZE_TIMEOUT_MS = 20000;      // same 20s ceiling
+
+// CRC's loading overlays. While any of these is visible, the page is still
+// painting and must not be inspected.
+const LOADING_OVERLAY_SELECTORS = [
+    ".MuiBackdrop-root",
+    '[role="progressbar"]',
+    ".MuiCircularProgress-root",
+];
+
+/** True if any loading overlay is currently visible in the main document. */
+async function anyOverlayVisible(page) {
+    return page.evaluate((selectors) => {
+        for (const sel of selectors) {
+            for (const el of document.querySelectorAll(sel)) {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                const shown =
+                    style.display !== "none" &&
+                    style.visibility !== "hidden" &&
+                    style.opacity !== "0" &&
+                    rect.width > 0 && rect.height > 0;
+                if (shown) return true;
+            }
+        }
+        return false;
+    }, LOADING_OVERLAY_SELECTORS).catch(() => false);
+}
+
+/**
+ * Wait for CRC's loading overlay to disappear and STAY gone for
+ * STABLE_INTERVALS_REQUIRED consecutive intervals. Returns true once the page
+ * has held still with no overlay; false if it never settled (FAIL CLOSED — the
+ * caller must not declare elements missing on an unsettled page).
+ */
+async function waitForOverlayCleared(page) {
+    const deadline = Date.now() + STABILIZE_TIMEOUT_MS;
+    let stableIntervals = 0;
+
+    while (Date.now() < deadline) {
+        const overlayUp = await anyOverlayVisible(page);
+
+        if (!overlayUp) {
+            stableIntervals += 1;
+            if (stableIntervals >= STABLE_INTERVALS_REQUIRED) {
+                return true;
+            }
+        } else {
+            // Overlay still (or again) visible — any reappearance resets the count.
+            stableIntervals = 0;
+        }
+
+        await page.waitForTimeout(CONFIRM_INTERVAL_MS);
+    }
+
+    // FAIL CLOSED: the overlay never cleared for the required window.
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // SAFETY DENYLIST. If any helper is ever asked to click a control whose
 // accessible name matches these, it THROWS instead of clicking. Belt-and-
 // suspenders on top of "we simply never call click() on them".
@@ -218,6 +293,23 @@ export async function discoverM8CrcV2(data = {}) {
         }
         report.stagesReached.push("generate_letters");
 
+        // Wait for CRC's loading overlay to clear and hold still (reused
+        // stabilization pattern). We must NOT search for the no-items link while
+        // .MuiBackdrop-root / [role="progressbar"] / .MuiCircularProgress-root is
+        // visible — that was the V1/V2 false-negative. If it never settles, we
+        // record it and stop rather than declare the link missing.
+        report.generateLettersStabilized = await waitForOverlayCleared(page);
+        if (!report.generateLettersStabilized) {
+            report.blockedStage = "generate_letters_stabilize";
+            report.blockedReason =
+                "CRC loading overlay (.MuiBackdrop-root / [role=progressbar] / " +
+                ".MuiCircularProgress-root) did not clear within the stabilization window. " +
+                "Not declaring the no-items link missing on an unsettled page.";
+            report.blockingGaps.push("generate_letters_never_stabilized");
+            report.artifacts.push(await shot(page, "02-overlay-stuck"));
+            return report;
+        }
+
         // ---- STAGE 2: the "generate a letter (with no dispute items)" link --
         // V1 missed it. Capture broadly, then record the resolved locator.
         const noItemsCandidates = [
@@ -226,9 +318,18 @@ export async function discoverM8CrcV2(data = {}) {
             page.getByRole("link", { name: /no dispute items/i }),
             page.getByText(/no dispute items/i),
         ];
+        // Poll for a VISIBLE candidate (the overlay is already cleared, but CRC may
+        // paint the link a beat later). We look for visibility, not mere presence.
         let noItemsLink = null;
-        for (const cand of noItemsCandidates) {
-            if (await cand.count()) { noItemsLink = cand.first(); break; }
+        const linkDeadline = Date.now() + STABILIZE_TIMEOUT_MS;
+        while (Date.now() < linkDeadline && !noItemsLink) {
+            for (const cand of noItemsCandidates) {
+                if ((await cand.count()) && (await cand.first().isVisible().catch(() => false))) {
+                    noItemsLink = cand.first();
+                    break;
+                }
+            }
+            if (!noItemsLink) await page.waitForTimeout(CONFIRM_INTERVAL_MS);
         }
         report.noItemsLinkLocator = noItemsLink ? await describe(noItemsLink) : null;
         if (!noItemsLink) {
