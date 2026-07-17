@@ -14,6 +14,7 @@ import { runProfileRead } from "./src/milestoneProfile.js";
 import { runMilestone6 } from "./src/milestone6.js";
 import { runMilestone7 } from "./src/milestone7.js";
 import { discoverM8Crc } from "./src/discoverM8Crc.js"; // TEMPORARY — M8 discovery only
+import { discoverM8CrcV2 } from "./src/discoverM8CrcV2.js"; // TEMPORARY — M8 discovery V2
 import { extractSkeletonNode, buildLiabilityMap, buildFieldMap, buildCollisionMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
 
 dotenv.config();
@@ -344,6 +345,20 @@ app.post("/milestone-7", async (req, res) => {
 app.post("/discover-m8-crc", async (req, res) => {
     try {
         const result = await discoverM8Crc(req.body);
+        res.json(result);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+        });
+    }
+});
+
+// TEMPORARY — M8 discovery V2 (generation-capable, save-blocked). Remove after discovery.
+app.post("/discover-m8-crc-v2", async (req, res) => {
+    try {
+        const result = await discoverM8CrcV2(req.body);
         res.json(result);
     } catch (error) {
         console.error(error);
