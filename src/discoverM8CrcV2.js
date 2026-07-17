@@ -604,16 +604,28 @@ export async function discoverM8CrcV2(data = {}) {
         const letterCombo = page.locator('input[role="combobox"]').nth(1);
         const letterResult = await selectFromAutocombo(page, letterCombo, "Basic Dispute For Collections");
         report.wizardSelections = { category: catResult, letterName: letterResult };
+        // Record the INITIAL letter-name result for diagnostics. We deliberately
+        // do NOT fail here on a merely "dirty" value (e.g. placeholder still
+        // concatenated, or a dropped leading character) — Stage 3b is the sole
+        // authority for whether the Letter Name committed. We only fail before
+        // Stage 3b if the option itself could not be found or clicked.
+        report.letterNameInitialResult = letterResult;
 
-        // FAIL CLOSED: do not proceed unless the Letter Name is positively
-        // confirmed as "Basic Dispute For Collections" from the combobox's resulting value.
-        if (!letterResult.ok) {
+        // Distinguish "dirty value" (Stage 3b can recover by reselecting) from a
+        // genuine "could not find/click the option" failure. selectFromAutocombo's
+        // dirty-value path returns ok:false with an error that mentions the value
+        // check ("does not contain the requested"); an option find/click failure
+        // returns a different (Playwright) error. Only the latter is fatal here.
+        const letterNameDirtyValue =
+            letterResult.ok === true ||
+            /does not contain the requested/i.test(letterResult.error ?? "");
+        if (!letterNameDirtyValue) {
             report.blockedStage = "letter_name_selection";
             report.blockedReason =
-                `Letter Name not positively confirmed as "Basic Dispute For Collections" ` +
-                `(resulting value: "${letterResult.resultingValue ?? "?"}"). Stopping before generation.`;
-            report.blockingGaps.push("letter_name_not_confirmed");
-            report.artifacts.push(await shot(page, "03b-letter-name-unconfirmed"));
+                `Letter Name option "Basic Dispute For Collections" could not be found or clicked ` +
+                `(${letterResult.error ?? "unknown error"}). Stopping before generation.`;
+            report.blockingGaps.push("letter_name_option_unavailable");
+            report.artifacts.push(await shot(page, "03b-letter-name-option-unavailable"));
             return report;
         }
 
