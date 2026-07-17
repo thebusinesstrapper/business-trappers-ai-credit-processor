@@ -837,13 +837,281 @@ export async function discoverM8CrcV2(data = {}) {
             throw new Error("Final class re-check failed; the resolved button is not the outlined library button.");
         }
         assertClickAllowed("Generate Library Letter");
+
+        // ================= CLICK-TRIGGER DIAGNOSTICS =======================
+        // We already know WHICH button is safe. This block proves whether that
+        // exact element actually received a click and whether CRC reacted.
+
+        // ---- PRE-CLICK CAPTURE --------------------------------------------
+        const fingerprint = async () => {
+            return page.evaluate(() => {
+                const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+                const froala = document.querySelector('div.fr-element.fr-view[contenteditable="true"]');
+                const scope = document.body;
+                return {
+                    visibleText: norm(document.body.innerText).slice(0, 1500),
+                    childCount: scope ? scope.querySelectorAll("*").length : 0,
+                    htmlLength: scope ? scope.innerHTML.length : 0,
+                    froalaHtmlLength: froala ? froala.innerHTML.length : 0,
+                    visibleHeadings: Array.from(document.querySelectorAll("h1,h2,h3,h4"))
+                        .filter((n) => n.getBoundingClientRect().width > 0)
+                        .map((n) => norm(n.textContent)).slice(0, 20),
+                    visibleButtons: Array.from(document.querySelectorAll("button"))
+                        .filter((n) => n.getBoundingClientRect().width > 0)
+                        .map((n) => norm(n.textContent)).filter(Boolean).slice(0, 40),
+                };
+            }).catch(() => null);
+        };
+
+        const buttonStateOf = async (loc) => loc.evaluate((n) => {
+            const rect = n.getBoundingClientRect();
+            const style = window.getComputedStyle(n);
+            return {
+                text: (n.textContent || "").replace(/\s+/g, " ").trim(),
+                classes: n.className && n.className.toString ? n.className.toString() : "",
+                disabledAttr: n.disabled === true,
+                ariaDisabled: n.getAttribute("aria-disabled"),
+                visible: style.display !== "none" && style.visibility !== "hidden" &&
+                    rect.width > 0 && rect.height > 0,
+                enabled: !(n.disabled === true || n.getAttribute("aria-disabled") === "true"),
+                boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+            };
+        }).catch(() => null);
+
+        report.preClickButtonState = { ...(await buttonStateOf(libraryBtn)), elementIndex: safe.i };
+        report.activeElementBeforeClick = await page.evaluate(() => {
+            const a = document.activeElement;
+            return a ? { tag: a.tagName?.toLowerCase(), text: (a.textContent || "").trim().slice(0, 60) } : null;
+        }).catch(() => null);
+        report.currentUrlBeforeClick = page.url();
+        report.froalaHtmlBeforeClick = await page.evaluate(() => {
+            const f = document.querySelector('div.fr-element.fr-view[contenteditable="true"]');
+            return f ? f.innerHTML.length : null;
+        }).catch(() => null);
+        report.wizardDomFingerprintBeforeClick = await fingerprint();
+
+        // ---- RECONFIRM the safe button one final time ----------------------
+        const psb = report.preClickButtonState;
+        const reconfirm =
+            psb && psb.text === "Generate Library Letter" &&
+            /MuiButton-outlined/.test(psb.classes) &&
+            !/MuiButton-contained/.test(psb.classes) &&
+            !/MuiButton-containedSuccess/.test(psb.classes) &&
+            psb.visible === true && psb.enabled === true &&
+            !aiCandidates.some((ai) => ai.i === safe.i);
+        report.safeButtonReconfirmed = reconfirm === true;
+        if (!reconfirm) {
+            report.blockedStage = "library_button_click";
+            report.blockedReason = "Safe library button failed final pre-click reconfirmation.";
+            report.blockingGaps.push("safe_button_reconfirm_failed");
+            report.artifacts.push(await shot(page, "05-button-reconfirm-failed"));
+            return report;
+        }
+
+        // ---- PASSIVE CLICK LISTENER (does not alter CRC's handler) ---------
+        // Attach a capture-phase, passive listener to the EXACT element so we can
+        // prove the real click event reached it. It never calls preventDefault/
+        // stopPropagation, so CRC's own handler runs untouched.
+        await libraryBtn.evaluate((n) => {
+            window.__btClickObserved = false;
+            window.__btClickTs = null;
+            n.__btListener = () => {
+                window.__btClickObserved = true;
+                window.__btClickTs = Date.now();
+            };
+            n.addEventListener("click", n.__btListener, { capture: true, passive: true });
+        }).catch(() => {});
+
+        // ---- NETWORK / CONSOLE / ERROR LISTENERS (click window only) -------
+        const netRequests = [];
+        const netResponses = [];
+        const netFailed = [];
+        const consoleMsgs = [];
+        const pageErrors = [];
+        const clickT0 = Date.now();
+        const sanitizeUrl = (u) => (u || "")
+            .replace(/([?&](token|sig|signature|key|auth|sessionid|session_id)=)[^&\s]+/gi, "$1REDACTED")
+            .slice(0, 300);
+        const relevant = (u) => !/browserbase\.com|cometondemand\.net|intercom/i.test(u || "");
+
+        const onRequest = (req) => {
+            const u = req.url();
+            if (!relevant(u)) return;
+            netRequests.push({
+                method: req.method(),
+                url: sanitizeUrl(u),
+                resourceType: req.resourceType(),
+                tSinceClickMs: Date.now() - clickT0,
+            });
+        };
+        const onResponse = async (res) => {
+            const u = res.url();
+            if (!relevant(u)) return;
+            netResponses.push({
+                method: res.request().method(),
+                url: sanitizeUrl(u),
+                status: res.status(),
+                resourceType: res.request().resourceType(),
+                tSinceClickMs: Date.now() - clickT0,
+            });
+        };
+        const onFailed = (req) => {
+            const u = req.url();
+            if (!relevant(u)) return;
+            netFailed.push({
+                method: req.method(),
+                url: sanitizeUrl(u),
+                resourceType: req.resourceType(),
+                failure: req.failure()?.errorText ?? null,
+                tSinceClickMs: Date.now() - clickT0,
+            });
+        };
+        const onConsole = (msg) => {
+            consoleMsgs.push({ type: msg.type(), text: (msg.text() || "").slice(0, 200) });
+        };
+        const onPageError = (err) => { pageErrors.push({ message: (err.message || "").slice(0, 200) }); };
+
+        page.on("request", onRequest);
+        page.on("response", onResponse);
+        page.on("requestfailed", onFailed);
+        page.on("console", onConsole);
+        page.on("pageerror", onPageError);
+
         const urlBeforeClick = page.url();
         const pagesBeforeClick = context.pages().length;
-        await libraryBtn.click({ timeout: 20000 });
 
-        // (1) Let any CRC loading overlay clear using the SAME stabilization
-        // pattern already added for the generate-letters page.
+        // ---- CLICK SEQUENCE (no force:true) --------------------------------
+        let clickError = null;
+        try {
+            await libraryBtn.scrollIntoViewIfNeeded({ timeout: 8000 });
+            await libraryBtn.waitFor({ state: "visible", timeout: 8000 });
+            const stillEnabled = (await buttonStateOf(libraryBtn))?.enabled === true;
+            if (!stillEnabled) throw new Error("Button became disabled before click.");
+            await libraryBtn.focus().catch(() => {});
+            await libraryBtn.click({ timeout: 20000 });
+        } catch (e) {
+            clickError = e.message;
+        }
+
+        // Give CRC a brief window to react, then read the click-observed flag.
+        await page.waitForTimeout(1200);
+        const clickObserved = await page.evaluate(() => ({
+            observed: window.__btClickObserved === true,
+            ts: window.__btClickTs ?? null,
+        })).catch(() => ({ observed: false, ts: null }));
+        report.safeButtonClickEventObserved = clickObserved.observed;
+        report.safeButtonClickEventTimestamp = clickObserved.ts;
+
+        // Detach the passive listener (cleanup; never touched CRC's handler).
+        await libraryBtn.evaluate((n) => {
+            if (n.__btListener) n.removeEventListener("click", n.__btListener, { capture: true });
+        }).catch(() => {});
+
+        // ---- Let CRC settle, then POST-CLICK CAPTURE -----------------------
         await waitForOverlayCleared(page);
+
+        // Stop network/console listeners; we only wanted the click window.
+        page.off("request", onRequest);
+        page.off("response", onResponse);
+        page.off("requestfailed", onFailed);
+        page.off("console", onConsole);
+        page.off("pageerror", onPageError);
+
+        report.observedNetworkRequests = netRequests;
+        report.observedNetworkResponses = netResponses;
+        report.observedFailedRequests = netFailed;
+        report.observedConsoleMessages = consoleMsgs.slice(0, 40);
+        report.observedPageErrors = pageErrors.slice(0, 20);
+
+        report.postClickButtonState = await buttonStateOf(libraryBtn);
+        report.activeElementAfterClick = await page.evaluate(() => {
+            const a = document.activeElement;
+            return a ? { tag: a.tagName?.toLowerCase(), text: (a.textContent || "").trim().slice(0, 60) } : null;
+        }).catch(() => null);
+        report.currentUrlAfterClick = page.url();
+
+        const fpAfter = await fingerprint();
+        report.wizardDomFingerprintAfterClick = fpAfter;
+        report.froalaHtmlAfterClick = fpAfter?.froalaHtmlLength ?? null;
+
+        // ---- CHANGE DETECTION ----------------------------------------------
+        const fpBefore = report.wizardDomFingerprintBeforeClick;
+        const domChanged = !!fpBefore && !!fpAfter && (
+            fpBefore.childCount !== fpAfter.childCount ||
+            fpBefore.htmlLength !== fpAfter.htmlLength ||
+            fpBefore.froalaHtmlLength !== fpAfter.froalaHtmlLength ||
+            fpBefore.visibleText !== fpAfter.visibleText
+        );
+        report.domMutationObserved = domChanged;
+        report.domMutationCount = fpBefore && fpAfter
+            ? Math.abs((fpAfter.childCount ?? 0) - (fpBefore.childCount ?? 0))
+            : null;
+        report.froalaHtmlChanged =
+            (report.froalaHtmlBeforeClick ?? null) !== (fpAfter?.froalaHtmlLength ?? null);
+        report.urlChanged = urlBeforeClick !== page.url();
+        report.buttonDisabledChanged =
+            (report.preClickButtonState?.enabled === true) &&
+            (report.postClickButtonState?.enabled === false);
+        report.visibleMessagesAfterClick = await page.evaluate(() => {
+            const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+            const out = [];
+            for (const sel of [".MuiAlert-message", '[role="alert"]', ".Toastify__toast", ".toast", ".error", ".MuiSnackbar-root"]) {
+                for (const el of document.querySelectorAll(sel)) {
+                    const t = norm(el.textContent);
+                    if (t) out.push(t.slice(0, 160));
+                }
+            }
+            return out.slice(0, 20);
+        }).catch(() => []);
+        report.requiredFieldErrorAfterClick = await page.getByText(/please enter required fields/i)
+            .first().isVisible().catch(() => false);
+
+        // ---- TRIGGER EVIDENCE ----------------------------------------------
+        const relevantResponse = netResponses.some((r) => r.status && r.status < 500);
+        const evidence = {
+            clickEventReceived: report.safeButtonClickEventObserved === true,
+            networkRequestFollowed: netRequests.length > 0,
+            networkResponseCompleted: relevantResponse,
+            buttonDisabledChanged: report.buttonDisabledChanged === true,
+            domChanged: report.domMutationObserved === true,
+            froalaHtmlChanged: report.froalaHtmlChanged === true,
+            urlChanged: report.urlChanged === true,
+            messageAppeared: (report.visibleMessagesAfterClick?.length ?? 0) > 0 ||
+                report.requiredFieldErrorAfterClick === true,
+        };
+        report.generationTriggerEvidence = evidence;
+        report.generationTriggered =
+            evidence.clickEventReceived && (
+                evidence.networkRequestFollowed || evidence.networkResponseCompleted ||
+                evidence.buttonDisabledChanged || evidence.domChanged ||
+                evidence.froalaHtmlChanged || evidence.urlChanged || evidence.messageAppeared
+            );
+
+        // ---- FAILURE CLASSIFICATION ----------------------------------------
+        if (!report.safeButtonClickEventObserved) {
+            report.blockedStage = "library_button_click";
+            report.blockedReason = "Generate Library Letter did not receive the click event";
+            report.blockingGaps.push("safe_button_no_click_event");
+            if (clickError) report.libraryClickError = clickError;
+            report.artifacts.push(await shot(page, "05-no-click-event"));
+            return report;
+        }
+        if (netFailed.length > 0 && !relevantResponse) {
+            report.blockedStage = "library_generation_request";
+            report.blockedReason = "CRC library-letter generation request failed";
+            report.blockingGaps.push("library_generation_request_failed");
+            report.artifacts.push(await shot(page, "05-generation-request-failed"));
+            return report;
+        }
+        if (!report.generationTriggered) {
+            report.blockedStage = "library_generation_trigger";
+            report.blockedReason = "Generate Library Letter click produced no observable CRC state change";
+            report.blockingGaps.push("library_generation_no_state_change");
+            report.artifacts.push(await shot(page, "05-generation-no-change"));
+            return report;
+        }
+        // Positive evidence CRC generation was triggered -> continue to editor.
+        // ====================================================================
 
         // ---- POST-CLICK RECIPIENT VALIDATION -------------------------------
         // If CRC rejected the form, it shows "Please enter required fields" and
