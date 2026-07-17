@@ -1010,18 +1010,16 @@ export async function discoverM8CrcV2(data = {}) {
         // ---- Let CRC settle, then POST-CLICK CAPTURE -----------------------
         await waitForOverlayCleared(page);
 
-        // Stop network/console listeners; we only wanted the click window.
-        page.off("request", onRequest);
-        page.off("response", onResponse);
-        page.off("requestfailed", onFailed);
-        page.off("console", onConsole);
-        page.off("pageerror", onPageError);
-
+        // NOTE: network/console listeners stay ATTACHED through the editor-
+        // readiness gate below, so we can capture the generation request's
+        // response or failure (which arrives asynchronously, after the click
+        // window). They are detached once the gate resolves. We record a first
+        // snapshot here; the arrays keep filling by reference until detach.
         report.observedNetworkRequests = netRequests;
         report.observedNetworkResponses = netResponses;
         report.observedFailedRequests = netFailed;
-        report.observedConsoleMessages = consoleMsgs.slice(0, 40);
-        report.observedPageErrors = pageErrors.slice(0, 20);
+        report.observedConsoleMessages = consoleMsgs;
+        report.observedPageErrors = pageErrors;
 
         report.postClickButtonState = await buttonStateOf(libraryBtn);
         report.activeElementAfterClick = await page.evaluate(() => {
@@ -1138,6 +1136,12 @@ export async function discoverM8CrcV2(data = {}) {
                 return out;
             }).catch(() => null);
             report.artifacts.push(await shot(page, "05-recipient-rejected"));
+            // Clean up the click-window listeners before returning early.
+            page.off("request", onRequest);
+            page.off("response", onResponse);
+            page.off("requestfailed", onFailed);
+            page.off("console", onConsole);
+            page.off("pageerror", onPageError);
             return report;
         }
 
@@ -1178,77 +1182,168 @@ export async function discoverM8CrcV2(data = {}) {
 
         // (4) ENUMERATE every Froala candidate and capture its state.
         const froalaSelector = 'div.fr-element.fr-view[contenteditable="true"]';
-        const candidates = await page.locator(froalaSelector).evaluateAll((nodes) => {
+
+        // ================= LETTER EDITOR READINESS GATE ====================
+        // CRC opens the editor and populates Froala ASYNCHRONOUSLY (the prior run
+        // inspected while the wrapper was still `fr-wrapper show-placeholder`,
+        // innerHTML length 11, Characters:0). So we POLL until the active editor is
+        // genuinely populated, allowing a long timeout, and record a timeline.
+        //
+        // Readiness conditions for the unique active candidate (all applicable):
+        //   - its Froala .fr-box container is visible;
+        //   - the wrapper no longer carries `show-placeholder` (when CRC removes it);
+        //   - innerHTML length exceeds the empty-placeholder length;
+        //   - text OR image content is present (signature may be an image);
+        //   - Characters/Words count leaves zero, when readable.
+        // We do NOT require visible text alone (an image-only signature is valid).
+        const EMPTY_PLACEHOLDER_HTML_LEN = 11;   // observed empty Froala innerHTML length
+        const EDITOR_READY_TIMEOUT_MS = 90000;   // CRC may populate slowly via Browserbase
+        const readinessTimeline = [];
+
+        // Snapshot every Froala candidate's state (read-only; never edits).
+        const snapshotCandidates = async () => page.locator(froalaSelector).evaluateAll((nodes) => {
+            const readCount = (labelRe) => {
+                // Try to read "Characters : N" / "Words : N" counters if present.
+                const m = Array.from(document.querySelectorAll("*"))
+                    .map((e) => (e.childElementCount === 0 ? (e.textContent || "") : ""))
+                    .find((t) => labelRe.test(t));
+                if (!m) return null;
+                const num = m.match(/(\d+)/);
+                return num ? parseInt(num[1], 10) : null;
+            };
+            const charCount = readCount(/characters\s*:/i);
+            const wordCount = readCount(/words\s*:/i);
             return nodes.map((n, i) => {
                 const rect = n.getBoundingClientRect();
                 const style = window.getComputedStyle(n);
                 const box = n.closest(".fr-box");
-                const boxVisible = box
-                    ? (() => {
-                        const bs = window.getComputedStyle(box);
-                        const br = box.getBoundingClientRect();
-                        return bs.display !== "none" && bs.visibility !== "hidden" &&
-                            br.width > 0 && br.height > 0;
-                    })()
-                    : false;
+                const wrapper = n.closest(".fr-wrapper");
+                const boxVisible = box ? (() => {
+                    const bs = window.getComputedStyle(box);
+                    const br = box.getBoundingClientRect();
+                    return bs.display !== "none" && bs.visibility !== "hidden" && br.width > 0 && br.height > 0;
+                })() : false;
                 const html = n.innerHTML || "";
                 const text = (n.textContent || "").trim();
+                const imgCount = n.querySelectorAll("img").length;
                 return {
                     index: i,
-                    visible:
-                        style.display !== "none" && style.visibility !== "hidden" &&
+                    visible: style.display !== "none" && style.visibility !== "hidden" &&
                         rect.width > 0 && rect.height > 0,
                     boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+                    wrapperClasses: wrapper ? (wrapper.className || "") : "",
+                    frBoxVisible: boxVisible,
                     innerHtmlLength: html.length,
                     textLength: text.length,
-                    frBoxVisible: boxVisible,
-                    parentClasses: n.parentElement ? (n.parentElement.className || "") : "",
+                    imageCount: imgCount,
+                    charCount,
+                    wordCount,
+                    hasPlaceholder: wrapper ? /show-placeholder/.test(wrapper.className || "") : false,
                 };
             });
         }).catch(() => []);
-        report.froalaCandidates = candidates;
 
-        // (5) Select the UNIQUE active editor: visible, nonzero box, inside a
-        // visible .fr-box, populated (nonempty HTML or text). NEVER .first().
-        const activeCandidates = candidates.filter((c) =>
+        // Is this candidate a READY, populated active editor?
+        const isReady = (c) =>
             c.visible &&
             c.boundingBox.width > 0 && c.boundingBox.height > 0 &&
             c.frBoxVisible &&
-            (c.innerHtmlLength > 0 || c.textLength > 0)
-        );
+            !c.hasPlaceholder &&
+            c.innerHtmlLength > EMPTY_PLACEHOLDER_HTML_LEN &&
+            (c.textLength > 0 || c.imageCount > 0);
 
-        if (activeCandidates.length === 0) {
-            return await failEditorActivation(page, context, report,
-                "No visible, populated Froala editor appeared after generation.");
+        // Poll: first wait for the "Letter Editor (...)" heading, then for a ready
+        // editor, requiring two consecutive stable ready snapshots.
+        const readyDeadline = Date.now() + EDITOR_READY_TIMEOUT_MS;
+        let headingSeen = false;
+        let readyIndex = -1;
+        let stableReady = 0;
+        let lastSnapshot = [];
+
+        while (Date.now() < readyDeadline) {
+            // (1) heading gate
+            if (!headingSeen) {
+                headingSeen = await page.getByRole("heading", { name: /letter editor/i })
+                    .first().isVisible().catch(() => false);
+                if (!headingSeen) {
+                    headingSeen = await page.getByText(/letter editor \(/i).first().isVisible().catch(() => false);
+                }
+            }
+
+            const snap = await snapshotCandidates();
+            lastSnapshot = snap;
+            const readyCandidates = snap.filter(isReady);
+            readinessTimeline.push({
+                tSinceGateStartMs: EDITOR_READY_TIMEOUT_MS - (readyDeadline - Date.now()),
+                headingSeen,
+                candidateCount: snap.length,
+                readyCount: readyCandidates.length,
+                genResponseCount: netResponses.length,
+                genFailedCount: netFailed.length,
+            });
+
+            // (2) generation request completion: a completed response or explicit
+            //     failure for the generation-related request. If it explicitly
+            //     failed and nothing populated, we surface that below.
+            if (headingSeen && readyCandidates.length === 1) {
+                const idx = readyCandidates[0].index;
+                if (idx === readyIndex) {
+                    stableReady += 1;
+                } else {
+                    stableReady = 1;
+                    readyIndex = idx;
+                }
+                if (stableReady >= STABLE_INTERVALS_REQUIRED) break; // ready + stable
+            } else {
+                // Ambiguous (more than one ready) resets; keep polling — CRC may be
+                // mid-render. We only fail closed on ambiguity at the very end.
+                stableReady = 0;
+                readyIndex = readyCandidates.length > 1 ? -2 : -1; // -2 marks ambiguity
+            }
+
+            await page.waitForTimeout(CONFIRM_INTERVAL_MS);
         }
-        if (activeCandidates.length > 1) {
-            return await failEditorActivation(page, context, report,
-                `Ambiguous: ${activeCandidates.length} visible populated Froala editors remain.`);
+
+        // Detach network/console listeners now that the gate has resolved.
+        page.off("request", onRequest);
+        page.off("response", onResponse);
+        page.off("requestfailed", onFailed);
+        page.off("console", onConsole);
+        page.off("pageerror", onPageError);
+
+        // Record final diagnostics regardless of outcome.
+        report.editorReadinessTimeline = readinessTimeline.slice(-120);
+        report.finalFroalaCandidates = lastSnapshot;
+        report.completedGenerationResponses = netResponses;
+        report.failedGenerationRequests = netFailed;
+        report.froalaCandidates = lastSnapshot;
+
+        // If the generation request explicitly FAILED and no editor populated.
+        if (readyIndex < 0 && netFailed.length > 0) {
+            report.blockedStage = "library_generation_request";
+            report.blockedReason = "CRC library-letter generation request failed";
+            report.blockingGaps.push("library_generation_request_failed");
+            report.finalEditorPageText = (await page.evaluate(() => document.body?.innerText || "")
+                .catch(() => "")).slice(0, 3000);
+            report.artifacts.push(await shot(page, "05-generation-request-failed"));
+            return report;
         }
-        const activeIndex = activeCandidates[0].index;
+
+        // Heading appeared but editor never populated within the timeout.
+        if (readyIndex < 0) {
+            report.blockedStage = "editor_population";
+            report.blockedReason =
+                "Letter Editor opened, but Froala content did not populate before timeout";
+            report.blockingGaps.push("editor_did_not_populate");
+            report.finalEditorPageText = (await page.evaluate(() => document.body?.innerText || "")
+                .catch(() => "")).slice(0, 3000);
+            report.artifacts.push(await shot(page, "05-editor-population-timeout"));
+            return report;
+        }
+
+        // Ready + stable: bind the unique active editor. NEVER .first().
+        const activeIndex = readyIndex;
         const froala = page.locator(froalaSelector).nth(activeIndex);
-
-        // (6) Require the selected editor to stay visible + populated for two
-        // consecutive 250ms confirmation intervals (same window as elsewhere).
-        let editorStable = 0;
-        const editorDeadline = Date.now() + STABILIZE_TIMEOUT_MS;
-        while (Date.now() < editorDeadline && editorStable < STABLE_INTERVALS_REQUIRED) {
-            const okNow = await froala.evaluate((n) => {
-                const rect = n.getBoundingClientRect();
-                const style = window.getComputedStyle(n);
-                const visible = style.display !== "none" && style.visibility !== "hidden" &&
-                    rect.width > 0 && rect.height > 0;
-                const populated = (n.innerHTML || "").length > 0 || (n.textContent || "").trim().length > 0;
-                return visible && populated;
-            }).catch(() => false);
-            editorStable = okNow ? editorStable + 1 : 0;
-            if (editorStable < STABLE_INTERVALS_REQUIRED) await page.waitForTimeout(CONFIRM_INTERVAL_MS);
-        }
-        if (editorStable < STABLE_INTERVALS_REQUIRED) {
-            return await failEditorActivation(page, context, report,
-                "The active editor did not remain visible+populated for the confirmation window.");
-        }
-
         report.stagesReached.push("editor_populated");
         report.froalaEditorLocator = `${froalaSelector} >> nth=${activeIndex}`;
         report.activeEditorIndex = activeIndex;
