@@ -617,6 +617,76 @@ export async function discoverM8CrcV2(data = {}) {
             return report;
         }
 
+        // ---- STAGE 3b: LETTER NAME EXACT-VALUE STABILIZATION ----------------
+        // The substring confirmation inside selectFromAutocombo can pass while the
+        // combobox still shows the placeholder concatenated with the option
+        // (e.g. "Select a LetterBasic Dispute For Collections"). In that state CRC
+        // has NOT committed the selection and never renders the outlined
+        // "Generate Library Letter" button (safeCount:0). So here we require the
+        // combobox's NORMALIZED displayed value to EQUAL exactly the target, poll
+        // for two consecutive clean checks, and reselect once if needed.
+        const LETTER_NAME_EXACT = "Basic Dispute For Collections";
+        const LETTER_NAME_TIMEOUT_MS = 15000;
+        const letterNameValueTimeline = [];
+        let letterNameReselected = false;
+        let finalLetterNameValue = null;
+
+        // Read + normalize the Letter Name combobox value (reacquired fresh each
+        // time so we never trust a stale handle).
+        const readLetterName = async () =>
+            normalizeComboValue(await page.locator('input[role="combobox"]').nth(1)
+                .inputValue().catch(() => ""));
+
+        // Value is committed only if it equals the target EXACTLY and does not
+        // contain the placeholder text.
+        const isClean = (v) => v === LETTER_NAME_EXACT && !/Select a Letter/i.test(v);
+
+        // Poll for two consecutive clean reads within the timeout.
+        const stabilizeLetterName = async () => {
+            let cleanStreak = 0;
+            const deadline = Date.now() + LETTER_NAME_TIMEOUT_MS;
+            while (Date.now() < deadline) {
+                const v = await readLetterName();
+                finalLetterNameValue = v;
+                letterNameValueTimeline.push({
+                    tMs: LETTER_NAME_TIMEOUT_MS - (deadline - Date.now()),
+                    value: v,
+                    clean: isClean(v),
+                });
+                cleanStreak = isClean(v) ? cleanStreak + 1 : 0;
+                if (cleanStreak >= STABLE_INTERVALS_REQUIRED) return true;
+                await page.waitForTimeout(CONFIRM_INTERVAL_MS);
+            }
+            return false;
+        };
+
+        let letterNameStable = await stabilizeLetterName();
+
+        // If still not clean, reselect the exact option ONCE and re-stabilize.
+        if (!letterNameStable) {
+            letterNameReselected = true;
+            const reselect = await selectFromAutocombo(
+                page,
+                page.locator('input[role="combobox"]').nth(1),
+                LETTER_NAME_EXACT
+            );
+            report.letterNameReselectResult = reselect;
+            letterNameStable = await stabilizeLetterName();
+        }
+
+        report.letterNameValueTimeline = letterNameValueTimeline.slice(-80);
+        report.letterNameReselected = letterNameReselected;
+        report.finalLetterNameValue = finalLetterNameValue;
+
+        if (!letterNameStable) {
+            report.blockedStage = "letter_name_stabilization";
+            report.blockedReason =
+                "Letter Name did not stabilize to exact value Basic Dispute For Collections";
+            report.blockingGaps.push("letter_name_not_stabilized");
+            report.artifacts.push(await shot(page, "03c-letter-name-not-stabilized"));
+            return report;
+        }
+
         // ---- STAGE 4: map the recipient fields, then fill them --------------
         // V1 could not map Company/Address/City/ZIP (shared id="outlined-basic",
         // no labels). Map them positionally by their surrounding MUI label text.
