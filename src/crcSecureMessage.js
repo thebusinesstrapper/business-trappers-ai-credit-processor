@@ -45,26 +45,102 @@ function fail(stage, reason, extra = {}) {
  * Navigate to Messages and open a TRUE New Message compose form (not Reply).
  * Reuses the exact-text opener + async-render wait proven in discovery.
  */
+// Compose-render wait window (matches the proven discovery timing).
+const COMPOSE_RENDER_TIMEOUT_MS = 15000;
+const COMPOSE_POLL_MS = 300;
+
+/**
+ * Open a TRUE New Message compose form — ported verbatim from the proven
+ * src/discoverM8Messages.js logic. It ENUMERATES buttons/links, clicks ONLY an
+ * element whose normalized EXACT text is "Send New Message" (or "New Message"),
+ * excludes the red notifications icon (aria-describedby="messagesMenu" /
+ * MuiIconButton / data-testid="IconButton"), then verifies the FULL compose form
+ * is present (client_id, subject, Froala body, file input, exact-text Submit) and
+ * that we are NOT in Reply/existing-thread mode — polling up to 15s for the async
+ * render. Returns true only when the full compose form is confirmed.
+ */
 async function openComposeForm(page, crcClientId) {
     await page.goto(
         `https://app.creditrepaircloud.com/app/messages/all/${crcClientId}`,
         { waitUntil: "domcontentloaded" }
     );
-    // Click the exact-text "Send New Message" (toggle) — never the notif icon.
-    const sendNew = page.getByRole("button", { name: "Send New Message", exact: true })
-        .or(page.getByText("Send New Message", { exact: true })).first();
-    if (await sendNew.count()) {
-        await sendNew.click({ timeout: 10000 }).catch(() => {});
-    } else {
-        const newMsg = page.getByRole("button", { name: "New Message", exact: true }).first();
-        if (await newMsg.count()) await newMsg.click({ timeout: 10000 }).catch(() => {});
+
+    // Enumerate every button/link with the fields the safe-opener check needs.
+    const enumerated = await page.locator("button, a").evaluateAll((nodes) =>
+        nodes.map((n, i) => {
+            const r = n.getBoundingClientRect();
+            return {
+                i,
+                tag: n.tagName.toLowerCase(),
+                text: (n.textContent || "").replace(/\s+/g, " ").trim(),
+                classes: (n.className && n.className.toString) ? n.className.toString() : "",
+                ariaDescribedby: n.getAttribute("aria-describedby"),
+                dataTestid: n.getAttribute("data-testid"),
+                visible: r.width > 0 && r.height > 0,
+            };
+        })
+    ).catch(() => []);
+
+    // Safe opener: EXACT text, visible, NOT the notifications menu icon, NOT a
+    // MUI IconButton (the "7" badge is an IconButton bound to messagesMenu).
+    const isSafeOpener = (c, exactText) =>
+        c.visible &&
+        c.text === exactText &&
+        c.ariaDescribedby !== "messagesMenu" &&
+        !/MuiIconButton-root/.test(c.classes) &&
+        c.dataTestid !== "IconButton";
+
+    const sendNewMsg = enumerated.filter((c) => isSafeOpener(c, "Send New Message"));
+    const newMsg = enumerated.filter((c) => isSafeOpener(c, "New Message"));
+
+    // Read the FULL compose-form state (same signals discovery proved).
+    const readComposeState = async () => {
+        const client = page.locator('input[name="client_id"]').first();
+        const subject = page.locator('input[name="subject"]').first();
+        const body = page.locator('div.fr-element.fr-view[contenteditable="true"]')
+            .or(page.locator("textarea")).first();
+        const fileInput = page.locator('input[type="file"]').first();
+        const submit = page.getByRole("button", { name: "Submit", exact: true }).first();
+
+        const hasClient = (await client.count()) > 0 && await client.isVisible().catch(() => false);
+        const hasSubject = (await subject.count()) > 0 && await subject.isVisible().catch(() => false);
+        const hasBody = (await body.count()) > 0 && await body.isVisible().catch(() => false);
+        const hasFile = (await fileInput.count()) > 0; // hidden input: presence, not visibility
+        const hasSubmit = (await submit.count()) > 0 && await submit.isVisible().catch(() => false);
+        // Reply-mode / existing-conversation signal (must be ABSENT).
+        const replyVisible = await page.getByRole("button", { name: /^reply$/i })
+            .first().isVisible().catch(() => false);
+
+        return {
+            hasClient, hasSubject, hasBody, hasFile, hasSubmit, replyVisible,
+            ok: hasClient && hasSubject && hasBody && hasFile && hasSubmit && !replyVisible,
+        };
+    };
+
+    // Poll for the async compose render (spinner) up to the timeout.
+    const verifyComposeForm = async () => {
+        const deadline = Date.now() + COMPOSE_RENDER_TIMEOUT_MS;
+        let state = await readComposeState();
+        while (!state.ok && Date.now() < deadline) {
+            await page.waitForTimeout(COMPOSE_POLL_MS);
+            state = await readComposeState();
+        }
+        return state;
+    };
+
+    // Click the chosen safe opener by its EXACT enumerated index (never loose
+    // text). Try "Send New Message" first, then "New Message".
+    const clickByIndex = async (i) => {
+        await page.locator("button, a").nth(i).click({ timeout: 10000 }).catch(() => {});
+    };
+
+    if (sendNewMsg.length > 0) {
+        await clickByIndex(sendNewMsg[0].i);
+        if ((await verifyComposeForm()).ok) return true;
     }
-    // Wait (bounded, appearance-driven) for the compose form to render.
-    const deadline = Date.now() + 15000;
-    while (Date.now() < deadline) {
-        const ready = await page.locator('input[name="client_id"]').first().isVisible().catch(() => false);
-        if (ready) return true;
-        await page.waitForTimeout(300);
+    if (newMsg.length > 0) {
+        await clickByIndex(newMsg[0].i);
+        if ((await verifyComposeForm()).ok) return true;
     }
     return false;
 }
