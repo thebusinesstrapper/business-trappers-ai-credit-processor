@@ -1,7 +1,8 @@
 /**
  * crcSecureMessage.js — CRC secure-message delivery for M8 (Elizabeth Kelley test).
  *
- * Sends the M7 bureau-letter PDFs to a client through CRC Messages -> New Message,
+ * Sends the M7 bureau-letter PDFs to a client via the client dashboard
+ * "Send Secure Message" button (which opens compose with the client prefilled),
  * attaching each PDF separately, verifying every filename, and requiring the exact
  * success confirmation before reporting success. It NEVER prints/mails/submits to a
  * bureau, never uses the broken library-letter path, and treats a Submit click as
@@ -41,26 +42,12 @@ function fail(stage, reason, extra = {}) {
     return { ok: false, failedStage: stage, failureReason: reason, ...extra };
 }
 
-/**
- * Navigate to Messages and open a TRUE New Message compose form (not Reply).
- * Reuses the exact-text opener + async-render wait proven in discovery.
- */
-// Compose-render wait window (matches the proven discovery timing).
+// Compose-render wait window (spinner after the dashboard "Send Secure Message" click).
 const COMPOSE_RENDER_TIMEOUT_MS = 15000;
 const COMPOSE_POLL_MS = 300;
 
-/**
- * Open a TRUE New Message compose form — ported verbatim from the proven
- * src/discoverM8Messages.js logic. It ENUMERATES buttons/links, clicks ONLY an
- * element whose normalized EXACT text is "Send New Message" (or "New Message"),
- * excludes the red notifications icon (aria-describedby="messagesMenu" /
- * MuiIconButton / data-testid="IconButton"), then verifies the FULL compose form
- * is present (client_id, subject, Froala body, file input, exact-text Submit) and
- * that we are NOT in Reply/existing-thread mode — polling up to 15s for the async
- * render. Returns true only when the full compose form is confirmed.
- */
 async function openComposeForm(page, crcClientId) {
-    // ---- DIAGNOSTIC-ONLY instrumentation. Selector behavior is UNCHANGED. ----
+    // ---- DIAGNOSTIC-ONLY logging. ----
     const log = (...args) => console.log("[M8 openCompose]", ...args);
     const snap = async (name) => {
         try { await page.screenshot({ path: `/tmp/m8-compose-${name}.png`, fullPage: false });
@@ -68,63 +55,37 @@ async function openComposeForm(page, crcClientId) {
         catch (e) { log(`screenshot ${name} failed: ${e.message}`); }
     };
 
-    // (1) URL before navigating to Messages.
-    log("URL before Messages navigation:", page.url());
+    // Requirement: open the secure-message compose flow from the CLIENT DASHBOARD
+    // via the exact green "Send Secure Message" button — NOT the Messages tab, NOT
+    // a FAB. The dashboard opens compose with the client already prefilled.
 
-    // (2) The exact action used to open Messages.
-    const messagesUrl = `https://app.creditrepaircloud.com/app/messages/all/${crcClientId}`;
-    log("Opening Messages via page.goto:", messagesUrl);
-    await page.goto(messagesUrl, { waitUntil: "domcontentloaded" });
+    // (1) Ensure we are on the client dashboard.
+    const dashboardUrl = `https://app.creditrepaircloud.com/app/clients/${crcClientId}/dashboard`;
+    if (!page.url().includes(`/clients/${crcClientId}/dashboard`)) {
+        log("navigating to client dashboard:", dashboardUrl);
+        await page.goto(dashboardUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
+    }
+    log("dashboard URL before click:", page.url());
 
-    // (3) URL after Messages navigation.
-    log("URL after Messages navigation:", page.url());
-
-    // Enumerate every button/link with the fields the safe-opener check needs.
-    const enumerated = await page.locator("button, a").evaluateAll((nodes) =>
-        nodes.map((n, i) => {
-            const r = n.getBoundingClientRect();
-            return {
-                i,
-                tag: n.tagName.toLowerCase(),
-                text: (n.textContent || "").replace(/\s+/g, " ").trim(),
-                ariaLabel: n.getAttribute("aria-label"),
-                classes: (n.className && n.className.toString) ? n.className.toString() : "",
-                ariaDescribedby: n.getAttribute("aria-describedby"),
-                dataTestid: n.getAttribute("data-testid"),
-                visible: r.width > 0 && r.height > 0,
-            };
-        })
-    ).catch(() => []);
-
-    // (4) All VISIBLE button/link candidates (index, tag, text, aria-label,
-    // aria-describedby, data-testid, class).
-    const visibleCandidates = enumerated.filter((c) => c.visible);
-    log(`enumerated ${enumerated.length} button/link nodes, ${visibleCandidates.length} visible:`);
-    for (const c of visibleCandidates) {
-        log(`  [${c.i}] <${c.tag}> text="${c.text}" aria-label="${c.ariaLabel ?? ""}" ` +
-            `aria-describedby="${c.ariaDescribedby ?? ""}" data-testid="${c.dataTestid ?? ""}" ` +
-            `class="${(c.classes || "").slice(0, 120)}"`);
+    // (2/3) Locate the exact visible "Send Secure Message" button and click ONLY it.
+    const secureBtn = page.getByRole("button", { name: "Send Secure Message", exact: true })
+        .or(page.getByText("Send Secure Message", { exact: true })).first();
+    const found = (await secureBtn.count()) > 0 && await secureBtn.isVisible().catch(() => false);
+    log(`"Send Secure Message" button found & visible: ${found}`);
+    if (!found) {
+        await snap("no-send-secure-message");
+        log("Exact 'Send Secure Message' dashboard button was not found/visible.");
+        return false;
     }
 
-    // Safe opener: EXACT text, visible, NOT the notifications menu icon, NOT a
-    // MUI IconButton (the "7" badge is an IconButton bound to messagesMenu).
-    const isSafeOpener = (c, exactText) =>
-        c.visible &&
-        c.text === exactText &&
-        c.ariaDescribedby !== "messagesMenu" &&
-        !/MuiIconButton-root/.test(c.classes) &&
-        c.dataTestid !== "IconButton";
+    await snap("before-send-secure-message");
+    await secureBtn.click({ timeout: 10000 }).catch((e) => { log(`click error: ${e.message}`); });
+    log("clicked 'Send Secure Message'");
+    await snap("after-send-secure-message");
+    // (4) URL after click.
+    log("URL after click:", page.url());
 
-    const sendNewMsg = enumerated.filter((c) => isSafeOpener(c, "Send New Message"));
-    const newMsg = enumerated.filter((c) => isSafeOpener(c, "New Message"));
-
-    // (5) Whether a safe "Send New Message" / "New Message" candidate was found.
-    log(`safe "Send New Message" candidates: ${sendNewMsg.length}` +
-        (sendNewMsg.length ? ` (indexes: ${sendNewMsg.map((c) => c.i).join(",")})` : ""));
-    log(`safe "New Message" candidates: ${newMsg.length}` +
-        (newMsg.length ? ` (indexes: ${newMsg.map((c) => c.i).join(",")})` : ""));
-
-    // Read the FULL compose-form state (same signals discovery proved).
+    // Read the FULL compose-form state, INCLUDING the prefilled client value.
     const readComposeState = async () => {
         const client = page.locator('input[name="client_id"]').first();
         const subject = page.locator('input[name="subject"]').first();
@@ -138,7 +99,6 @@ async function openComposeForm(page, crcClientId) {
         const hasBody = (await body.count()) > 0 && await body.isVisible().catch(() => false);
         const hasFile = (await fileInput.count()) > 0; // hidden input: presence, not visibility
         const hasSubmit = (await submit.count()) > 0 && await submit.isVisible().catch(() => false);
-        // Reply-mode / existing-conversation signal (must be ABSENT).
         const replyVisible = await page.getByRole("button", { name: /^reply$/i })
             .first().isVisible().catch(() => false);
 
@@ -148,79 +108,59 @@ async function openComposeForm(page, crcClientId) {
         };
     };
 
-    // Poll for the async compose render (spinner) up to the timeout.
-    const verifyComposeForm = async () => {
-        const deadline = Date.now() + COMPOSE_RENDER_TIMEOUT_MS;
-        let state = await readComposeState();
-        while (!state.ok && Date.now() < deadline) {
-            await page.waitForTimeout(COMPOSE_POLL_MS);
-            state = await readComposeState();
-        }
-        return state;
-    };
-
-    // Click the chosen safe opener by its EXACT enumerated index (never loose
-    // text). Try "Send New Message" first, then "New Message".
-    const clickByIndex = async (i) => {
-        await page.locator("button, a").nth(i).click({ timeout: 10000 }).catch(() => {});
-    };
-
-    // (8/9/10) Log the full verification state each attempt.
-    const logState = (label, st) => {
-        log(`${label} compose state:`, JSON.stringify(st));
-        if (!st.ok) {
-            const missing = [];
-            if (!st.hasClient) missing.push('input[name="client_id"]');
-            if (!st.hasSubject) missing.push('input[name="subject"]');
-            if (!st.hasBody) missing.push('.fr-element[contenteditable="true"]');
-            if (!st.hasFile) missing.push('input[type="file"]');
-            if (!st.hasSubmit) missing.push("exact visible Submit button");
-            if (st.replyVisible) missing.push("REPLY MODE DETECTED (must be absent)");
-            log(`verifyComposeForm() false — missing/blocking: ${missing.join(", ")}`);
-        }
-    };
-
-    const attemptOpen = async (candidate, labelName) => {
-        // Screenshot immediately BEFORE the opener click.
-        await snap(`before-${labelName}`);
-        // (6) Which exact index was clicked.
-        log(`clicking safe "${labelName}" opener at exact index ${candidate.i}`);
-        await clickByIndex(candidate.i);
-        // Screenshot immediately AFTER the opener click.
-        await snap(`after-${labelName}`);
-        // (7) URL after the click.
-        log("URL after opener click:", page.url());
-        const st = await verifyComposeForm();
-        logState(`after "${labelName}"`, st);
-        return st.ok;
-    };
-
-    if (sendNewMsg.length > 0) {
-        if (await attemptOpen(sendNewMsg[0], "SendNewMessage")) return true;
-    }
-    if (newMsg.length > 0) {
-        if (await attemptOpen(newMsg[0], "NewMessage")) return true;
+    // (5) Poll up to 15s for the async compose render (spinner).
+    const deadline = Date.now() + COMPOSE_RENDER_TIMEOUT_MS;
+    let state = await readComposeState();
+    while (!state.ok && Date.now() < deadline) {
+        await page.waitForTimeout(COMPOSE_POLL_MS);
+        state = await readComposeState();
     }
 
-    // Neither opener produced a confirmed compose form.
-    if (sendNewMsg.length === 0 && newMsg.length === 0) {
-        log("NO safe opener candidate was found — the exact-text control was not present " +
-            "among visible buttons/links (see enumerated list above).");
-        await snap("no-safe-opener");
-    } else {
-        log("An opener was clicked but verifyComposeForm() never became ok within the timeout.");
+    // (12) compose selector visibility.
+    log("compose state:", JSON.stringify(state));
+    if (!state.ok) {
+        const missing = [];
+        if (!state.hasClient) missing.push('input[name="client_id"]');
+        if (!state.hasSubject) missing.push('input[name="subject"]');
+        if (!state.hasBody) missing.push('.fr-element[contenteditable="true"]');
+        if (!state.hasFile) missing.push('input[type="file"]');
+        if (!state.hasSubmit) missing.push("exact visible Submit button");
+        if (state.replyVisible) missing.push("REPLY MODE DETECTED (must be absent)");
+        log(`compose form not confirmed — missing/blocking: ${missing.join(", ")}`);
+        await snap("compose-not-confirmed");
+        return false;
     }
-    return false;
+
+    // (6/12) Detect the PREFILLED client value for verification downstream.
+    const prefilled = await page.evaluate(() => {
+        const el = document.querySelector('input[name="client_id"]');
+        return el ? (el.value || "") : "";
+    }).catch(() => "");
+    log("detected prefilled client value:", JSON.stringify(prefilled));
+
+    return true;
 }
 
-/**
- * Select the exact client via the confirmed combobox. Requires exactly ONE exact
- * option, clicks it, and verifies the field's resulting value is the client name.
- */
 async function selectExactClient(page, clientName) {
     const combo = page.locator('input[name="client_id"]').first();
     if (!(await combo.count())) return fail("client_select", "Client combobox not found.");
 
+    // PREFILL-FIRST: the dashboard "Send Secure Message" flow opens compose with
+    // the client already prefilled. Verify that prefill and DO NOT reselect unless
+    // it fails verification (requirement: do not clear/reselect a correct prefill).
+    const prefilled = (await combo.inputValue().catch(() => "")) ||
+        (await page.evaluate(() => {
+            const el = document.querySelector('input[name="client_id"]');
+            return el ? (el.value || "") : "";
+        }).catch(() => "")) || "";
+    console.log("[M8 client] prefilled client value:", JSON.stringify(prefilled));
+    if (prefilled === clientName || prefilled.includes(clientName)) {
+        console.log("[M8 client] prefilled client verified; not reselecting.");
+        return { ok: true, selectedClient: clientName, resultingValue: prefilled, viaPrefill: true };
+    }
+    console.log("[M8 client] prefill did not match; falling back to type-and-select.");
+
+    // Fallback ONLY if the prefill failed verification.
     await combo.click({ timeout: 8000 }).catch(() => {});
     await combo.fill("").catch(() => {});
     await combo.type(clientName, { delay: 25 }).catch(() => {});
@@ -394,7 +334,7 @@ export async function sendSecureMessage(page, opts, deps) {
         // 1) Open a true compose form.
         if (!(await openComposeForm(page, crcClientId))) {
             report.failedStage = "open_compose";
-            report.failureReason = "Could not open a New Message compose form.";
+            report.failureReason = "Could not open the secure-message compose form via the dashboard \"Send Secure Message\" button.";
             return report;
         }
 
