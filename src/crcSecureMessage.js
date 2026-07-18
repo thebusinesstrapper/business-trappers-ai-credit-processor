@@ -60,10 +60,24 @@ const COMPOSE_POLL_MS = 300;
  * render. Returns true only when the full compose form is confirmed.
  */
 async function openComposeForm(page, crcClientId) {
-    await page.goto(
-        `https://app.creditrepaircloud.com/app/messages/all/${crcClientId}`,
-        { waitUntil: "domcontentloaded" }
-    );
+    // ---- DIAGNOSTIC-ONLY instrumentation. Selector behavior is UNCHANGED. ----
+    const log = (...args) => console.log("[M8 openCompose]", ...args);
+    const snap = async (name) => {
+        try { await page.screenshot({ path: `/tmp/m8-compose-${name}.png`, fullPage: false });
+            log(`screenshot saved: /tmp/m8-compose-${name}.png`); }
+        catch (e) { log(`screenshot ${name} failed: ${e.message}`); }
+    };
+
+    // (1) URL before navigating to Messages.
+    log("URL before Messages navigation:", page.url());
+
+    // (2) The exact action used to open Messages.
+    const messagesUrl = `https://app.creditrepaircloud.com/app/messages/all/${crcClientId}`;
+    log("Opening Messages via page.goto:", messagesUrl);
+    await page.goto(messagesUrl, { waitUntil: "domcontentloaded" });
+
+    // (3) URL after Messages navigation.
+    log("URL after Messages navigation:", page.url());
 
     // Enumerate every button/link with the fields the safe-opener check needs.
     const enumerated = await page.locator("button, a").evaluateAll((nodes) =>
@@ -73,6 +87,7 @@ async function openComposeForm(page, crcClientId) {
                 i,
                 tag: n.tagName.toLowerCase(),
                 text: (n.textContent || "").replace(/\s+/g, " ").trim(),
+                ariaLabel: n.getAttribute("aria-label"),
                 classes: (n.className && n.className.toString) ? n.className.toString() : "",
                 ariaDescribedby: n.getAttribute("aria-describedby"),
                 dataTestid: n.getAttribute("data-testid"),
@@ -80,6 +95,16 @@ async function openComposeForm(page, crcClientId) {
             };
         })
     ).catch(() => []);
+
+    // (4) All VISIBLE button/link candidates (index, tag, text, aria-label,
+    // aria-describedby, data-testid, class).
+    const visibleCandidates = enumerated.filter((c) => c.visible);
+    log(`enumerated ${enumerated.length} button/link nodes, ${visibleCandidates.length} visible:`);
+    for (const c of visibleCandidates) {
+        log(`  [${c.i}] <${c.tag}> text="${c.text}" aria-label="${c.ariaLabel ?? ""}" ` +
+            `aria-describedby="${c.ariaDescribedby ?? ""}" data-testid="${c.dataTestid ?? ""}" ` +
+            `class="${(c.classes || "").slice(0, 120)}"`);
+    }
 
     // Safe opener: EXACT text, visible, NOT the notifications menu icon, NOT a
     // MUI IconButton (the "7" badge is an IconButton bound to messagesMenu).
@@ -92,6 +117,12 @@ async function openComposeForm(page, crcClientId) {
 
     const sendNewMsg = enumerated.filter((c) => isSafeOpener(c, "Send New Message"));
     const newMsg = enumerated.filter((c) => isSafeOpener(c, "New Message"));
+
+    // (5) Whether a safe "Send New Message" / "New Message" candidate was found.
+    log(`safe "Send New Message" candidates: ${sendNewMsg.length}` +
+        (sendNewMsg.length ? ` (indexes: ${sendNewMsg.map((c) => c.i).join(",")})` : ""));
+    log(`safe "New Message" candidates: ${newMsg.length}` +
+        (newMsg.length ? ` (indexes: ${newMsg.map((c) => c.i).join(",")})` : ""));
 
     // Read the FULL compose-form state (same signals discovery proved).
     const readComposeState = async () => {
@@ -134,13 +165,50 @@ async function openComposeForm(page, crcClientId) {
         await page.locator("button, a").nth(i).click({ timeout: 10000 }).catch(() => {});
     };
 
+    // (8/9/10) Log the full verification state each attempt.
+    const logState = (label, st) => {
+        log(`${label} compose state:`, JSON.stringify(st));
+        if (!st.ok) {
+            const missing = [];
+            if (!st.hasClient) missing.push('input[name="client_id"]');
+            if (!st.hasSubject) missing.push('input[name="subject"]');
+            if (!st.hasBody) missing.push('.fr-element[contenteditable="true"]');
+            if (!st.hasFile) missing.push('input[type="file"]');
+            if (!st.hasSubmit) missing.push("exact visible Submit button");
+            if (st.replyVisible) missing.push("REPLY MODE DETECTED (must be absent)");
+            log(`verifyComposeForm() false — missing/blocking: ${missing.join(", ")}`);
+        }
+    };
+
+    const attemptOpen = async (candidate, labelName) => {
+        // Screenshot immediately BEFORE the opener click.
+        await snap(`before-${labelName}`);
+        // (6) Which exact index was clicked.
+        log(`clicking safe "${labelName}" opener at exact index ${candidate.i}`);
+        await clickByIndex(candidate.i);
+        // Screenshot immediately AFTER the opener click.
+        await snap(`after-${labelName}`);
+        // (7) URL after the click.
+        log("URL after opener click:", page.url());
+        const st = await verifyComposeForm();
+        logState(`after "${labelName}"`, st);
+        return st.ok;
+    };
+
     if (sendNewMsg.length > 0) {
-        await clickByIndex(sendNewMsg[0].i);
-        if ((await verifyComposeForm()).ok) return true;
+        if (await attemptOpen(sendNewMsg[0], "SendNewMessage")) return true;
     }
     if (newMsg.length > 0) {
-        await clickByIndex(newMsg[0].i);
-        if ((await verifyComposeForm()).ok) return true;
+        if (await attemptOpen(newMsg[0], "NewMessage")) return true;
+    }
+
+    // Neither opener produced a confirmed compose form.
+    if (sendNewMsg.length === 0 && newMsg.length === 0) {
+        log("NO safe opener candidate was found — the exact-text control was not present " +
+            "among visible buttons/links (see enumerated list above).");
+        await snap("no-safe-opener");
+    } else {
+        log("An opener was clicked but verifyComposeForm() never became ok within the timeout.");
     }
     return false;
 }
