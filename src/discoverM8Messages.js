@@ -86,6 +86,9 @@ export async function discoverM8Messages(data = {}) {
         clientSelectorLabel: null,
         clientSelectorCurrentValue: null,
         clientDropdownOptionsSample: null,
+        clientSearchText: null,
+        filteredClientOptions: null,
+        exactMatchCount: 0,
         elizabethOptionFound: false,
         elizabethOptionDescriptor: null,
         subjectField: null,
@@ -324,34 +327,54 @@ export async function discoverM8Messages(data = {}) {
                 label: clientSelectorInfo.label, attrs: clientSelectorInfo.attrs }
             : null;
 
-        // Open the REAL client selector read-only, sample its options, and look
-        // for the exact "Elizabeth Kelley" option. We NEVER commit a selection.
+        // Open the REAL client selector, TYPE "Elizabeth Kelley" to filter the MUI
+        // autocomplete, and confirm the exact option exists. We NEVER click or
+        // commit the option; afterward we Escape + CLEAR so no recipient remains
+        // selected (clientSelectorCurrentValue must end empty).
+        const CLIENT_SEARCH_TEXT = "Elizabeth Kelley";
         if (clientSelectorInfo) {
             try {
-                // Bind to the best-matching combobox by exact label where possible,
-                // else fall back to a NON-radio combobox.
-                let clientLoc = null;
-                if (/client/i.test(clientSelectorInfo.label || "")) {
-                    clientLoc = page.getByLabel(new RegExp(clientSelectorInfo.label
-                        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")).first();
-                }
-                if (!clientLoc || !(await clientLoc.count())) {
+                // Bind directly to the confirmed client combobox by its name.
+                let clientLoc = page.locator('input[name="client_id"]').first();
+                if (!(await clientLoc.count())) {
                     clientLoc = page.locator('input[role="combobox"]:not([name="user_type"])').first();
                 }
                 if (await clientLoc.count()) {
                     await clientLoc.click({ timeout: 6000 }).catch(() => {});
-                    await page.waitForTimeout(700);
-                    // Type nothing that commits; just read the option list.
-                    const options = await page.getByRole("option").evaluateAll((nodes) =>
-                        nodes.slice(0, 40).map((n) => (n.textContent || "").replace(/\s+/g, " ").trim())
-                    ).catch(() => []);
+                    await clientLoc.fill("").catch(() => {});
+                    // Type the search text to filter the autocomplete list.
+                    await clientLoc.type(CLIENT_SEARCH_TEXT, { delay: 25 }).catch(() => {});
+                    report.clientSearchText = CLIENT_SEARCH_TEXT;
+
+                    // Wait for filtered options to render (element-appearance driven,
+                    // brief bounded poll — not a fixed-only sleep).
+                    const optDeadline = Date.now() + 8000;
+                    let options = [];
+                    while (Date.now() < optDeadline) {
+                        options = await page.getByRole("option").evaluateAll((nodes) =>
+                            nodes.slice(0, 40).map((n) => (n.textContent || "").replace(/\s+/g, " ").trim())
+                        ).catch(() => []);
+                        // Stop once the list has filtered down to Elizabeth-matching rows.
+                        if (options.some((o) => /elizabeth\s+kelley/i.test(o))) break;
+                        await page.waitForTimeout(250);
+                    }
+                    report.filteredClientOptions = options.slice(0, 20);
                     report.clientDropdownOptionsSample = options.slice(0, 12);
-                    const match = options.find((o) => o === "Elizabeth Kelley" ||
-                        /^elizabeth\s+kelley\b/i.test(o));
-                    report.elizabethOptionFound = !!match;
-                    report.elizabethOptionDescriptor = match ?? null;
-                    // Close the dropdown WITHOUT selecting anything.
+
+                    // Exact (normalized) match against "Elizabeth Kelley".
+                    const exactMatches = options.filter((o) => o === CLIENT_SEARCH_TEXT);
+                    report.exactMatchCount = exactMatches.length;
+                    report.elizabethOptionFound = exactMatches.length >= 1;
+                    report.elizabethOptionDescriptor = exactMatches[0] ?? null;
+
+                    // Close WITHOUT selecting, then CLEAR the field so no recipient
+                    // remains chosen.
                     await page.keyboard.press("Escape").catch(() => {});
+                    await clientLoc.fill("").catch(() => {});
+                    await clientLoc.blur?.().catch?.(() => {});
+                    // Re-read the selector's current value to confirm it is empty.
+                    report.clientSelectorCurrentValue =
+                        (await clientLoc.inputValue().catch(() => "")) || "";
                 }
             } catch { /* ignore — read-only best effort */ }
         }
@@ -427,6 +450,7 @@ export async function discoverM8Messages(data = {}) {
         if (!report.fileInput && !report.attachmentControl) gaps.push("no_attachment_control");
         if (!report.actualClientSelector) gaps.push("no_actual_client_selector");
         if (!report.elizabethOptionFound) gaps.push("elizabeth_option_not_found");
+        if (report.exactMatchCount !== 1) gaps.push("elizabeth_exact_match_not_unique");
         if (!report.subjectField) gaps.push("no_subject_field");
         if (!report.bodyEditor) gaps.push("no_body_editor");
         if (!report.submitButton) gaps.push("no_submit_button");
