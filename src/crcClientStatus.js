@@ -44,6 +44,12 @@ const PROFILE_LINK_TEXT = "View/Edit Profile";
 const STATUS_LABEL = "Status";
 const TIMEOUT = 15000;
 
+/**
+ * How long to wait for the client dashboard to be ready (i.e. for the
+ * "View/Edit Profile" link to render) before the pre-write snapshot.
+ */
+const DASHBOARD_READY_TIMEOUT = 20000;
+
 /** The ONLY field this module may modify. Everything else is off-limits. */
 const WRITABLE_FIELDS = Object.freeze(["status"]);
 
@@ -72,6 +78,84 @@ async function findModal(page) {
     }
 
     return null;
+}
+
+/**
+ * Ensure the page is ON THE CLIENT DASHBOARD before the profile modal is used.
+ *
+ * WHY THIS EXISTS. readClientProfile() is documented to require "a page on the
+ * CLIENT DASHBOARD", and it deliberately does NOT navigate — it looks for the
+ * "View/Edit Profile" link on whatever page it is handed, and returns
+ * PROFILE_LINK_NOT_FOUND if the link is absent. That refusal is correct: a
+ * reader that guessed at a URL would be a reader that could land anywhere.
+ *
+ * But a caller that runs immediately after another workflow (for example the M8
+ * secure-message delivery, which finishes on the Messages/compose view) leaves
+ * the page somewhere else entirely. The snapshot then fails before any write —
+ * safely, but for a reason that has nothing to do with the client's record.
+ *
+ * So the WRITER — not the reader — restores its own documented precondition.
+ * This does not weaken any guard: if the dashboard cannot be reached, the
+ * snapshot still fails and the write still does not happen.
+ */
+async function ensureClientDashboard(page, crcClientId) {
+    const dashboardPath = `/app/clients/${crcClientId}/dashboard`;
+    const startUrl = page.url();
+
+    const linkPresent = async () => {
+        try {
+            return (await page.getByText(PROFILE_LINK_TEXT, { exact: false }).first().count()) > 0;
+        } catch {
+            return false;
+        }
+    };
+
+    // Already on the dashboard AND the link has rendered: nothing to do.
+    if (startUrl.includes(dashboardPath) && (await linkPresent())) {
+        console.log(`Dashboard already loaded (${startUrl}). "${PROFILE_LINK_TEXT}" is present.`);
+        return { ok: true, navigated: false, url: startUrl, startUrl };
+    }
+
+    console.log(
+        `Not on the client dashboard (current URL: ${startUrl}). ` +
+        `Navigating to ${dashboardPath} before the pre-write snapshot...`
+    );
+
+    try {
+        await page.goto(`https://app.creditrepaircloud.com${dashboardPath}`, {
+            waitUntil: "domcontentloaded",
+        });
+    } catch (error) {
+        console.error(`Dashboard navigation failed: ${error.message}`);
+        return { ok: false, navigated: true, url: page.url(), startUrl, error: error.message };
+    }
+
+    // Wait for the dashboard-ready marker: the "View/Edit Profile" link itself.
+    // We wait on the real marker rather than a fixed sleep, and we wait out any
+    // overlay left behind by whatever ran before us.
+    const deadline = Date.now() + DASHBOARD_READY_TIMEOUT;
+
+    while (Date.now() < deadline) {
+        if (await linkPresent()) {
+            console.log(`Dashboard loaded (${page.url()}). "${PROFILE_LINK_TEXT}" is present.`);
+            return { ok: true, navigated: true, url: page.url(), startUrl };
+        }
+
+        await page.waitForTimeout(300);
+    }
+
+    console.error(
+        `"${PROFILE_LINK_TEXT}" did not appear on ${page.url()} within ` +
+        `${DASHBOARD_READY_TIMEOUT / 1000}s.`
+    );
+
+    return {
+        ok: false,
+        navigated: true,
+        url: page.url(),
+        startUrl,
+        error: `"${PROFILE_LINK_TEXT}" did not appear within ${DASHBOARD_READY_TIMEOUT / 1000}s.`,
+    };
 }
 
 /**
@@ -112,14 +196,42 @@ export async function updateClientStatus(page, crcClientId, newStatus, precondit
     console.log(`CRC STATUS WRITER — WRITE MODE. Target status: "${newStatus}"`);
     console.log("Only the Status field may be modified. Every other field is protected.");
 
+    // ---- 0. RESTORE THE PRECONDITION: be on the client dashboard ----------
+    //
+    // readClientProfile() requires a page ON THE CLIENT DASHBOARD and will not
+    // navigate for itself. A caller arriving from another workflow (e.g. the M8
+    // secure-message delivery, which ends on the Messages/compose view) would
+    // otherwise fail the snapshot with PROFILE_LINK_NOT_FOUND — before any write.
+    const dashboard = await ensureClientDashboard(page, crcClientId);
+
+    if (!dashboard.ok) {
+        // Not fatal here on its own: we still ATTEMPT the snapshot, and if the
+        // profile genuinely cannot be read the existing PRE_WRITE_SNAPSHOT_FAILED
+        // path below refuses the write. Logged so the cause is visible.
+        console.error(`Could not confirm the client dashboard before the snapshot: ${dashboard.error}`);
+    }
+
     // ---- 1. SNAPSHOT identity BEFORE the write -----------------------------
     //
     // This is the whole safety story. Without a before-picture we could not tell
     // whether the form quietly reformatted an address on save — and we would find
     // out from a returned letter.
+    console.log(`Pre-write snapshot starting. URL: ${page.url()}`);
+
     const before = await readClientProfile(page, crcClientId);
 
     if (!before.ok) {
+        // Name exactly what failed, so a recurrence does not need another run to
+        // diagnose: where we were, whether we had to navigate, which reader step
+        // failed, and which field(s) were still empty if the modal never populated.
+        console.error(
+            `PRE-WRITE SNAPSHOT FAILED (${before.error_code}) at ${page.url()}. ` +
+            `Dashboard: startUrl=${dashboard.startUrl}, navigated=${dashboard.navigated}, ` +
+            `dashboardReady=${dashboard.ok}. ` +
+            `Missing fields: ${(before.missing ?? []).map((m) => m.label).join(", ") || "n/a"}. ` +
+            `No field was modified.`
+        );
+
         return {
             ok: false,
             error_code: "PRE_WRITE_SNAPSHOT_FAILED",
@@ -128,6 +240,19 @@ export async function updateClientStatus(page, crcClientId, newStatus, precondit
                 `record we cannot first verify — without a snapshot we could never prove we changed ` +
                 `only Status. No field was modified.`,
             fieldsModified: 0,
+
+            // Diagnostics only. Additive — the contract above is unchanged.
+            snapshotDiagnostics: {
+                readerErrorCode: before.error_code ?? null,
+                urlAtSnapshot: page.url(),
+                dashboardStartUrl: dashboard.startUrl ?? null,
+                dashboardNavigated: dashboard.navigated ?? null,
+                dashboardReady: dashboard.ok,
+                dashboardError: dashboard.error ?? null,
+                profileLinkFound: before.error_code !== "PROFILE_LINK_NOT_FOUND",
+                modalVisible: before.error_code !== "MODAL_NOT_VISIBLE",
+                missingFields: (before.missing ?? []).map((m) => m.label),
+            },
         };
     }
 
