@@ -190,6 +190,50 @@ function wrapLine(text, font, size) {
  * @param {object} letter  { body, bureau, ... }. Wording is rendered verbatim.
  * @returns {Promise<Buffer>} the .pdf bytes.
  */
+/**
+ * Split the letter body into its structural segments using the literal "---"
+ * separators the letter engine already emits: [opening, ...accountSections,
+ * closing]. We segment on those markers rather than pattern-matching prose, so
+ * the layout never has to guess where an account begins.
+ *
+ * The separators themselves are consumed here and never drawn (no divider lines).
+ */
+function splitBodySegments(body) {
+    const segments = [[]];
+
+    for (const line of body.split("\n")) {
+        if (line.trim() === "---") {
+            segments.push([]);
+            continue;
+        }
+        segments[segments.length - 1].push(line);
+    }
+
+    // Trim blank lines from each segment's edges so the gaps BETWEEN segments are
+    // set deliberately below, not inherited from the source.
+    return segments
+        .map((lines) => {
+            let first = 0;
+            let last = lines.length;
+            while (first < last && lines[first].trim() === "") first += 1;
+            while (last > first && lines[last - 1].trim() === "") last -= 1;
+            return lines.slice(first, last);
+        })
+        .filter((lines) => lines.length > 0);
+}
+
+/**
+ * Render a standalone ISO date line as MM/DD/YYYY.
+ *
+ * Deliberately anchored to a line that is ONLY a date. Dates that appear inside
+ * a sentence belong to the dispute's factual content and are left exactly as
+ * written — reformatting those would be editing letter content.
+ */
+function formatStandaloneDate(line) {
+    const match = line.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return match ? `${match[2]}/${match[3]}/${match[1]}` : line;
+}
+
 export async function renderLetterPdf(letter) {
     if (!letter || typeof letter.body !== "string" || letter.body.length === 0) {
         throw new Error("renderLetterPdf: letter.body (non-empty string) is required.");
@@ -207,51 +251,143 @@ export async function renderLetterPdf(letter) {
     const fontBold = await pdf.embedFont(StandardFonts.TimesRomanBold);
     const black = rgb(0, 0, 0);
 
-    // Same body handling as DOCX: drop literal "---" separators.
-    const sourceLines = letter.body.split("\n").filter((line) => line.trim() !== "---");
+    // ---- ROWS ---------------------------------------------------------------
+    //
+    // One row = one source line, pre-wrapped and pre-measured. Paragraph spacing
+    // comes from the blank lines the letter engine already emits, so consecutive
+    // lines (name/address, creditor/account number) sit tight against each other.
+    const makeRow = (text, bold = false) => {
+        const wrapped = text === "" ? [""] : wrapLine(text, bold ? fontBold : font, PDF_FONT_SIZE);
+        return { text, bold, wrapped, height: wrapped.length * PDF_LINE_HEIGHT };
+    };
+    const blankRow = () => makeRow("");
+    const heightOf = (rows) => rows.reduce((total, row) => total + row.height, 0);
+
+    // ---- SEGMENTS -----------------------------------------------------------
+    const segments = splitBodySegments(letter.body);
+
+    let opening = [];
+    let accounts = [];
+    let closing = [];
+
+    if (segments.length === 1) {
+        opening = segments[0];
+    } else if (segments.length === 2) {
+        [opening, closing] = segments;
+    } else {
+        opening = segments[0];
+        accounts = segments.slice(1, -1);
+        closing = segments[segments.length - 1];
+    }
+
+    // ---- BLOCKS -------------------------------------------------------------
+    //
+    // keepTogether: place the whole block on one page when it can fit on a page.
+    // headRows:     the leading rows that must never be left alone at the foot of
+    //               a page (creditor name + account number + the line beneath).
+    const blocks = [];
+
+    // Opening: consumer name/address, date, bureau address, subject, greeting and
+    // opening paragraphs, tightened. Only the standalone date line is reformatted.
+    blocks.push({
+        rows: opening.map((line) => {
+            const text = formatStandaloneDate(line);
+            return makeRow(text, /^Re:/.test(text.trim()));
+        }),
+    });
+
+    accounts.forEach((sectionLines, index) => {
+        // One blank line before every creditor section, plus one extra before the
+        // first so the opening is separated by a double space.
+        const gap = index === 0 ? [blankRow(), blankRow()] : [blankRow()];
+        blocks.push({ rows: gap });
+
+        // An account section reads as ONE visual unit: creditor name, account
+        // number, the reported issue, the legal basis and the requested action on
+        // consecutive single-spaced lines. The engine's internal blank lines are
+        // layout, not content, so they are collapsed here — the separation between
+        // accounts is what carries the structure.
+        const rows = sectionLines
+            .filter((line) => line.trim() !== "")
+            .map((line, lineIndex) => {
+                // The creditor name is the section's first line; the account number
+                // is the line directly beneath it. Both are bold.
+                const isCreditor = lineIndex === 0;
+                const isAccountNumber = lineIndex === 1 && /^Account Number:/.test(line.trim());
+                return makeRow(line, isCreditor || isAccountNumber);
+            });
+
+        // Head = creditor name, the account number beneath it, and the first line
+        // of the section's content. These travel together, always: the creditor
+        // name is never left at the foot of a page, with or without its number.
+        const hasAccountNumber = rows.length > 1 && rows[1].bold;
+        const head = Math.min(rows.length, hasAccountNumber ? 3 : 2);
+
+        blocks.push({ rows, keepTogether: true, headRows: head });
+    });
+
+    if (closing.length > 0) {
+        // Double space before the closing request.
+        blocks.push({ rows: [blankRow(), blankRow()] });
+        // Closing paragraphs, "Sincerely," and the client name stay together.
+        blocks.push({ rows: closing.map((line) => makeRow(line)), keepTogether: true });
+    }
+
+    // ---- LAYOUT -------------------------------------------------------------
+    const usableHeight = PDF_PAGE.height - PDF_MARGIN * 2;
 
     let page = pdf.addPage([PDF_PAGE.width, PDF_PAGE.height]);
     let y = PDF_PAGE.height - PDF_MARGIN;
+    let atPageTop = true;
 
-    const newPageIfNeeded = () => {
-        if (y < PDF_MARGIN) {
-            page = pdf.addPage([PDF_PAGE.width, PDF_PAGE.height]);
-            y = PDF_PAGE.height - PDF_MARGIN;
-        }
+    const newPage = () => {
+        page = pdf.addPage([PDF_PAGE.width, PDF_PAGE.height]);
+        y = PDF_PAGE.height - PDF_MARGIN;
+        atPageTop = true;
     };
 
-    for (const raw of sourceLines) {
-        const isHeading = /^(Creditor|Account Number|Furnisher|Re:)\b/.test(raw.trim());
-        const useFont = isHeading ? fontBold : font;
-        // A blank source line is vertical space only.
-        const wrapped = raw === "" ? [""] : wrapLine(raw, useFont, PDF_FONT_SIZE);
-        for (const line of wrapped) {
-            newPageIfNeeded();
+    const drawRow = (row) => {
+        // A page never opens with blank space.
+        if (row.text.trim() === "" && atPageTop) return;
+
+        for (const line of row.wrapped) {
+            if (y - PDF_LINE_HEIGHT < PDF_MARGIN) newPage();
+
             if (line !== "") {
                 page.drawText(line, {
                     x: PDF_MARGIN,
                     y: y - PDF_FONT_SIZE,
                     size: PDF_FONT_SIZE,
-                    font: useFont,
+                    font: row.bold ? fontBold : font,
                     color: black,
                 });
+                atPageTop = false;
             }
+
             y -= PDF_LINE_HEIGHT;
         }
-        // 6 pt paragraph spacing after each source line.
-        y -= PDF_PARA_AFTER;
+    };
+
+    for (const block of blocks) {
+        const blockHeight = heightOf(block.rows);
+
+        if (block.keepTogether && blockHeight <= usableHeight && y - blockHeight < PDF_MARGIN) {
+            // It fits on a page, just not on what is left of this one.
+            newPage();
+        } else if (block.headRows) {
+            // Taller than a page, so it must break — but the creditor name and its
+            // account number are never left stranded at the foot of a page.
+            const headHeight = heightOf(block.rows.slice(0, block.headRows));
+            if (y - headHeight < PDF_MARGIN) newPage();
+        }
+
+        for (const row of block.rows) drawRow(row);
     }
 
     const bytes = await pdf.save();
     return Buffer.from(bytes);
 }
 
-// ---- EXPORT ORCHESTRATION -----------------------------------------------
-
-/**
- * Build a safe, descriptive filename stem (no extension) for an exported
- * letter: client, bureau, round, and date. Filesystem- and URL-safe.
- */
 export function exportFilename(letter, context = {}) {
     const safe = (v) =>
         String(v ?? "")
