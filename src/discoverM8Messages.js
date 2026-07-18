@@ -82,7 +82,12 @@ export async function discoverM8Messages(data = {}) {
         newMessageControl: null,
         recipientTypeControl: null,
         clientDropdown: null,
+        actualClientSelector: null,
+        clientSelectorLabel: null,
+        clientSelectorCurrentValue: null,
         clientDropdownOptionsSample: null,
+        elizabethOptionFound: false,
+        elizabethOptionDescriptor: null,
         subjectField: null,
         bodyEditor: null,
         fileInput: null,
@@ -254,21 +259,102 @@ export async function discoverM8Messages(data = {}) {
         report.recipientTypeControl = await describe(
             page.getByText(/^client$/i).or(page.getByRole("radio", { name: /client/i }))
         );
-        // Client dropdown (MUI autocomplete/select).
-        const clientDd = page.getByLabel(/client/i)
-            .or(page.locator('input[role="combobox"]')).first();
-        report.clientDropdown = await describe(clientDd);
-        // A small sample of client-dropdown options (open it read-only if possible).
-        try {
-            if (await clientDd.count()) {
-                await clientDd.click({ timeout: 6000 }).catch(() => {});
-                await page.waitForTimeout(600);
-                report.clientDropdownOptionsSample = await page.getByRole("option")
-                    .evaluateAll((nodes) => nodes.slice(0, 8)
-                        .map((n) => (n.textContent || "").trim().slice(0, 60))).catch(() => null);
-                await page.keyboard.press("Escape").catch(() => {});
-            }
-        } catch { /* ignore */ }
+        // ---- The ACTUAL client selector under "Client*" -------------------
+        // The prior run mis-captured the recipient-TYPE radio (name="user_type",
+        // type="radio", value="client") as the client dropdown. That radio only
+        // chooses the recipient category; the real client PICKER is a separate
+        // MUI combobox/autocomplete tied to the "Client*" label. Find it while
+        // EXCLUDING any user_type radio.
+        const clientSelectorInfo = await page.evaluate(() => {
+            const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+            const isUserTypeRadio = (el) =>
+                el.getAttribute("type") === "radio" || el.getAttribute("name") === "user_type";
+
+            // Candidate inputs: comboboxes / autocomplete / text inputs that are
+            // NOT the user_type radio. Prefer one whose form-control label or
+            // nearby text contains "Client".
+            const inputs = Array.from(document.querySelectorAll(
+                'input[role="combobox"], input[aria-autocomplete], input[type="text"], ' +
+                '.MuiAutocomplete-root input, [role="combobox"]'
+            )).filter((el) => !isUserTypeRadio(el));
+
+            const scoreOf = (el) => {
+                const fc = el.closest(".MuiFormControl-root, .MuiTextField-root, .MuiAutocomplete-root");
+                const label = fc ? norm(fc.querySelector("label")?.textContent || "") : "";
+                const near = norm((el.closest("div")?.textContent || "").slice(0, 60));
+                let score = 0;
+                if (/client\*?/i.test(label)) score += 10;
+                if (/client/i.test(near)) score += 3;
+                if (el.getAttribute("role") === "combobox") score += 2;
+                if (el.hasAttribute("aria-autocomplete")) score += 1;
+                return { score, label };
+            };
+
+            let best = null;
+            inputs.forEach((el, idx) => {
+                const { score, label } = scoreOf(el);
+                if (score <= 0) return;
+                if (!best || score > best.score) {
+                    const attrs = {};
+                    for (const a of el.attributes || []) attrs[a.name] = a.value;
+                    best = {
+                        score, label,
+                        domIndexHint: idx,
+                        tag: el.tagName.toLowerCase(),
+                        id: el.id || null,
+                        role: el.getAttribute("role"),
+                        ariaAutocomplete: el.getAttribute("aria-autocomplete"),
+                        classes: (el.className && el.className.toString) ? el.className.toString() : "",
+                        value: el.value ?? "",
+                        attrs,
+                    };
+                }
+            });
+            return best;
+        }).catch(() => null);
+
+        report.actualClientSelector = clientSelectorInfo;
+        report.clientSelectorLabel = clientSelectorInfo?.label ?? null;
+        report.clientSelectorCurrentValue = clientSelectorInfo?.value ?? null;
+        // Keep clientDropdown pointing at the REAL selector (not the radio) for
+        // the readiness gate below.
+        report.clientDropdown = clientSelectorInfo
+            ? { present: true, tag: clientSelectorInfo.tag, id: clientSelectorInfo.id,
+                role: clientSelectorInfo.role, classes: clientSelectorInfo.classes,
+                label: clientSelectorInfo.label, attrs: clientSelectorInfo.attrs }
+            : null;
+
+        // Open the REAL client selector read-only, sample its options, and look
+        // for the exact "Elizabeth Kelley" option. We NEVER commit a selection.
+        if (clientSelectorInfo) {
+            try {
+                // Bind to the best-matching combobox by exact label where possible,
+                // else fall back to a NON-radio combobox.
+                let clientLoc = null;
+                if (/client/i.test(clientSelectorInfo.label || "")) {
+                    clientLoc = page.getByLabel(new RegExp(clientSelectorInfo.label
+                        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")).first();
+                }
+                if (!clientLoc || !(await clientLoc.count())) {
+                    clientLoc = page.locator('input[role="combobox"]:not([name="user_type"])').first();
+                }
+                if (await clientLoc.count()) {
+                    await clientLoc.click({ timeout: 6000 }).catch(() => {});
+                    await page.waitForTimeout(700);
+                    // Type nothing that commits; just read the option list.
+                    const options = await page.getByRole("option").evaluateAll((nodes) =>
+                        nodes.slice(0, 40).map((n) => (n.textContent || "").replace(/\s+/g, " ").trim())
+                    ).catch(() => []);
+                    report.clientDropdownOptionsSample = options.slice(0, 12);
+                    const match = options.find((o) => o === "Elizabeth Kelley" ||
+                        /^elizabeth\s+kelley\b/i.test(o));
+                    report.elizabethOptionFound = !!match;
+                    report.elizabethOptionDescriptor = match ?? null;
+                    // Close the dropdown WITHOUT selecting anything.
+                    await page.keyboard.press("Escape").catch(() => {});
+                }
+            } catch { /* ignore — read-only best effort */ }
+        }
 
         report.subjectField = await describe(
             page.getByLabel(/subject/i).or(page.getByPlaceholder(/subject/i))
@@ -334,9 +420,13 @@ export async function discoverM8Messages(data = {}) {
         report.artifacts.push(await shot(page, "03-compose-detail"));
 
         // ---- readiness gate ------------------------------------------------
+        // implementationReady requires the REAL client selector (not the
+        // user_type radio) AND the exact "Elizabeth Kelley" option identified,
+        // in addition to subject, body, file input, and Submit.
         const gaps = [];
         if (!report.fileInput && !report.attachmentControl) gaps.push("no_attachment_control");
-        if (!report.clientDropdown) gaps.push("no_client_dropdown");
+        if (!report.actualClientSelector) gaps.push("no_actual_client_selector");
+        if (!report.elizabethOptionFound) gaps.push("elizabeth_option_not_found");
         if (!report.subjectField) gaps.push("no_subject_field");
         if (!report.bodyEditor) gaps.push("no_body_editor");
         if (!report.submitButton) gaps.push("no_submit_button");
