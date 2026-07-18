@@ -16,6 +16,7 @@ import { runMilestone7 } from "./src/milestone7.js";
 import { discoverM8Crc } from "./src/discoverM8Crc.js"; // TEMPORARY — M8 discovery only
 import { discoverM8CrcV2 } from "./src/discoverM8CrcV2.js"; // TEMPORARY — M8 discovery V2
 import { discoverM8Messages } from "./src/discoverM8Messages.js"; // TEMPORARY — M8 Messages discovery
+import { runMilestone8 } from "./src/milestone8.js"; // M8 secure-message delivery
 import { extractSkeletonNode, buildLiabilityMap, buildFieldMap, buildCollisionMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
 
 dotenv.config();
@@ -374,6 +375,21 @@ app.post("/discover-m8-crc-v2", async (req, res) => {
 app.post("/discover-m8-messages", async (req, res) => {
     try {
         const result = await discoverM8Messages(req.body);
+        res.json(result);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+        });
+    }
+});
+
+// M8 — secure-message delivery of M7 bureau PDFs. Input: { clientName, submitApproved }.
+// Without submitApproved:true it fills + verifies everything and STOPS before Submit.
+app.post("/milestone-8", async (req, res) => {
+    try {
+        const result = await runMilestone8(req.body);
         res.json(result);
     } catch (error) {
         console.error(error);
