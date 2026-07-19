@@ -149,27 +149,23 @@ export async function loadOrCreateClientMemory(crcClientId, clientDisplayName) {
 
 
 /**
- * Durable M8 delivery protection using the existing client_state.processing_state
- * column. No schema change and no current_round write.
+ * Durable M8 delivery protection using the governed processing_state values
+ * already enforced by Supabase:
  *
- * States are round-specific so a delivered Round 1 can never block a later,
- * legitimately-authorized Round 2.
+ *   ready -> processing -> waiting
+ *
+ * The database constraint permits only:
+ *   ready, processing, waiting, blocked, complete
+ *
+ * `current_round` remains unchanged here. When a later workflow legitimately
+ * advances the round, it must explicitly return the client to `ready`.
  */
-function deliveryState(round, phase) {
-    const safeRound = Number(round);
-    if (!Number.isInteger(safeRound) || safeRound < 1) {
-        throw new Error(`Invalid delivery round: ${round}`);
-    }
-
-    return `m8_${phase}_round_${safeRound}`;
-}
 
 /**
  * Atomically acquire the live-delivery lock for one client and round.
  *
- * Uses optimistic concurrency: the UPDATE succeeds only while processing_state
- * still equals the value we just read. A concurrent second run therefore gets
- * zero updated rows and is blocked before secure-message Submit.
+ * `processing` is the durable lock. `waiting` means the current round has
+ * already been delivered and is waiting for bureau results.
  */
 export async function acquireDeliveryLock(crcClientId, clientDisplayName, round) {
     const id = String(crcClientId);
@@ -184,7 +180,11 @@ export async function acquireDeliveryLock(crcClientId, clientDisplayName, round)
     const storedRound = Number(current.current_round);
 
     if (!Number.isInteger(expectedRound) || expectedRound < 1) {
-        return { ok: false, reason: "invalid_round", currentState: current.processing_state ?? null };
+        return {
+            ok: false,
+            reason: "invalid_round",
+            currentState: current.processing_state ?? null,
+        };
     }
 
     if (storedRound !== expectedRound) {
@@ -197,9 +197,9 @@ export async function acquireDeliveryLock(crcClientId, clientDisplayName, round)
         };
     }
 
-    const lockedState = deliveryState(expectedRound, "delivery_in_progress");
-    const deliveredState = deliveryState(expectedRound, "delivered");
     const previousState = current.processing_state ?? "ready";
+    const lockedState = "processing";
+    const deliveredState = "waiting";
 
     if (previousState === deliveredState) {
         return {
@@ -216,6 +216,14 @@ export async function acquireDeliveryLock(crcClientId, clientDisplayName, round)
             reason: "delivery_already_in_progress",
             currentState: previousState,
             lockedState,
+        };
+    }
+
+    if (previousState !== "ready") {
+        return {
+            ok: false,
+            reason: "client_not_ready_for_delivery",
+            currentState: previousState,
         };
     }
 
@@ -252,10 +260,10 @@ export async function acquireDeliveryLock(crcClientId, clientDisplayName, round)
     };
 }
 
-/** Mark a confirmed secure-message delivery as durable for this round. */
+/** Mark a confirmed secure-message delivery as waiting for bureau results. */
 export async function markDeliveryCompleted(crcClientId, round, lockedState) {
     const id = String(crcClientId);
-    const deliveredState = deliveryState(round, "delivered");
+    const deliveredState = "waiting";
     const supabase = getSupabase();
 
     const { data, error } = await supabase
@@ -272,23 +280,40 @@ export async function markDeliveryCompleted(crcClientId, round, lockedState) {
     }
 
     if (!data) {
-        return { ok: false, reason: "delivery_completion_conflict", deliveredState };
+        return {
+            ok: false,
+            reason: "delivery_completion_conflict",
+            deliveredState,
+        };
     }
 
-    return { ok: true, deliveredState, state: data.processing_state };
+    return {
+        ok: true,
+        deliveredState,
+        state: data.processing_state,
+    };
 }
 
 /**
- * Release a lock only when Submit definitely did not happen. Never call this
- * after an unconfirmed Submit click or a confirmed delivery.
+ * Release the lock only when Submit definitely did not happen.
  */
-export async function releaseDeliveryLock(crcClientId, round, lockedState, previousState) {
+export async function releaseDeliveryLock(
+    crcClientId,
+    round,
+    lockedState,
+    previousState
+) {
     const id = String(crcClientId);
     const supabase = getSupabase();
 
+    const safePreviousState =
+        ["ready", "blocked", "complete"].includes(previousState)
+            ? previousState
+            : "ready";
+
     const { data, error } = await supabase
         .from(CLIENT_STATE_TABLE)
-        .update({ processing_state: previousState })
+        .update({ processing_state: safePreviousState })
         .eq("crc_client_id", id)
         .eq("current_round", Number(round))
         .eq("processing_state", lockedState)
@@ -299,5 +324,8 @@ export async function releaseDeliveryLock(crcClientId, round, lockedState, previ
         throw new Error(`Failed to release M8 delivery lock: ${error.message}`);
     }
 
-    return { ok: Boolean(data), state: data?.processing_state ?? null };
+    return {
+        ok: Boolean(data),
+        state: data?.processing_state ?? null,
+    };
 }
