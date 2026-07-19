@@ -59,10 +59,6 @@ function exactText(value) {
     return typeof value === "string" ? value.trim() : "";
 }
 
-function normalizeClientName(value) {
-    return exactText(value).replace(/\s+/g, " ").toLocaleLowerCase("en-US");
-}
-
 function findLetterMismatch(letters, clientName, crcClientId) {
     return letters.find((letter) => {
         const letterId = letter?.crcClientId ?? letter?.crc_client_id ?? null;
@@ -70,7 +66,7 @@ function findLetterMismatch(letters, clientName, crcClientId) {
 
         return (
             (letterId !== null && String(letterId) !== String(crcClientId)) ||
-            (letterName !== null && normalizeClientName(letterName) !== normalizeClientName(clientName))
+            (letterName !== null && exactText(letterName) !== exactText(clientName))
         );
     });
 }
@@ -103,11 +99,9 @@ export async function runMilestone8(data = {}) {
         return report;
     }
 
-    const lettersOk = letterResult.lettersOk === true || letterResult.letters_ok === true;
-
-    if (!lettersOk) {
+    if (letterResult.lettersOk !== true) {
         report.blockedReason = "m7_result_not_ok";
-        report.failureReason = "Supplied M7 result has neither lettersOk nor letters_ok set to true.";
+        report.failureReason = "Supplied M7 result has lettersOk !== true.";
         report.finalStatus = "blocked";
         return report;
     }
@@ -248,9 +242,62 @@ export async function runMilestone8(data = {}) {
 
         report.deliveryMarkerPersisted = true;
 
+        // sendSecureMessage finishes on CRC's secure-message page, not on the
+        // client dashboard. crcClientStatus requires a verified client-dashboard
+        // context because it snapshots the profile before changing Status.
+        //
+        // Start a clean CRC session, reopen the exact client, and re-verify the
+        // authoritative CRC id before allowing the one-field status write.
+        try {
+            if (browser) await browser.close();
+        } catch {
+            // ignore close errors; the new status session is authoritative
+        }
+        browser = null;
+
+        const statusSession = await launchBrowser();
+        browser = statusSession.browser;
+        const statusPage = statusSession.page;
+
+        await loginToCRC(statusPage);
+
+        const reopened = await openClient(statusPage, clientName);
+
+        if (!reopened?.clientFound || !reopened?.clientOpened) {
+            report.statusUpdateFailed = true;
+            report.failureReason =
+                "Message sent, confirmed, and duplicate-protected, but CRC could not " +
+                "reopen the client dashboard for the status update. Do NOT resend; " +
+                "set status manually.";
+            report.finalStatus = "critical_partial_completion";
+            report.statusUpdateResult = {
+                ok: false,
+                statusWritten: null,
+                error_code: "STATUS_CLIENT_REOPEN_FAILED",
+            };
+            return report;
+        }
+
+        const reopenedClientId = String(await getCrcClientId(statusPage));
+
+        if (reopenedClientId !== actualClientId) {
+            report.statusUpdateFailed = true;
+            report.failureReason =
+                `Message sent, confirmed, and duplicate-protected, but status-session ` +
+                `identity verification opened CRC id ${reopenedClientId} instead of ` +
+                `${actualClientId}. Do NOT resend; set status manually.`;
+            report.finalStatus = "critical_partial_completion";
+            report.statusUpdateResult = {
+                ok: false,
+                statusWritten: null,
+                error_code: "STATUS_CLIENT_ID_MISMATCH",
+            };
+            return report;
+        }
+
         const statusResult = await updateClientStatus(
-            page,
-            actualClientId,
+            statusPage,
+            reopenedClientId,
             WAITING_FOR_BUREAU,
             { processingCycleComplete: true }
         );
