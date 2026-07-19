@@ -160,7 +160,18 @@ export const GOVERNED_TIER = Object.freeze({
 const TIER_BY_DECISION = Object.freeze({
     // GOVERNED per-decision automation tier — Master Governance Matrix v1.0 /
     // Code Alignment Map v1.0. Replaces evidence-class-derived tiering.
-    "BT-DM-0001": GOVERNED_TIER.CONSUMER_INPUT,
+    // BT-DM-0001 v2.1 ADDENDUM — Permissible-Purpose Inquiry Evaluation.
+    //
+    // The Addendum changes this record's Automation Mapping to VALIDATED_AUTOMATION
+    // where the account-matching rule is satisfied. The ONLY finding that reaches
+    // this record is INQ_NO_ASSOCIATED_ACCOUNT, which is that rule's positive
+    // result — a report-derived fact requiring no consumer-held knowledge.
+    //
+    // The unresolved case never arrives here: INQ_AUTHORIZATION_UNVERIFIABLE
+    // carries record:null and routes to consumer input ahead of any tier lookup,
+    // so BT-DM-0001's original CONSUMER_INPUT posture survives exactly where the
+    // Addendum says it should.
+    "BT-DM-0001": GOVERNED_TIER.VALIDATED_AUTOMATION,
     "BT-DM-0002": GOVERNED_TIER.VALIDATED_AUTOMATION,
     "BT-DM-0003": GOVERNED_TIER.HUMAN_REVIEW,
     "BT-DM-0004": GOVERNED_TIER.VALIDATED_AUTOMATION,
@@ -452,7 +463,21 @@ export const FINDING_TO_DECISION = Object.freeze({
         reason:
             "BT-DM-0001 (Unauthorized Hard Inquiry) requires the consumer to state that they did " +
             "not authorize the pull. That fact is not in the report and this engine will not " +
-            "assume it. Routed to the consumer, NOT to a dispute.",
+            "assume it. Routed to the consumer, NOT to a dispute. Under the v2.1 Addendum this " +
+            "path is reached only when the account-matching rule cannot be applied.",
+    },
+
+    // BT-DM-0001 v2.1 ADDENDUM — Permissible-Purpose Inquiry Evaluation.
+    //
+    // The Addendum supplies what v2.0 lacked: a REPORT-DERIVED trigger. The
+    // inquiry source has no associated account on the bureau's own report, so the
+    // dispute rests on the bureau's data rather than on a consumer-held fact.
+    // Automation is authorized for this path; BT-DM-0001's CONSUMER_INPUT mapping
+    // survives only for the UNRESOLVED case above.
+    INQ_NO_ASSOCIATED_ACCOUNT: {
+        record: "BT-DM-0001",
+        name: "Unauthorized Hard Inquiry",
+        evidence: "SELF_EVIDENT",
     },
 
     // ---- Context only ------------------------------------------------------

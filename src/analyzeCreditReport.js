@@ -778,9 +778,96 @@ function detectCollectionFindings(report) {
     return byItem;
 }
 
+/**
+ * BT-DM-0001 v2.1 ADDENDUM — inquiry-to-account association.
+ *
+ * Collect the normalized furnisher names that have a tradeline reported BY A
+ * GIVEN BUREAU. Bureau isolation is absolute here: an inquiry at Experian is
+ * matched only against accounts Experian itself reports. An account visible at
+ * TransUnion says nothing about Experian's permissible purpose.
+ */
+function furnisherNamesByBureau(report) {
+    const byBureau = new Map();
+
+    const add = (bureau, name) => {
+        const normalized = normalizeName(name ?? "");
+        if (!bureau || !normalized) return;
+        if (!byBureau.has(bureau)) byBureau.set(bureau, new Set());
+        byBureau.get(bureau).add(normalized);
+    };
+
+    // Every population that can carry a furnisher the bureau is reporting.
+    const records = [
+        ...(report.accounts ?? []),
+        ...(report.collections ?? []),
+        ...(report.public_records ?? []),
+    ];
+
+    for (const record of records) {
+        for (const tradeline of record.bureau_tradelines ?? []) {
+            add(tradeline.bureau, record.furnisher ?? tradeline.furnisher);
+            // A collection names the ORIGINAL creditor too. An inquiry by the
+            // original creditor is associated with the debt now held by the
+            // collector, so both names count as an association.
+            const obs = tradeline.observation?.normalized ?? tradeline.observation ?? {};
+            add(tradeline.bureau, obs.original_creditor);
+            add(tradeline.bureau, record.original_creditor);
+        }
+    }
+
+    return byBureau;
+}
+
+/**
+ * Is this inquiry source directly associated with an account the SAME bureau
+ * reports?
+ *
+ * Matching is deliberately GENEROUS, and the asymmetry is the point. A false
+ * "associated" costs one dispute we chose not to raise. A false "not associated"
+ * sends a permissible-purpose challenge against a furnisher the consumer plainly
+ * does business with — it is wrong in the letter, and the bureau can see that it
+ * is wrong. So anything plausibly the same entity counts as associated.
+ *
+ * Returns "ASSOCIATED", "NOT_ASSOCIATED", or "UNRESOLVED".
+ */
+function inquiryAssociation(inquiry, namesForBureau) {
+    const inquiryName = normalizeName(inquiry.furnisher ?? "");
+
+    // No furnisher name, or the bureau reports no furnishers we can read: the
+    // rule cannot be APPLIED. Absence of data is not evidence of absence.
+    if (!inquiryName) return "UNRESOLVED";
+    if (!namesForBureau || namesForBureau.size === 0) return "UNRESOLVED";
+
+    const inquiryTokens = inquiryName.split(" ").filter(Boolean);
+
+    for (const accountName of namesForBureau) {
+        if (accountName === inquiryName) return "ASSOCIATED";
+
+        // "CAPITAL ONE" vs "CAPITAL ONE BANK USA NA" — one contains the other.
+        if (accountName.includes(inquiryName) || inquiryName.includes(accountName)) {
+            return "ASSOCIATED";
+        }
+
+        // Leading-token agreement: the same institution written two ways.
+        // Requires at least two shared leading tokens, so "FIRST" alone cannot
+        // marry "FIRST PREMIER" to "FIRST NATIONAL".
+        const accountTokens = accountName.split(" ").filter(Boolean);
+        const shared = Math.min(inquiryTokens.length, accountTokens.length);
+
+        if (shared >= 2) {
+            let agree = 0;
+            while (agree < shared && inquiryTokens[agree] === accountTokens[agree]) agree += 1;
+            if (agree >= 2) return "ASSOCIATED";
+        }
+    }
+
+    return "NOT_ASSOCIATED";
+}
+
 function detectInquiryFindings(report, asOf) {
     const results = [];
     const inquiries = report.inquiries ?? [];
+    const namesByBureau = furnisherNamesByBureau(report);
 
     const byFurnisherBureau = new Map();
 
@@ -832,19 +919,48 @@ function detectInquiryFindings(report, asOf) {
             );
         }
 
-        // WE DO NOT ASSERT THAT AN INQUIRY WAS UNAUTHORIZED.
+        // ---- BT-DM-0001 v2.1 ADDENDUM: PERMISSIBLE-PURPOSE EVALUATION ------
         //
-        // Authorization is a fact about what the CONSUMER permitted. It is not
-        // in the credit report and cannot be derived from it. This finding
-        // states what we do NOT know, and routes the question to the consumer.
-        findings.push(
-            finding(
-                "INQ_AUTHORIZATION_UNVERIFIABLE",
-                `Whether ${inquiry.furnisher} was authorized to pull this report cannot be determined ` +
-                    `from the credit report. It requires confirmation from the consumer.`,
-                { furnisher: inquiry.furnisher, inquiry_date: inquiry.inquiry_date }
-            )
+        // WE STILL DO NOT ASSERT THAT AN INQUIRY WAS UNAUTHORIZED. Authorization
+        // is a fact about what the CONSUMER permitted, and it is not in the
+        // report. What IS in the report is whether the inquiry source has an
+        // account here at all. The v2.1 Addendum makes that absence the trigger.
+        const association = inquiryAssociation(
+            inquiry,
+            namesByBureau.get(inquiry.bureau)
         );
+
+        if (association === "NOT_ASSOCIATED") {
+            // Report-derived. No consumer-held fact required.
+            findings.push(
+                finding(
+                    "INQ_NO_ASSOCIATED_ACCOUNT",
+                    `${inquiry.furnisher} has no account or tradeline reported by ${inquiry.bureau}.`,
+                    {
+                        furnisher: inquiry.furnisher,
+                        inquiry_date: inquiry.inquiry_date ?? null,
+                        bureau: inquiry.bureau,
+                    }
+                )
+            );
+        } else if (association === "UNRESOLVED") {
+            // The rule could not be APPLIED — the inquiry has no readable source,
+            // or this bureau reports no furnishers we can compare against. That is
+            // exactly the case the Addendum reserves for consumer input.
+            findings.push(
+                finding(
+                    "INQ_AUTHORIZATION_UNVERIFIABLE",
+                    `Whether ${inquiry.furnisher ?? "this inquiry source"} was authorized to pull this ` +
+                        `report cannot be determined from the credit report, and the account-matching ` +
+                        `rule cannot be applied from the available data. It requires confirmation ` +
+                        `from the consumer.`,
+                    { furnisher: inquiry.furnisher ?? null, inquiry_date: inquiry.inquiry_date ?? null }
+                )
+            );
+        }
+        // ASSOCIATED: the bureau reports an account for this furnisher, so the
+        // inquiry is not disputed SOLELY as an inquiry. Any INQ_DUPLICATE or
+        // INQ_BEYOND_REPORTING_PERIOD finding above still stands on its own.
 
         results.push({
             stableItemKey: inquiry.stable_item_key,

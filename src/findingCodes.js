@@ -400,6 +400,25 @@ export const FINDING_CODES = Object.freeze({
             "NOT know — it is not an assertion that the inquiry was unauthorized.",
     },
 
+    // BT-DM-0001 v2.1 ADDENDUM — Permissible-Purpose Inquiry Evaluation.
+    //
+    // The inquiry source has no directly associated account or tradeline on the
+    // SAME bureau report. That is a report-derived fact: it is observable in the
+    // bureau's own data and requires no consumer-held knowledge to establish.
+    //
+    // It is NOT an assertion that the inquiry was unauthorized, fraudulent, or the
+    // product of identity theft. It states an absence, and asks the bureau to do
+    // what the FCRA already requires of it — identify the permissible purpose.
+    INQ_NO_ASSOCIATED_ACCOUNT: {
+        level: LEVEL.ITEM,
+        severity: SEVERITY.MEDIUM,
+        requires: REQUIRES.REPORT_ONLY,
+        summary:
+            "This inquiry source has no account or tradeline reported by the same bureau. " +
+            "The absence of an associated account is established from the report itself. " +
+            "It is not an assertion of identity theft, fraud, or misuse.",
+    },
+
     // =======================================================================
     // PUBLIC RECORDS
     // =======================================================================

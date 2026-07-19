@@ -62,9 +62,8 @@
  */
 
 import { verifyIdentity, formatAddress } from "./clientIdentity.js";
-import { selectVoice } from "./voice.js";
-import { resolveRecipient } from "./recipientLibrary.js";
-import { createBureauFidelity, hasReported, NO_REPORTED_VALUE } from "./bureauFidelity.js";
+import { selectVoice, resolveRecipient } from "./voice/index.js";
+import { createBureauFidelity, hasReported, NO_REPORTED_VALUE } from "../bureauFidelity.js";
 
 export const LETTER_SCHEMA_VERSION = "BT-LETTER-3.0";
 
@@ -180,7 +179,24 @@ const AUTH = {
     REINVESTIGATION: "FCRA § 611 (15 U.S.C. § 1681i) — reinvestigation of disputed information.",
     OBSOLETE: "FCRA § 605 (15 U.S.C. § 1681c) — obsolete information may not be reported.",
     DOFD: "FCRA § 605(c) (15 U.S.C. § 1681c(c)) — the reporting period runs from the date of first delinquency.",
+    // BT-DM-0001 v2.1 Addendum / BT-CW-0003. Deliberately NOT added to
+    // AUTHORITY_PRIORITY: it governs inquiries only, and must not alter the
+    // authority chosen for any tradeline.
+    PERMISSIBLE_PURPOSE:
+        "FCRA § 604 (15 U.S.C. § 1681b) — a consumer report may be furnished only for a permissible purpose.",
 };
+
+// BT-DM-0001 v2.1 Addendum — required wording, stated verbatim.
+const INQUIRY_STATEMENT =
+    "I do not recognize this inquiry. Please identify and verify the permissible purpose " +
+    "for accessing my credit file. If you cannot verify a lawful permissible purpose, " +
+    "delete the inquiry.";
+
+// Mirrors BT-DM-0001's governed remedy. Used only when the Strategy Engine
+// supplies none, so the letter still does not invent a remedy of its own.
+const INQUIRY_REMEDY =
+    "Identify and verify the permissible purpose for this inquiry, and delete the inquiry " +
+    "if a lawful permissible purpose cannot be verified.";
 
 // STRONGEST FIRST. Exactly ONE authority is cited per account.
 //
@@ -551,6 +567,83 @@ export async function generateLetters(chain, analysis, context = {}) {
                 continue;
             }
 
+            // ---- BT-DM-0001 v2.1 ADDENDUM: PERMISSIBLE-PURPOSE INQUIRY -----
+            //
+            // An inquiry is not a tradeline. It has no account number, and the
+            // Bureau Fidelity Layer indexes tradelines only — so both guards below
+            // (reported view, masked account) would withhold every inquiry dispute
+            // for reasons that simply do not apply to an inquiry.
+            //
+            // Scoped to INQ_NO_ASSOCIATED_ACCOUNT alone. Every other inquiry
+            // finding keeps its existing behavior exactly.
+            //
+            // The values quoted are the inquiry's OWN reported values, captured
+            // verbatim in the finding evidence at analysis time — not derived,
+            // not reformatted.
+            const permissiblePurpose = source?.findings?.find(
+                (f) => f.code === "INQ_NO_ASSOCIATED_ACCOUNT"
+            );
+
+            if (permissiblePurpose) {
+                const ev = permissiblePurpose.evidence ?? {};
+                const inquirySource = ev.furnisher ?? item.furnisher ?? null;
+
+                // A dispute that cannot name the inquiry source cannot identify
+                // what it is disputing.
+                if (!inquirySource) {
+                    withheld.push({
+                        stableItemKey: item.stableItemKey,
+                        bureau,
+                        furnisher: null,
+                        reason:
+                            "No inquiry source is reported for this inquiry, so the dispute cannot " +
+                            "identify it. Withheld rather than sent unidentifiable.",
+                    });
+                    continue;
+                }
+
+                const dateLine = ev.inquiry_date ? [`Inquiry Date: ${ev.inquiry_date}`] : [];
+                const historyLine = item.escalated
+                    ? [`Previously disputed. The inquiry remains on my file and was not removed.`, ``]
+                    : [];
+
+                sections.push({
+                    stableItemKey: item.stableItemKey,
+                    stableAccountKey: null, // an inquiry exists at ONE bureau
+                    furnisher: inquirySource,
+                    maskedAccount: null,    // an inquiry has no account number
+                    round: item.round,
+                    escalated: item.escalated,
+                    requestedRemedy: item.requestedRemedy ?? INQUIRY_REMEDY,
+                    strategy: item.strategy?.strategy ?? null,
+                    decisionRecord: item.decisionRecord,
+                    reason: item.reason?.reason ?? null,
+                    instruction: item.instruction?.instruction ?? null,
+                    blueprint: item.blueprint?.blueprint ?? null,
+                    baseline: false,
+                    complianceGated: false,
+                    unspeccedFindings: [],
+                    findingCodes: ["INQ_NO_ASSOCIATED_ACCOUNT"],
+                    // AN INQUIRY IS NOT AN ACCOUNT. Reconciliation balances letter
+                    // ACCOUNT sections against disputed TRADELINES; an inquiry is
+                    // neither, so counting it there would break a true invariant
+                    // with a false population.
+                    isInquiry: true,
+                    text: [
+                        `${inquirySource}`,
+                        ...dateLine,
+                        ``,
+                        ...historyLine,
+                        INQUIRY_STATEMENT,
+                        ``,
+                        AUTH.PERMISSIBLE_PURPOSE,
+                        ``,
+                        `Requested action: ${item.requestedRemedy ?? INQUIRY_REMEDY}`,
+                    ].join("\n"),
+                });
+                continue;
+            }
+
             // Resolve THIS tradeline's reported view. A tradeline the Fidelity
             // Layer has never heard of cannot be quoted — that is a fail-closed
             // signal, not a value to invent.
@@ -848,7 +941,10 @@ export async function generateLetters(chain, analysis, context = {}) {
             escalated,
             itemCount: sections.length,
             stableItemKeys: sections.map((s) => s.stableItemKey),
-            accountSections: sections,
+            // Account sections only — the population reconciliation balances against
+            // disputed tradelines. Inquiry sections are reported separately.
+            accountSections: sections.filter((sec) => !sec.isInquiry),
+            inquirySections: sections.filter((sec) => sec.isInquiry),
             body,
 
             // Audit: Kris can reproduce this letter's voice from the combination alone.
