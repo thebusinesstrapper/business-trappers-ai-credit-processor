@@ -18,6 +18,7 @@ import { discoverM8CrcV2 } from "./src/discoverM8CrcV2.js"; // TEMPORARY — M8 
 import { discoverM8Messages } from "./src/discoverM8Messages.js"; // TEMPORARY — M8 Messages discovery
 import { runMilestone8 } from "./src/milestone8.js"; // M8 secure-message delivery
 import { runStatusOnlyVerification } from "./src/verifyStatusOnly.js"; // TEMPORARY — Elizabeth/15 status-only verification
+import { runControlledClient } from "./src/processControlledClient.js"; // TEMPORARY — five-client controlled validation
 import { extractSkeletonNode, buildLiabilityMap, buildFieldMap, buildCollisionMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
 
 dotenv.config();
@@ -406,6 +407,20 @@ app.post("/milestone-8", async (req, res) => {
 app.post("/verify-status-only", async (req, res) => {
     try {
         const result = await runStatusOnlyVerification(req.body);
+        res.json(result);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+        });
+    }
+});
+
+// TEMPORARY — one controlled client at a time: fresh M7 -> same-client M8.
+app.post("/process-controlled-client", async (req, res) => {
+    try {
+        const result = await runControlledClient(req.body);
         res.json(result);
     } catch (error) {
         console.error(error);

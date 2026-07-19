@@ -1,22 +1,11 @@
 /**
- * milestone8.js — M8 secure-delivery orchestrator (Elizabeth Kelley test only).
+ * milestone8.js — M8 secure-delivery orchestrator.
  *
- * Consumes an ALREADY-FINALIZED M7 letterResult supplied in the request body.
- * It NEVER reruns, reanalyzes, or regenerates M7 (M7 persists nothing and is
- * frozen). The supplied result is treated as immutable input.
+ * Consumes one already-finalized M7 result for the SAME client. For a live send,
+ * it acquires a durable, round-specific Supabase lock before Submit and marks
+ * the delivery complete immediately after CRC confirms success.
  *
- * Flow:
- *   validate supplied M7 result (Elizabeth/15, lettersOk, nonempty letters)
- *   -> m8Pdf.buildBureauPdfs
- *   -> launchBrowser -> loginToCRC -> openClient -> getCrcClientId (assert 15)
- *   -> DUPLICATE-PREVENTION GATE:
- *        * Elizabeth Kelley / client 15  -> hard-coded TEST EXCEPTION (allowed)
- *        * any other client              -> BLOCKED (no durable store tonight)
- *   -> crcSecureMessage.sendSecureMessage (STOPS before Submit unless approved)
- *   -> ONLY on exact success confirmation: updateClientStatus("Waiting For Bureau")
- *
- * Preserves Supabase round/memory logic EXACTLY: it does not write current_round,
- * does not advance the round, and creates no new Supabase column or table.
+ * It never advances current_round.
  */
 
 import { launchBrowser } from "./browserbase.js";
@@ -26,15 +15,18 @@ import { getCrcClientId } from "./crcClientId.js";
 import { updateClientStatus } from "./crcClientStatus.js";
 import { buildBureauPdfs } from "./m8Pdf.js";
 import { sendSecureMessage } from "./crcSecureMessage.js";
+import {
+    acquireDeliveryLock,
+    markDeliveryCompleted,
+    releaseDeliveryLock,
+} from "./clientMemory.js";
 
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-export const MILESTONE8_VERSION = "BT-M8-DELIVERY-1.1";
+export const MILESTONE8_VERSION = "BT-M8-DELIVERY-1.2";
 
-const AUTHORIZED_CLIENT_ID = "15";
-const AUTHORIZED_CLIENT_NAME = "Elizabeth Kelley";
 const WAITING_FOR_BUREAU = "Waiting For Bureau";
 
 function buildReport(overrides = {}) {
@@ -55,84 +47,86 @@ function buildReport(overrides = {}) {
         messageSuccessConfirmed: false,
         finalStatus: null,
         duplicatePrevented: false,
-        testClientDuplicateException: false,
+        deliveryLockAcquired: false,
+        deliveryMarkerPersisted: false,
         blockedReason: null,
         failureReason: null,
         ...overrides,
     };
 }
 
-/**
- * Is this the hard-coded Elizabeth Kelley / client 15 test record? Both the exact
- * name AND the exact id must match. Every other client is treated as production.
- */
-function isTestClient(clientName, crcClientId) {
-    return clientName === AUTHORIZED_CLIENT_NAME && String(crcClientId) === AUTHORIZED_CLIENT_ID;
+function exactText(value) {
+    return typeof value === "string" ? value.trim() : "";
+}
+
+function findLetterMismatch(letters, clientName, crcClientId) {
+    return letters.find((letter) => {
+        const letterId = letter?.crcClientId ?? letter?.crc_client_id ?? null;
+        const letterName = letter?.clientName ?? letter?.client_name ?? null;
+
+        return (
+            (letterId !== null && String(letterId) !== String(crcClientId)) ||
+            (letterName !== null && exactText(letterName) !== exactText(clientName))
+        );
+    });
 }
 
 /**
  * @param {object} data
- * @param {string} data.clientName            must be "Elizabeth Kelley"
- * @param {boolean} data.submitApproved       explicit gate for the live Submit click
- * @param {object} data.letterResult          REQUIRED finalized M7 result:
- *                                             { lettersOk:true, letters:[...], withheld?:[...] }
+ * @param {string} data.clientName
+ * @param {string|number} data.crcClientId       expected authoritative CRC id
+ * @param {boolean} data.submitApproved
+ * @param {object} data.letterResult             finalized M7 result for this client
  */
 export async function runMilestone8(data = {}) {
-    const clientName = data?.clientName ?? null;
+    const clientName = exactText(data?.clientName);
+    const expectedClientId = data?.crcClientId == null ? "" : String(data.crcClientId).trim();
     const submitApproved = data?.submitApproved === true;
     const letterResult = data?.letterResult ?? null;
-    const report = buildReport({ clientName, submitApproved });
+    const report = buildReport({ clientName, crcClientId: expectedClientId || null, submitApproved });
 
-    // ---- 0) Client identity guard (name only at this stage) ----------------
-    if (clientName !== AUTHORIZED_CLIENT_NAME) {
-        report.blockedReason = "client_not_authorized_for_m8_test";
-        report.failureReason =
-            `M8 delivery authorized only for ${AUTHORIZED_CLIENT_NAME} (Client ${AUTHORIZED_CLIENT_ID}).`;
+    if (!clientName || !expectedClientId) {
+        report.blockedReason = "client_identity_required";
+        report.failureReason = "Both clientName and crcClientId are required.";
         report.finalStatus = "blocked";
         return report;
     }
 
-    // ---- 1) Validate the SUPPLIED (immutable) M7 result --------------------
-    // M7 persists nothing and is frozen. We consume the finalized result from the
-    // request body; we never rerun, reanalyze, or regenerate it.
     if (!letterResult || typeof letterResult !== "object") {
         report.blockedReason = "m7_output_not_supplied";
         report.failureReason = "No finalized M7 letterResult supplied in the request body.";
         report.finalStatus = "blocked";
         return report;
     }
+
     if (letterResult.lettersOk !== true) {
         report.blockedReason = "m7_result_not_ok";
         report.failureReason = "Supplied M7 result has lettersOk !== true.";
         report.finalStatus = "blocked";
         return report;
     }
+
     if (!Array.isArray(letterResult.letters) || letterResult.letters.length === 0) {
         report.blockedReason = "m7_letters_missing";
         report.failureReason = "Supplied M7 result has no letters.";
         report.finalStatus = "blocked";
         return report;
     }
-    // Belt-and-suspenders: the supplied letters must belong to this client if they
-    // carry any client identifier. (We do not mutate the result.)
-    const mismatched = letterResult.letters.find((l) =>
-        (l.crcClientId && String(l.crcClientId) !== AUTHORIZED_CLIENT_ID) ||
-        (l.clientName && l.clientName !== AUTHORIZED_CLIENT_NAME)
-    );
-    if (mismatched) {
+
+    if (findLetterMismatch(letterResult.letters, clientName, expectedClientId)) {
         report.blockedReason = "m7_result_client_mismatch";
-        report.failureReason = "Supplied M7 letters do not all belong to Elizabeth Kelley / 15.";
+        report.failureReason = "Supplied M7 letters do not all belong to the requested client.";
         report.finalStatus = "blocked";
         return report;
     }
 
-    // ---- 2) Build the bureau PDFs (fail-closed inside m8Pdf) ---------------
     const pdfBuild = await buildBureauPdfs(letterResult);
     report.round = pdfBuild.round;
-    report.bureausGenerated = pdfBuild.pdfs.map((p) => p.bureau);
-    report.pdfFiles = pdfBuild.pdfs.map((p) => p.filename);
-    report.pdfSizes = Object.fromEntries(pdfBuild.pdfs.map((p) => [p.filename, p.bytes]));
+    report.bureausGenerated = pdfBuild.pdfs.map((pdf) => pdf.bureau);
+    report.pdfFiles = pdfBuild.pdfs.map((pdf) => pdf.filename);
+    report.pdfSizes = Object.fromEntries(pdfBuild.pdfs.map((pdf) => [pdf.filename, pdf.bytes]));
     report.expectedAttachmentCount = pdfBuild.pdfs.length;
+
     if (!pdfBuild.ok) {
         report.failureReason = `PDF build failed: ${pdfBuild.failureReason}`;
         report.finalStatus = "manual_review_required";
@@ -140,8 +134,9 @@ export async function runMilestone8(data = {}) {
     }
 
     let browser;
+    let deliveryLock = null;
+
     try {
-        // ---- 3) Live session: launch -> login -> open -> assert client 15 --
         const session = await launchBrowser();
         browser = session.browser;
         const page = session.page;
@@ -149,73 +144,111 @@ export async function runMilestone8(data = {}) {
         await loginToCRC(page);
         await openClient(page, clientName);
 
-        const crcClientId = String(await getCrcClientId(page));
-        report.crcClientId = crcClientId;
-        if (crcClientId !== AUTHORIZED_CLIENT_ID) {
+        const actualClientId = String(await getCrcClientId(page));
+        report.crcClientId = actualClientId;
+
+        if (actualClientId !== expectedClientId) {
             report.blockedReason = "wrong_client_opened";
             report.failureReason =
-                `Opened client id ${crcClientId}, expected ${AUTHORIZED_CLIENT_ID}. Aborting.`;
+                `Opened client id ${actualClientId}, expected ${expectedClientId}. Aborting.`;
             report.finalStatus = "blocked";
             return report;
         }
 
-        // ---- 4) DUPLICATE-PREVENTION GATE ----------------------------------
-        // Durable per-round duplicate prevention would require a Supabase store we
-        // are NOT creating tonight. Elizabeth Kelley / client 15 is an explicitly
-        // authorized TEST record: repeated end-to-end sends are permitted, so the
-        // durable guard is waived FOR THIS RECORD ONLY. Every other client is hard-
-        // blocked from live Submit until durable prevention exists.
-        if (isTestClient(clientName, crcClientId)) {
-            report.testClientDuplicateException = true;
-        } else {
-            report.blockedReason = "durable_duplicate_prevention_not_available";
-            report.failureReason =
-                "Live Submit is blocked for non-test clients until durable per-round " +
-                "duplicate prevention (CRC Client ID + current round) exists.";
-            report.finalStatus = "blocked";
-            return report;
+        // Dry runs never acquire or alter a delivery marker.
+        if (submitApproved) {
+            deliveryLock = await acquireDeliveryLock(
+                actualClientId,
+                clientName,
+                pdfBuild.round
+            );
+
+            if (!deliveryLock.ok) {
+                report.duplicatePrevented = [
+                    "duplicate_delivery_prevented",
+                    "delivery_already_in_progress",
+                    "delivery_lock_conflict",
+                ].includes(deliveryLock.reason);
+                report.blockedReason = deliveryLock.reason;
+                report.failureReason =
+                    `Live delivery lock was not acquired: ${deliveryLock.reason}.`;
+                report.finalStatus = "blocked";
+                report.deliveryLock = deliveryLock;
+                return report;
+            }
+
+            report.deliveryLockAcquired = true;
         }
 
-        // ---- 5) Deliver (STOPS before Submit unless approved) --------------
         const send = await sendSecureMessage(
             page,
-            { clientName, crcClientId, pdfs: pdfBuild.pdfs, submitApproved },
+            {
+                clientName,
+                crcClientId: actualClientId,
+                pdfs: pdfBuild.pdfs,
+                submitApproved,
+            },
             { fs, path, os }
         );
+
         report.selectedRecipient = send.selectedRecipient;
         report.expectedAttachmentCount = send.expectedAttachmentCount;
         report.verifiedAttachmentCount = send.verifiedAttachmentCount;
         report.messageSubmitted = send.messageSubmitted;
         report.messageSuccessConfirmed = send.messageSuccessConfirmed;
 
-        // 5a) Dry run: stopped before Submit. CRC status UNCHANGED.
         if (send.stoppedBeforeSubmit) {
             report.readyToSubmit = send.readyToSubmit === true;
             report.finalStatus = "READY_NOT_SENT";
-            report.note =
-                "Readiness report only. CRC status unchanged. Re-run with submitApproved:true to send.";
+            report.note = "Readiness report only. No delivery marker or CRC status was changed.";
             return report;
         }
 
-        // 5b) Failure at/after Submit but success NOT confirmed. Do NOT write
-        // Waiting For Bureau. Return manual-review result (CRC status unchanged).
         if (!send.messageSuccessConfirmed) {
+            // Safe to release only when Submit was definitely not clicked.
+            if (deliveryLock?.ok && send.messageSubmitted !== true) {
+                report.deliveryLockReleased = await releaseDeliveryLock(
+                    actualClientId,
+                    pdfBuild.round,
+                    deliveryLock.lockedState,
+                    deliveryLock.previousState
+                );
+            }
+
             report.failureReason =
                 `Send failed at stage "${send.failedStage}": ${send.failureReason}`;
-            // If the click happened but confirmation never appeared, the message
-            // MAY have been sent — surface that, do not resend.
             report.finalStatus = send.messageSubmitted
                 ? "manual_review_required_submit_unconfirmed"
                 : "manual_review_required";
             return report;
         }
 
-        // ---- 6) EXACT success confirmed -> update status -------------------
-        // updateClientStatus(page, crcClientId, newStatus, { processingCycleComplete })
-        // returns { ok: true, ... } on success (confirmed from the real file).
-        const statusResult = await updateClientStatus(
-            page, crcClientId, WAITING_FOR_BUREAU, { processingCycleComplete: true }
+        // Persist the duplicate-prevention marker immediately after exact CRC
+        // success confirmation, before any later status-write failure can occur.
+        const completed = await markDeliveryCompleted(
+            actualClientId,
+            pdfBuild.round,
+            deliveryLock.lockedState
         );
+        report.deliveryCompletionResult = completed;
+
+        if (!completed.ok) {
+            report.failureReason =
+                "Message sent and confirmed, but the durable delivery marker could not be persisted. " +
+                "Do NOT resend; route to manual review.";
+            report.finalStatus = "critical_partial_completion_delivery_marker";
+            return report;
+        }
+
+        report.deliveryMarkerPersisted = true;
+
+        const statusResult = await updateClientStatus(
+            page,
+            actualClientId,
+            WAITING_FOR_BUREAU,
+            { processingCycleComplete: true }
+        );
+
         report.statusUpdateResult = {
             ok: statusResult?.ok === true,
             statusWritten: statusResult?.statusWritten ?? null,
@@ -223,29 +256,26 @@ export async function runMilestone8(data = {}) {
         };
 
         if (statusResult?.ok !== true) {
-            // CRITICAL PARTIAL COMPLETION: the secure message WAS sent and
-            // confirmed, but the status write failed. Do NOT resend. Human must
-            // set the status manually.
             report.statusUpdateFailed = true;
             report.failureReason =
-                `Message sent & confirmed, but status update failed ` +
+                `Message sent, confirmed, and duplicate-protected, but status update failed ` +
                 `(${statusResult?.error_code ?? "unknown"}). Do NOT resend; set status manually.`;
             report.finalStatus = "critical_partial_completion";
             return report;
         }
 
-        // ---- 7) Delivery complete. (No durable delivery marker persisted —
-        // test-client exception; round logic untouched.) --------------------
         report.finalStatus = WAITING_FOR_BUREAU;
         report.failureReason = null;
         return report;
     } catch (error) {
         report.failureReason = error.message;
-        // Unknown mid-flight error: if we had already confirmed success we would
-        // have returned above, so this path did NOT confirm a send.
         report.finalStatus = report.finalStatus ?? "manual_review_required";
         return report;
     } finally {
-        try { if (browser) await browser.close(); } catch { /* ignore */ }
+        try {
+            if (browser) await browser.close();
+        } catch {
+            // ignore browser-close errors
+        }
     }
 }
