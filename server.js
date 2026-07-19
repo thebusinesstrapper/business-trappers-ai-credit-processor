@@ -19,6 +19,7 @@ import { discoverM8Messages } from "./src/discoverM8Messages.js"; // TEMPORARY �
 import { runMilestone8 } from "./src/milestone8.js"; // M8 secure-message delivery
 import { runStatusOnlyVerification } from "./src/verifyStatusOnly.js"; // TEMPORARY — Elizabeth/15 status-only verification
 import { runControlledClient } from "./src/processControlledClient.js"; // TEMPORARY — five-client controlled validation
+import { startClientQueue, getClientQueueJob } from "./src/processClientQueue.js"; // Production CRC queue
 import { extractSkeletonNode, buildLiabilityMap, buildFieldMap, buildCollisionMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
 
 dotenv.config();
@@ -429,6 +430,35 @@ app.post("/process-controlled-client", async (req, res) => {
             error: error.message,
         });
     }
+});
+
+
+// PRODUCTION — start the full CRC client queue in the background.
+app.post("/process-client-queue", (req, res) => {
+    try {
+        const result = startClientQueue(req.body);
+        res.status(result.ok ? 202 : 400).json(result);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+        });
+    }
+});
+
+// PRODUCTION — poll a running/completed queue job.
+app.get("/process-client-queue/:jobId", (req, res) => {
+    const result = getClientQueueJob(req.params.jobId);
+
+    if (!result) {
+        return res.status(404).json({
+            success: false,
+            error: "Queue job not found. The service may have restarted or the job ID is invalid.",
+        });
+    }
+
+    res.json(result);
 });
 
 /**
