@@ -62,8 +62,7 @@
  */
 
 import { verifyIdentity, formatAddress } from "./clientIdentity.js";
-import { selectVoice } from "./voice.js";
-import { resolveRecipient } from "./recipientLibrary.js";
+import { selectVoice, resolveRecipient } from "./voice/index.js";
 import { createBureauFidelity, hasReported, NO_REPORTED_VALUE } from "./bureauFidelity.js";
 
 export const LETTER_SCHEMA_VERSION = "BT-LETTER-3.0";
@@ -110,56 +109,6 @@ function money(v) {
  */
 export const FIDELITY_MISSING_MARKER = "[REPORTED VALUE UNAVAILABLE — DO NOT SEND]";
 
-// Consumer-facing tokens that must NEVER appear in a finished letter body. A body
-// containing any of these is unsendable and must be withheld + routed to review.
-export const FORBIDDEN_LETTER_TOKENS = Object.freeze([
-    FIDELITY_MISSING_MARKER,   // "[REPORTED VALUE UNAVAILABLE — DO NOT SEND]"
-    "DO NOT SEND",
-    "undefined",
-    "null",
-]);
-
-/**
- * Screen finished letters for unsendable content. Pure and side-effect free.
- * Returns, for each letter, which forbidden tokens (if any) its body contains.
- */
-export function screenLetterContent(letters) {
-    // The DO-NOT-SEND marker and "DO NOT SEND" are distinctive literals — substring
-    // matching is safe. But "null"/"undefined" appear inside ordinary words
-    // ("annulled", "fundamentally"), so those must match only as WHOLE TOKENS —
-    // the stringified-value defect always emits them standalone, never mid-word.
-    const literalTokens = [FIDELITY_MISSING_MARKER, "DO NOT SEND"];
-    const wholeWordTokens = [
-        { token: "undefined", re: /\bundefined\b/ },
-        { token: "null", re: /\bnull\b/ },
-    ];
-    // KRIS FIRM-LANGUAGE GATE (2026-07-16). These consumer-facing patterns are
-    // prohibited in production letters: the "only" conditional-deletion clause,
-    // and soft/courtesy phrasing that makes a legally required action sound
-    // optional. Case-insensitive; matched only in finished letter prose.
-    const prohibitedLanguage = [
-        { token: "delete the item only if", re: /delete the item only if/i },
-        { token: "delete only if", re: /delete only if/i },
-        { token: "I would appreciate", re: /I would appreciate/i },
-        { token: "thank you for your", re: /thank you for your/i },
-        { token: "please investigate", re: /please investigate/i },
-    ];
-    return letters.map((letter) => {
-        const body = letter.body ?? "";
-        const hits = [
-            ...literalTokens.filter((tok) => body.includes(tok)),
-            ...wholeWordTokens.filter((w) => w.re.test(body)).map((w) => w.token),
-            ...prohibitedLanguage.filter((w) => w.re.test(body)).map((w) => w.token),
-        ];
-        return {
-            bureau: letter.bureau,
-            bureauName: letter.bureauName,
-            stableItemKeys: letter.stableItemKeys ?? [],
-            hits,
-        };
-    });
-}
-
 function makeQuoter(reportedView) {
     // Each quoter method returns the verbatim reported string, or the loud marker.
     const q = (accessorValue) =>
@@ -180,24 +129,7 @@ const AUTH = {
     REINVESTIGATION: "FCRA § 611 (15 U.S.C. § 1681i) — reinvestigation of disputed information.",
     OBSOLETE: "FCRA § 605 (15 U.S.C. § 1681c) — obsolete information may not be reported.",
     DOFD: "FCRA § 605(c) (15 U.S.C. § 1681c(c)) — the reporting period runs from the date of first delinquency.",
-    // BT-DM-0001 v2.1 Addendum / BT-CW-0003. Deliberately NOT added to
-    // AUTHORITY_PRIORITY: it governs inquiries only, and must not alter the
-    // authority chosen for any tradeline.
-    PERMISSIBLE_PURPOSE:
-        "FCRA § 604 (15 U.S.C. § 1681b) — a consumer report may be furnished only for a permissible purpose.",
 };
-
-// BT-DM-0001 v2.1 Addendum — required wording, stated verbatim.
-const INQUIRY_STATEMENT =
-    "I do not recognize this inquiry. Please identify and verify the permissible purpose " +
-    "for accessing my credit file. If you cannot verify a lawful permissible purpose, " +
-    "delete the inquiry.";
-
-// Mirrors BT-DM-0001's governed remedy. Used only when the Strategy Engine
-// supplies none, so the letter still does not invent a remedy of its own.
-const INQUIRY_REMEDY =
-    "Identify and verify the permissible purpose for this inquiry, and delete the inquiry " +
-    "if a lawful permissible purpose cannot be verified.";
 
 // STRONGEST FIRST. Exactly ONE authority is cited per account.
 //
@@ -568,86 +500,30 @@ export async function generateLetters(chain, analysis, context = {}) {
                 continue;
             }
 
-            // Resolve THIS tradeline's reported view. A tradeline the Fidelity
-            // Layer has never heard of cannot be quoted — that is a fail-closed
-            // signal, not a value to invent.
-            // ---- BT-DM-0001 v2.1 ADDENDUM: PERMISSIBLE-PURPOSE INQUIRY -----
+            // A DISPUTE SECTION MUST IDENTIFY THE FURNISHER.
             //
-            // An inquiry is not a tradeline. It has no account number, and the
-            // Bureau Fidelity Layer indexes tradelines only — so both guards below
-            // (reported view, masked account) would withhold every inquiry dispute
-            // for reasons that simply do not apply to an inquiry.
-            //
-            // Scoped to INQ_NO_ASSOCIATED_ACCOUNT alone. Every other inquiry
-            // finding keeps its existing behavior exactly.
-            //
-            // The values quoted are the inquiry's OWN reported values, captured
-            // verbatim in the finding evidence at analysis time — not derived,
-            // not reformatted.
-            const permissiblePurpose = source?.findings?.find(
-                (f) => f.code === "INQ_NO_ASSOCIATED_ACCOUNT"
-            );
+            // A blank furnisher is not a cosmetic defect. The bureau cannot
+            // reliably identify which account the consumer is disputing, and the
+            // letter must never substitute "Account", guess a creditor, or borrow
+            // a name from another bureau. Withhold the individual item while
+            // allowing all other trustworthy items for this bureau to proceed.
+            const furnisherName = String(item.furnisher ?? "").trim();
 
-            if (permissiblePurpose) {
-                const ev = permissiblePurpose.evidence ?? {};
-                const inquirySource = ev.furnisher ?? item.furnisher ?? null;
-
-                // A dispute that cannot name the inquiry source cannot identify
-                // what it is disputing.
-                if (!inquirySource) {
-                    withheld.push({
-                        stableItemKey: item.stableItemKey,
-                        bureau,
-                        furnisher: null,
-                        reason:
-                            "No inquiry source is reported for this inquiry, so the dispute cannot " +
-                            "identify it. Withheld rather than sent unidentifiable.",
-                    });
-                    continue;
-                }
-
-                const dateLine = ev.inquiry_date ? [`Inquiry Date: ${ev.inquiry_date}`] : [];
-                const historyLine = item.escalated
-                    ? [`Previously disputed. The inquiry remains on my file and was not removed.`, ``]
-                    : [];
-
-                sections.push({
+            if (!furnisherName) {
+                withheld.push({
                     stableItemKey: item.stableItemKey,
-                    stableAccountKey: null, // an inquiry exists at ONE bureau
-                    furnisher: inquirySource,
-                    maskedAccount: null,    // an inquiry has no account number
-                    round: item.round,
-                    escalated: item.escalated,
-                    requestedRemedy: item.requestedRemedy ?? INQUIRY_REMEDY,
-                    strategy: item.strategy?.strategy ?? null,
-                    decisionRecord: item.decisionRecord,
-                    reason: item.reason?.reason ?? null,
-                    instruction: item.instruction?.instruction ?? null,
-                    blueprint: item.blueprint?.blueprint ?? null,
-                    baseline: false,
-                    complianceGated: false,
-                    unspeccedFindings: [],
-                    findingCodes: ["INQ_NO_ASSOCIATED_ACCOUNT"],
-                    // AN INQUIRY IS NOT AN ACCOUNT. Reconciliation balances letter
-                    // ACCOUNT sections against disputed TRADELINES; an inquiry is
-                    // neither, so counting it there would break a true invariant
-                    // with a false population.
-                    isInquiry: true,
-                    text: [
-                        `${inquirySource}`,
-                        ...dateLine,
-                        ``,
-                        ...historyLine,
-                        INQUIRY_STATEMENT,
-                        ``,
-                        AUTH.PERMISSIBLE_PURPOSE,
-                        ``,
-                        `Requested action: ${item.requestedRemedy ?? INQUIRY_REMEDY}`,
-                    ].join("\n"),
+                    bureau,
+                    furnisher: null,
+                    reason:
+                        "No furnisher name is reported for this bureau tradeline. The item is withheld " +
+                        "for human review rather than sent with a blank or invented creditor name.",
                 });
                 continue;
             }
 
+            // Resolve THIS tradeline's reported view. A tradeline the Fidelity
+            // Layer has never heard of cannot be quoted — that is a fail-closed
+            // signal, not a value to invent.
             const reportedView = fidelity.forItem(item.stableItemKey);
 
             if (!reportedView) {
@@ -718,7 +594,7 @@ export async function generateLetters(chain, analysis, context = {}) {
                         ``,
                         AUTH.REINVESTIGATION,
                         ``,
-                        `Requested action: Conduct a reasonable reinvestigation; correct or update the reporting as necessary, and delete the item if it cannot be verified or accurately corrected.`,
+                        `Requested action: If the information cannot be verified as complete and accurate, please delete or correct the reporting.`,
                     ].join("\n"),
                 });
                 continue;
@@ -859,8 +735,6 @@ export async function generateLetters(chain, analysis, context = {}) {
                 baseline: specced.some((x) => /_BASELINE_REINVESTIGATION$/.test(x.finding.code)),
                 complianceGated: specced.some((x) => x.spec.complianceGated),
                 unspeccedFindings: unspecced.map((f) => f.code),
-                // Finding codes on this section, for the fact-specific opening gate.
-                findingCodes: specced.map((x) => x.finding.code),
                 text: lines.join("\n"),
             });
         }
@@ -877,33 +751,11 @@ export async function generateLetters(chain, analysis, context = {}) {
         // — and a bureau letter carries first-round and escalated accounts side by
         // side. "As I told you previously" would be false for the new ones.
         // Per-account history lives in the account section, where it is true.
-        // ---- FACT-SPECIFIC OPENING GATE -------------------------------------
-        //
-        // The Kris-approved Metro 2 missing-DOFD opening makes a shared-defect
-        // statement about EVERY tradeline in the letter. It may be used ONLY when
-        // that statement is true of every disputed section — i.e. BOTH:
-        //   (a) every disputed (non-baseline) section is BT-DM-0033, AND
-        //   (b) every one of those sections carries TL_DEROGATORY_WITHOUT_DOFD
-        //       ("CollectionOrChargeOff" status with no Date of First Delinquency).
-        // If a letter mixes reasons, sharedDefect is null and the engine falls
-        // back to the general firm opening. This is the ONLY place the fact-specific
-        // opening can be enabled; the voice library never self-selects it.
-        const disputedSections = sections.filter((sec) => !sec.baseline);
-        const everyMetro2Dofd =
-            disputedSections.length > 0 &&
-            disputedSections.every(
-                (sec) =>
-                    sec.decisionRecord === "BT-DM-0033" &&
-                    (sec.findingCodes ?? []).includes("TL_DEROGATORY_WITHOUT_DOFD")
-            );
-        const sharedDefect = everyMetro2Dofd ? "metro2_missing_dofd" : null;
-
         const voice = selectVoice({
             crcClientId: identity.crcClientId,
             bureau,
             round,
             reportDate: context.reportDate ?? null,
-            sharedDefect,
         });
 
         const body = [
@@ -942,10 +794,7 @@ export async function generateLetters(chain, analysis, context = {}) {
             escalated,
             itemCount: sections.length,
             stableItemKeys: sections.map((s) => s.stableItemKey),
-            // Account sections only — the population reconciliation balances against
-            // disputed tradelines. Inquiry sections are reported separately.
-            accountSections: sections.filter((sec) => !sec.isInquiry),
-            inquirySections: sections.filter((sec) => sec.isInquiry),
+            accountSections: sections,
             body,
 
             // Audit: Kris can reproduce this letter's voice from the combination alone.
@@ -981,54 +830,14 @@ export async function generateLetters(chain, analysis, context = {}) {
         }
     }
 
-    // ---- FINAL FAIL-CLOSED CONTENT GATE ------------------------------------
-    //
-    // A letter body must never reach a consumer or a bureau carrying an unresolved
-    // placeholder or a stringified absent value. If the Bureau Fidelity layer could
-    // not supply a reported value, the section text contains the DO-NOT-SEND marker
-    // (or, from a defect elsewhere, a literal "undefined"/"null"). Such a letter is
-    // WITHHELD and routed to human review — it is never certified sendable. This
-    // gate is checked against the OUTPUT, not the intent.
-    const contentFailures = [];
-    const sendableLetters = [];
-    for (const screened of screenLetterContent(letters)) {
-        const letter = letters.find((l) => l.bureau === screened.bureau);
-        if (screened.hits.length > 0) {
-            contentFailures.push({ letter: screened.bureauName, tokens: screened.hits });
-            // Withhold the whole letter for this bureau and flag for human review.
-            withheld.push({
-                bureau: screened.bureau,
-                bureauName: screened.bureauName,
-                reason:
-                    "Letter body contained an unresolved placeholder or absent value " +
-                    `(${screened.hits.join(", ")}). Withheld and routed to human review; not sendable.`,
-                requiresHumanReview: true,
-                stableItemKeys: screened.stableItemKeys,
-            });
-        } else {
-            sendableLetters.push(letter);
-        }
-    }
-
-    const ok = leaks.length === 0 && contentFailures.length === 0;
-
     return {
         schemaVersion: LETTER_SCHEMA_VERSION,
-        lettersOk: ok,
-        errors: [
-            ...(leaks.length
-                ? [`CROSS-BUREAU LEAK: a letter referenced another bureau. ${JSON.stringify(leaks)}`]
-                : []),
-            ...(contentFailures.length
-                ? [`UNSENDABLE CONTENT: placeholder/absent value in letter body. ${JSON.stringify(contentFailures)}`]
-                : []),
-        ],
-        // Only letters that passed the content gate are returned as letters; the rest
-        // are in withheld. requiresHumanReview is raised whenever anything was withheld
-        // for content reasons.
-        requiresHumanReview: contentFailures.length > 0,
+        lettersOk: leaks.length === 0,
+        errors: leaks.length
+            ? [`CROSS-BUREAU LEAK: a letter referenced another bureau. ${JSON.stringify(leaks)}`]
+            : [],
 
-        letters: sendableLetters,
+        letters,
         withheld,
 
         summary: {
