@@ -62,8 +62,9 @@
  */
 
 import { verifyIdentity, formatAddress } from "./clientIdentity.js";
-import { selectVoice, resolveRecipient } from "./voice/index.js";
-import { createBureauFidelity, hasReported, NO_REPORTED_VALUE } from "../bureauFidelity.js";
+import { selectVoice } from "./voice.js";
+import { resolveRecipient } from "./recipientLibrary.js";
+import { createBureauFidelity, hasReported, NO_REPORTED_VALUE } from "./bureauFidelity.js";
 
 export const LETTER_SCHEMA_VERSION = "BT-LETTER-3.0";
 
@@ -567,6 +568,9 @@ export async function generateLetters(chain, analysis, context = {}) {
                 continue;
             }
 
+            // Resolve THIS tradeline's reported view. A tradeline the Fidelity
+            // Layer has never heard of cannot be quoted — that is a fail-closed
+            // signal, not a value to invent.
             // ---- BT-DM-0001 v2.1 ADDENDUM: PERMISSIBLE-PURPOSE INQUIRY -----
             //
             // An inquiry is not a tradeline. It has no account number, and the
@@ -644,9 +648,6 @@ export async function generateLetters(chain, analysis, context = {}) {
                 continue;
             }
 
-            // Resolve THIS tradeline's reported view. A tradeline the Fidelity
-            // Layer has never heard of cannot be quoted — that is a fail-closed
-            // signal, not a value to invent.
             const reportedView = fidelity.forItem(item.stableItemKey);
 
             if (!reportedView) {

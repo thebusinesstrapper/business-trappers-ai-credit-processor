@@ -796,7 +796,6 @@ function furnisherNamesByBureau(report) {
         byBureau.get(bureau).add(normalized);
     };
 
-    // Every population that can carry a furnisher the bureau is reporting.
     const records = [
         ...(report.accounts ?? []),
         ...(report.collections ?? []),
