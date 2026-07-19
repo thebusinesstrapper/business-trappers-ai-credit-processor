@@ -235,6 +235,61 @@ function safeMessage(value) {
 }
 
 /**
+ * Reduce an engine failure sentence to a safe, comparable phrase.
+ *
+ * The CreditHero attempt reasons are the only thing that distinguishes "the
+ * link is not present" from "the click did not navigate" — the difference
+ * between an account that may be inactive and a page that was merely slow. They
+ * are static sentences with runtime values interpolated in, so the sentence is
+ * kept and the interpolations are stripped: URLs, angle brackets, and long digit
+ * runs go, then the result is collapsed and truncated.
+ */
+function escapeForRegex(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Remove the client's own name from engine text.
+ *
+ * M6 phrases CLIENT_NOT_OPENED as: Could not open client "<NAME>". The queue
+ * already knows the name it dispatched, so we redact that exact string and its
+ * name parts rather than trying to guess which quoted text is a person and which
+ * is a UI label — "View CreditHeroScore Account" is quoted too, and is not PII.
+ */
+function redactClientName(value, clientName) {
+    if (typeof value !== "string" || !value) return value;
+    if (typeof clientName !== "string" || !clientName.trim()) return value;
+
+    let out = value;
+    const full = clientName.trim().replace(/\s+/g, " ");
+
+    out = out.replace(new RegExp(escapeForRegex(full), "gi"), "[client]");
+
+    // Individual name parts, in case the engine echoes only part of it.
+    for (const part of full.split(" ")) {
+        if (part.length >= 4 && /^[A-Za-z'-]+$/.test(part)) {
+            out = out.replace(new RegExp(`\\b${escapeForRegex(part)}\\b`, "gi"), "[client]");
+        }
+    }
+
+    return out;
+}
+
+function safeReason(value) {
+    if (typeof value !== "string") return null;
+
+    const cleaned = value
+        .replace(/Current URL:.*$/i, "")     // trailing URL clause
+        .replace(/https?:\/\/\S+/gi, "[url]")  // any other URL
+        .replace(/[<>]/g, "")                // never raw markup
+        .replace(/\d{9,}/g, "[redacted]")    // never a long identifier
+        .replace(/\s+/g, " ")
+        .trim();
+
+    return cleaned ? cleaned.slice(0, 160) : null;
+}
+
+/**
  * SAFE DIAGNOSTIC PROJECTION of an M7 result.
  *
  * WHITELIST ONLY. Every field is named explicitly; nothing is spread, and the
@@ -245,7 +300,7 @@ function safeMessage(value) {
  * Excluded by construction: report payloads, letter bodies, addresses, DOB,
  * SSN, identity objects, bureau data, PDF contents.
  */
-function buildM7Diagnostic(m7) {
+function buildM7Diagnostic(m7, clientName = null) {
     if (!m7 || typeof m7 !== "object") return null;
 
     const lettersOk = m7.lettersOk === true || m7.letters_ok === true;
@@ -266,11 +321,23 @@ function buildM7Diagnostic(m7) {
 
     const capture = m7.capture_result ?? null;
 
+    const attemptLog = Array.isArray(capture?.attemptLog)
+        ? capture.attemptLog.slice(0, 10)
+        : [];
+
+    const attemptReasons = {};
+
+    for (const entry of attemptLog) {
+        const reason = redactClientName(safeReason(entry?.reason), clientName);
+        if (reason) attemptReasons[reason] = (attemptReasons[reason] ?? 0) + 1;
+    }
+
     return {
         success: m7.success !== false,
         milestone: safeCode(m7.milestone),
-        errorCode: safeCode(m7.code) ?? safeCode(m7.error_code),
-        errorMessage: safeMessage(m7.message) ?? safeMessage(m7.error_message),
+        errorCode: safeCode(m7.error_code) ?? safeCode(m7.code),
+        errorMessage: redactClientName(
+            safeMessage(m7.error_message) ?? safeMessage(m7.message), clientName),
         stage: safeCode(m7.stage),
         lettersOk,
         letterCount: letters.length,
@@ -286,16 +353,32 @@ function buildM7Diagnostic(m7) {
         capture: capture && typeof capture === "object"
             ? {
                 success: capture.success !== false,
+                // response.js emits error_code / error_message, NOT code / message.
+                // Reading only the short names left these null on every real result.
                 code: safeCode(capture.code) ?? safeCode(capture.error_code),
                 stage: safeCode(capture.stage),
-                message: safeMessage(capture.message),
+                message: redactClientName(
+                    safeMessage(capture.message) ?? safeMessage(capture.error_message), clientName),
                 importAuditState:
                     safeCode(capture.importAuditState) ?? safeCode(capture.import_audit_state) ?? null,
                 creditHeroAccessState:
                     safeCode(capture.creditHeroAccessState) ??
                     safeCode(capture.credit_hero_access_state) ?? null,
+                // CreditHero retries three times and reports WHY each failed.
+                // Attempt number and sanitized reason only — never the URL,
+                // page title, client name, or markup those attempts saw.
+                attempts: Number.isFinite(Number(capture.attempts))
+                    ? Number(capture.attempts)
+                    : null,
+                attemptLog: attemptLog.map((entry) => ({
+                    attempt: Number.isFinite(Number(entry?.attempt)) ? Number(entry.attempt) : null,
+                    reason: redactClientName(safeReason(entry?.reason), clientName),
+                })),
             }
             : null,
+        // Distinct sanitized reasons with counts, so a 106-client run can be read
+        // without opening every result.
+        attemptReasons,
     };
 }
 
@@ -305,7 +388,9 @@ function buildM7Diagnostic(m7) {
  * grinding through the whole allow-list.
  */
 function diagnosticClassification(result) {
-    const code = safeCode(result?.m7?.code);
+    // response.js emits error_code. Reading only `code` meant this check was
+    // comparing undefined and could never escalate a dead session.
+    const code = safeCode(result?.m7?.error_code) ?? safeCode(result?.m7?.code);
 
     if (code && SYSTEM_FAILURE_CODES.has(code)) return "fatal";
 
@@ -460,19 +545,44 @@ async function runJob(job) {
             // Aggregate by the values the engines ACTUALLY returned. No category
             // is invented: whatever code/stage arrives becomes the key, and
             // results carrying neither are grouped as "unclassified".
-            const m7Diagnostic = buildM7Diagnostic(result?.m7);
+            const m7Diagnostic = buildM7Diagnostic(result?.m7, item.clientName);
 
             if (job.diagnosticOnly) {
-                const groupKey =
-                    m7Diagnostic?.errorCode ??
+                // MOST SPECIFIC SAFE CODE FIRST. The broad M7 code says only that
+                // the pipeline halted at capture; capture.code says what actually
+                // happened. Grouping by the broad code made 106 different outcomes
+                // look like one.
+                const specificKey =
                     m7Diagnostic?.capture?.code ??
+                    m7Diagnostic?.importAuditState ??
+                    m7Diagnostic?.capture?.importAuditState ??
+                    m7Diagnostic?.creditHeroAccessState ??
+                    m7Diagnostic?.capture?.creditHeroAccessState ??
+                    m7Diagnostic?.errorCode ??
                     m7Diagnostic?.stage ??
                     m7Diagnostic?.capture?.stage ??
                     (m7Diagnostic?.lettersOk === true ? "letters_ready" : null) ??
                     "unclassified";
 
-                job.summary.diagnosticGroups[groupKey] =
-                    (job.summary.diagnosticGroups[groupKey] ?? 0) + 1;
+                job.summary.diagnosticGroups[specificKey] =
+                    (job.summary.diagnosticGroups[specificKey] ?? 0) + 1;
+
+                // The broad M7 view, kept separately rather than discarded.
+                const topLevelKey =
+                    m7Diagnostic?.errorCode ??
+                    m7Diagnostic?.stage ??
+                    (m7Diagnostic?.lettersOk === true ? "letters_ready" : null) ??
+                    "unclassified";
+
+                job.summary.diagnosticTopLevelGroups[topLevelKey] =
+                    (job.summary.diagnosticTopLevelGroups[topLevelKey] ?? 0) + 1;
+
+                // Distinct CreditHero attempt reasons across the whole run. This is
+                // what separates "link not present" from "click did not navigate".
+                for (const [reason, count] of Object.entries(m7Diagnostic?.attemptReasons ?? {})) {
+                    job.summary.diagnosticAttemptReasons[reason] =
+                        (job.summary.diagnosticAttemptReasons[reason] ?? 0) + count;
+                }
             }
 
             job.results.push({
@@ -612,6 +722,8 @@ export function startClientQueue(data = {}) {
             diagnosticReady: 0,
             diagnosticBlocked: 0,
             diagnosticGroups: {},
+            diagnosticTopLevelGroups: {},
+            diagnosticAttemptReasons: {},
         },
     };
 
