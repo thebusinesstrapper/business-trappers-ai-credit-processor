@@ -422,6 +422,7 @@ function normalizeBureau(sourceType) {
 function tradelineIdentity(bureau, maskedAccount, furnisher) {
     return {
         bureau,
+        masked_account: maskedAccount,
         last4: acctLast4(maskedAccount),
         // The SAME normalization the key cascade uses (itemKey.furnisherNorm),
         // including its alias table — so a tradeline's fold identity and its key
@@ -442,19 +443,22 @@ function tradelineIdentity(bureau, maskedAccount, furnisher) {
 function sameTradelineIdentity(a, b) {
     if (a.bureau !== b.bureau) return false;
 
-    // Same bureau + same masked last-4 = the SAME bureau tradeline.
-    //
-    // Absence never confirms identity: a null last-4 on either side fails closed.
+    // Prefer exact full masked-account equality. This covers bureau formats that
+    // contain no readable trailing digits at all (for example
+    // SSE001XXXXXXXXXX). Two rows with the same Array account id, same bureau,
+    // and the exact same bureau-reported masked account are the same tradeline,
+    // even when acctLast4() correctly returns null.
+    const fullA = canonicalMaskedAccount(a.masked_account);
+    const fullB = canonicalMaskedAccount(b.masked_account);
+
+    if (fullA && fullB && fullA === fullB) return true;
+
+    // Otherwise require a real matching last-4. Absence never confirms identity.
     if (a.last4 === null || b.last4 === null || a.last4 !== b.last4) return false;
 
-    // FURNISHER NAME DOES NOT PARTICIPATE. Frozen Extraction Standard:
-    //   "Furnisher-name differences alone are never sufficient evidence of a
-    //    collision," and furnisher naming "must not split an account that
-    //    account-number evidence joins."
-    // NAVY FEDERAL CR UNION / NAVY FCU on the same bureau with the same last-4 are
-    // one tradeline. The bureau-reported furnisher STRING is preserved verbatim in
-    // observation.reported for Bureau Fidelity and letters; it is simply not an
-    // identity signal here.
+    // Furnisher-name differences alone never split an account that account-number
+    // evidence joins. The exact bureau-reported furnisher string is still
+    // preserved for the letter.
     return true;
 }
 
