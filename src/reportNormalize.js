@@ -763,6 +763,13 @@ function mergeExactDuplicateTradelines(existing, incoming) {
     return {
         ...primary,
 
+        // Preserve a known bureau-reported furnisher when the winning observation
+        // is otherwise stronger but left the furnisher blank.
+        furnisher:
+            String(primary.furnisher ?? "").trim()
+                ? primary.furnisher
+                : (String(secondary.furnisher ?? "").trim() ? secondary.furnisher : null),
+
         // Keep the first-emitted stable key so key identity does not change merely
         // because a later duplicate observation was more complete.
         stable_item_key: existing.stable_item_key,
@@ -789,47 +796,27 @@ function mergeExactDuplicateTradelines(existing, incoming) {
  * It never merges an item whose masked account is missing.
  */
 function consolidateCrossGroupDuplicates(accounts, warnings, keyResolution) {
-    const seen = [];
+    const seen = new Map();
     const output = [];
-
-    const compatible = (a, b) => {
-        if (a.bureau !== b.bureau) return false;
-
-        const fullA = canonicalMaskedAccount(a.masked_account);
-        const fullB = canonicalMaskedAccount(b.masked_account);
-
-        if (!fullA || !fullB) return false;
-
-        // Strongest case: exact full masked account.
-        if (fullA === fullB) return true;
-
-        // Array sometimes pads the same masked account differently
-        // (e.g. 536817XXXXXXXXXX vs 536817XXXXXX). In that case require:
-        // same bureau + same last4 + same normalized nonblank furnisher.
-        const last4A = acctLast4(a.masked_account);
-        const last4B = acctLast4(b.masked_account);
-        const furnA = furnisherNorm(a.furnisher);
-        const furnB = furnisherNorm(b.furnisher);
-
-        return Boolean(
-            last4A &&
-            last4B &&
-            last4A === last4B &&
-            furnA &&
-            furnB &&
-            furnA === furnB
-        );
-    };
 
     for (const account of accounts) {
         const keptTradelines = [];
 
         for (const tradeline of account.bureau_tradelines ?? []) {
-            const prior = seen.find((entry) => compatible(entry.tradelineRef, tradeline));
+            const masked = canonicalMaskedAccount(tradeline.masked_account);
+
+            if (!masked) {
+                keptTradelines.push(tradeline);
+                continue;
+            }
+
+            const key = `${tradeline.bureau}|${masked}`;
+            const prior = seen.get(key);
 
             if (!prior) {
                 keptTradelines.push(tradeline);
-                seen.push({
+                seen.set(key, {
+                    accountRef: account,
                     tradelineRef: tradeline,
                     keptTradelines,
                     index: keptTradelines.length - 1,
@@ -838,17 +825,6 @@ function consolidateCrossGroupDuplicates(accounts, warnings, keyResolution) {
             }
 
             const merged = mergeExactDuplicateTradelines(prior.tradelineRef, tradeline);
-
-            // Preserve the strongest identity text independently from which
-            // observation wins. A bureau-specific row may omit the furnisher while
-            // a shared row carries it; the letter must never lose the known name.
-            if (!String(merged.furnisher ?? "").trim()) {
-                merged.furnisher =
-                    String(prior.tradelineRef.furnisher ?? "").trim()
-                        ? prior.tradelineRef.furnisher
-                        : tradeline.furnisher;
-            }
-
             prior.keptTradelines[prior.index] = merged;
             prior.tradelineRef = merged;
 
@@ -856,7 +832,7 @@ function consolidateCrossGroupDuplicates(accounts, warnings, keyResolution) {
                 (keyResolution.tradelines.folded_cross_group ?? 0) + 1;
 
             warnings.push(
-                `Folded duplicate ${tradeline.bureau} tradeline for masked account ` +
+                `Folded duplicate ${tradeline.bureau} tradeline with masked account ` +
                 `"${tradeline.masked_account}" across different Array account groups.`
             );
         }
