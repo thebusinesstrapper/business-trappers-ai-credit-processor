@@ -95,6 +95,25 @@ export async function runControlledClient(data = {}) {
             letterCount: Array.isArray(m7.letters) ? m7.letters.length : 0,
             withheldCount: Array.isArray(m7.withheld) ? m7.withheld.length : 0,
         },
+        m7LetterPreview: Array.isArray(m7.letters)
+            ? m7.letters.map((letter) => ({
+                bureau: letter.bureau ?? null,
+                itemCount: letter.itemCount ?? null,
+                accountSections: Array.isArray(letter.accountSections)
+                    ? letter.accountSections.map((section) => ({
+                        furnisher: section.furnisher ?? null,
+                        maskedAccount: section.maskedAccount ?? null,
+                    }))
+                    : [],
+                inquirySections: Array.isArray(letter.inquirySections)
+                    ? letter.inquirySections.map((section) => ({
+                        furnisher: section.furnisher ?? null,
+                        inquiryDate:
+                            section.text?.match(/Inquiry Date:\s*([^\n]+)/)?.[1] ?? null,
+                    }))
+                    : [],
+            }))
+            : [],
         m8,
     };
 }
