@@ -187,33 +187,54 @@ export async function readClientProfile(page, crcClientId) {
 
     console.log("CRC PROFILE READER — READ MODE. No field is modified.");
 
-    // ---- Open the modal ----------------------------------------------------
-    const profileLink = page.getByText(PROFILE_LINK_TEXT, { exact: false }).first();
+    // ---- Open or reuse the modal -------------------------------------------
+    //
+    // Normal read path: start on the client dashboard and click View/Edit
+    // Profile.
+    //
+    // Post-status-save verification path: CRC may leave the already-saved Edit
+    // Profile modal open. In that case there is no visible dashboard link to
+    // click, but the populated modal is the authoritative profile we need to
+    // verify. Reuse it rather than falsely reporting PROFILE_LINK_NOT_FOUND.
+    let modal = await findModal(page);
 
-    if (!(await profileLink.count())) {
-        return {
-            ok: false,
-            error_code: "PROFILE_LINK_NOT_FOUND",
-            error:
-                `Could not find the "${PROFILE_LINK_TEXT}" link on the client dashboard. The profile ` +
-                `is a modal opened from this link — the reader does not navigate to a URL, and it will ` +
-                `not guess one.`,
-            identity: null,
-        };
-    }
+    if (modal) {
+        console.log("Edit Profile modal is already open. Reusing it for read-only verification.");
+    } else {
+        const profileLink = page.getByText(PROFILE_LINK_TEXT, { exact: false }).first();
 
-    console.log(`Clicking "${PROFILE_LINK_TEXT}"...`);
-    await profileLink.click({ timeout: FIELD_TIMEOUT });
+        // CRC can take a moment to restore the dashboard after Save. Poll for
+        // the positive dashboard marker before declaring it missing.
+        const profileLinkReady = await waitFor(
+            page,
+            async () => (await profileLink.count()) > 0,
+            8000
+        );
 
-    // ---- Wait for the modal ------------------------------------------------
-    let modal = null;
-    const deadline = Date.now() + MODAL_TIMEOUT;
+        if (!profileLinkReady) {
+            return {
+                ok: false,
+                error_code: "PROFILE_LINK_NOT_FOUND",
+                error:
+                    `Could not find the "${PROFILE_LINK_TEXT}" link on the client dashboard, and no ` +
+                    `Edit Profile modal was already open. The reader does not navigate to a guessed ` +
+                    `URL.`,
+                identity: null,
+            };
+        }
 
-    while (Date.now() < deadline) {
-        modal = await findModal(page);
-        if (modal) break;
+        console.log(`Clicking "${PROFILE_LINK_TEXT}"...`);
+        await profileLink.click({ timeout: FIELD_TIMEOUT });
 
-        await page.waitForTimeout(300);
+        // ---- Wait for the modal --------------------------------------------
+        const deadline = Date.now() + MODAL_TIMEOUT;
+
+        while (Date.now() < deadline) {
+            modal = await findModal(page);
+            if (modal) break;
+
+            await page.waitForTimeout(300);
+        }
     }
 
     if (!modal) {
