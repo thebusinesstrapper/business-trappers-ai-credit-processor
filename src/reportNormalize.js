@@ -709,6 +709,138 @@ function readCreditor(liability) {
     return liability?._CREDITOR?.["@_Name"] ?? null;
 }
 
+/**
+ * Canonical full masked-account value for exact cross-group duplicate detection.
+ *
+ * Array sometimes assigns DIFFERENT @ArrayAccountIdentifier values to rows that
+ * still describe the same bureau tradeline. Grouping only by Array's identifier
+ * therefore leaves duplicates in the finished model. We do not merge on last-4
+ * here; that would be too broad across unrelated accounts. We require the same
+ * bureau and the same full masked account string after punctuation/spacing
+ * normalization.
+ */
+function canonicalMaskedAccount(value) {
+    if (value === null || value === undefined) return null;
+
+    const normalized = String(value).toUpperCase().replace(/[^A-Z0-9]/g, "");
+
+    return normalized || null;
+}
+
+function mergeExactDuplicateTradelines(existing, incoming) {
+    const existingSpecific = existing.observation?.basis === BASIS.BUREAU_SPECIFIC;
+    const incomingSpecific = incoming.observation?.basis === BASIS.BUREAU_SPECIFIC;
+    const existingNamed = Boolean(String(existing.furnisher ?? "").trim());
+    const incomingNamed = Boolean(String(incoming.furnisher ?? "").trim());
+
+    let primary = existing;
+    let secondary = incoming;
+
+    if (
+        (incomingSpecific && !existingSpecific) ||
+        (incomingSpecific === existingSpecific && incomingNamed && !existingNamed)
+    ) {
+        primary = incoming;
+        secondary = existing;
+    }
+
+    const folded = [
+        ...(primary.folded_observations ?? []),
+        {
+            from_row: secondary.source_row_index,
+            basis: secondary.observation?.basis ?? null,
+            observation: secondary.observation,
+            vendor_identifiers: secondary.vendor_identifiers,
+            note:
+                "Folded across Array account groups: same bureau and exact full masked " +
+                "account. Array supplied a different @ArrayAccountIdentifier, but the " +
+                "bureau tradeline identity is the same. Retained as evidence; never " +
+                "asserted as a separate account in a letter.",
+        },
+        ...(secondary.folded_observations ?? []),
+    ];
+
+    return {
+        ...primary,
+
+        // Keep the first-emitted stable key so key identity does not change merely
+        // because a later duplicate observation was more complete.
+        stable_item_key: existing.stable_item_key,
+
+        signatures: [
+            ...new Set([
+                ...(existing.signatures ?? []),
+                ...(incoming.signatures ?? []),
+            ]),
+        ],
+
+        folded_observations: folded,
+    };
+}
+
+/**
+ * Consolidate exact duplicate bureau tradelines that escaped the per-Array-ID
+ * folding pass.
+ *
+ * This is deliberately stricter than sameTradelineIdentity():
+ *   - same bureau
+ *   - same FULL masked account, not merely last-4
+ *
+ * It never merges an item whose masked account is missing.
+ */
+function consolidateCrossGroupDuplicates(accounts, warnings, keyResolution) {
+    const seen = new Map();
+    const output = [];
+
+    for (const account of accounts) {
+        const keptTradelines = [];
+
+        for (const tradeline of account.bureau_tradelines ?? []) {
+            const masked = canonicalMaskedAccount(tradeline.masked_account);
+
+            if (!masked) {
+                keptTradelines.push(tradeline);
+                continue;
+            }
+
+            const key = `${tradeline.bureau}|${masked}`;
+            const prior = seen.get(key);
+
+            if (!prior) {
+                keptTradelines.push(tradeline);
+                seen.set(key, {
+                    accountRef: account,
+                    tradelineRef: tradeline,
+                    keptTradelines,
+                    index: keptTradelines.length - 1,
+                });
+                continue;
+            }
+
+            const merged = mergeExactDuplicateTradelines(prior.tradelineRef, tradeline);
+            prior.keptTradelines[prior.index] = merged;
+            prior.tradelineRef = merged;
+
+            keyResolution.tradelines.folded_cross_group =
+                (keyResolution.tradelines.folded_cross_group ?? 0) + 1;
+
+            warnings.push(
+                `Folded duplicate ${tradeline.bureau} tradeline with masked account ` +
+                `"${tradeline.masked_account}" across different Array account groups.`
+            );
+        }
+
+        if (keptTradelines.length > 0) {
+            output.push({
+                ...account,
+                bureau_tradelines: keptTradelines,
+            });
+        }
+    }
+
+    return output;
+}
+
 // ---------------------------------------------------------------------------
 // THE NORMALIZER
 // ---------------------------------------------------------------------------
@@ -959,6 +1091,15 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
         });
     }
 
+    // Array can assign different @ArrayAccountIdentifier values to rows that
+    // nevertheless describe the same bureau tradeline. Consolidate only when the
+    // bureau and FULL masked account match exactly after normalization.
+    const consolidatedAccounts = consolidateCrossGroupDuplicates(
+        accounts,
+        warnings,
+        keyResolution
+    );
+
     // ---- Inquiries -----------------------------------------------------------
     const inquiries = toArray(response.CREDIT_INQUIRY)
         .map((inq) => {
@@ -1049,7 +1190,7 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
         keyResolution.accounts.ambiguous.length === 0 &&
         keyResolution.tradelines.ambiguous.length === 0;
 
-    const tradelines = accounts.flatMap((a) => a.bureau_tradelines);
+    const tradelines = consolidatedAccounts.flatMap((a) => a.bureau_tradelines);
 
     return {
         extraction_ok: extractionOk,
@@ -1074,12 +1215,12 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
                 raw: response.BORROWER ?? null,
             },
 
-            accounts,
+            accounts: consolidatedAccounts,
             inquiries,
             scores,
 
             key_index: {
-                accounts: accounts.map((a) => ({
+                accounts: consolidatedAccounts.map((a) => ({
                     key: a.stable_account_key,
                     signatures: a.signatures,
                 })),
@@ -1098,7 +1239,7 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
         // selectStrategy, from these facts plus Business Trappers policy.
         counts: {
             raw_liability_rows: liabilities.length,
-            unique_accounts: accounts.length,
+            unique_accounts: consolidatedAccounts.length,
             account_bureau_tradelines: tradelines.length,
 
             liabilities_naming_multiple_bureaus: liabilities.filter(
