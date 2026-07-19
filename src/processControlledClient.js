@@ -9,6 +9,12 @@
 import { runMilestone7 } from "./milestone7.js";
 import { runMilestone8 } from "./milestone8.js";
 
+function normalizeClientName(value) {
+    return typeof value === "string"
+        ? value.trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US")
+        : "";
+}
+
 export const CONTROLLED_CLIENTS = Object.freeze({
     "181": "Tonya Sekona",
     "180": "Sitiseni Tasila",
