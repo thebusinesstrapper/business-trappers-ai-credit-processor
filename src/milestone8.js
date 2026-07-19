@@ -59,6 +59,10 @@ function exactText(value) {
     return typeof value === "string" ? value.trim() : "";
 }
 
+function normalizeClientName(value) {
+    return exactText(value).replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+}
+
 function findLetterMismatch(letters, clientName, crcClientId) {
     return letters.find((letter) => {
         const letterId = letter?.crcClientId ?? letter?.crc_client_id ?? null;
@@ -66,7 +70,7 @@ function findLetterMismatch(letters, clientName, crcClientId) {
 
         return (
             (letterId !== null && String(letterId) !== String(crcClientId)) ||
-            (letterName !== null && exactText(letterName) !== exactText(clientName))
+            (letterName !== null && normalizeClientName(letterName) !== normalizeClientName(clientName))
         );
     });
 }
@@ -99,9 +103,11 @@ export async function runMilestone8(data = {}) {
         return report;
     }
 
-    if (letterResult.lettersOk !== true) {
+    const lettersOk = letterResult.lettersOk === true || letterResult.letters_ok === true;
+
+    if (!lettersOk) {
         report.blockedReason = "m7_result_not_ok";
-        report.failureReason = "Supplied M7 result has lettersOk !== true.";
+        report.failureReason = "Supplied M7 result has neither lettersOk nor letters_ok set to true.";
         report.finalStatus = "blocked";
         return report;
     }

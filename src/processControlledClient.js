@@ -41,7 +41,9 @@ export async function runControlledClient(data = {}) {
         };
     }
 
-    if (!CONTROLLED_CLIENTS[crcClientId] || CONTROLLED_CLIENTS[crcClientId] !== clientName) {
+    const allowedName = CONTROLLED_CLIENTS[crcClientId] ?? "";
+
+    if (!allowedName || normalizeClientName(allowedName) !== normalizeClientName(clientName)) {
         return {
             ...base,
             ok: false,
@@ -52,7 +54,9 @@ export async function runControlledClient(data = {}) {
 
     const m7 = await runMilestone7({ clientName });
 
-    if (!m7 || m7.success === false || m7.lettersOk !== true) {
+    const m7LettersOk = m7?.lettersOk === true || m7?.letters_ok === true;
+
+    if (!m7 || m7.success === false || !m7LettersOk) {
         return {
             ...base,
             ok: false,
@@ -66,7 +70,7 @@ export async function runControlledClient(data = {}) {
         clientName,
         crcClientId,
         submitApproved,
-        letterResult: m7,
+        letterResult: { ...m7, lettersOk: m7LettersOk },
     });
 
     const ok = submitApproved
@@ -81,7 +85,7 @@ export async function runControlledClient(data = {}) {
         stage: "complete",
         m7Summary: {
             success: m7.success !== false,
-            lettersOk: m7.lettersOk === true,
+            lettersOk: m7LettersOk,
             letterCount: Array.isArray(m7.letters) ? m7.letters.length : 0,
             withheldCount: Array.isArray(m7.withheld) ? m7.withheld.length : 0,
         },
