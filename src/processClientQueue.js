@@ -53,6 +53,7 @@ function publicJob(job) {
         eligibleStatuses: job.eligibleStatuses,
         maxClients: job.maxClients,
         delayMs: job.delayMs,
+        suppliedClientCount: job.clientNames.length,
         summary: { ...job.summary },
         currentClient: job.currentClient,
         queuePreview: job.queue.slice(0, 20),
@@ -241,22 +242,56 @@ async function runJob(job) {
     job.startedAt = new Date().toISOString();
 
     try {
-        const scan = await readEligibleQueue(job.eligibleStatuses);
+        if (job.clientNames.length > 0) {
+            // Urgent production path: use the explicit exported client-name queue.
+            // Each name is still opened in CRC by the proven M7 flow, and the
+            // authoritative CRC Client ID is derived from the opened dashboard
+            // before Supabase or M8 delivery is touched.
+            job.status = "loading_supplied_queue";
 
-        job.summary.scannedRows = scan.scannedRows;
-        job.summary.eligibleRows = scan.eligibleRows;
-        job.summary.ambiguousNames = scan.ambiguous.length;
+            const counts = new Map();
+            for (const clientName of job.clientNames) {
+                const key = normalizedKey(clientName);
+                counts.set(key, (counts.get(key) ?? 0) + 1);
+            }
 
-        for (const item of scan.ambiguous) {
-            job.results.push({
-                clientName: item.clientName,
-                status: "manual_review",
-                reason: item.reason,
-            });
-            job.summary.manualReview += 1;
+            const uniqueQueue = [];
+            for (const clientName of job.clientNames) {
+                if ((counts.get(normalizedKey(clientName)) ?? 0) > 1) {
+                    job.results.push({
+                        clientName,
+                        status: "manual_review",
+                        reason: "duplicate_client_name_requires_manual_review",
+                    });
+                    job.summary.manualReview += 1;
+                    job.summary.ambiguousNames += 1;
+                } else {
+                    uniqueQueue.push({ clientName, status: "supplied" });
+                }
+            }
+
+            job.summary.scannedRows = job.clientNames.length;
+            job.summary.eligibleRows = job.clientNames.length;
+            job.queue = uniqueQueue.slice(0, job.maxClients);
+        } else {
+            const scan = await readEligibleQueue(job.eligibleStatuses);
+
+            job.summary.scannedRows = scan.scannedRows;
+            job.summary.eligibleRows = scan.eligibleRows;
+            job.summary.ambiguousNames = scan.ambiguous.length;
+
+            for (const item of scan.ambiguous) {
+                job.results.push({
+                    clientName: item.clientName,
+                    status: "manual_review",
+                    reason: item.reason,
+                });
+                job.summary.manualReview += 1;
+            }
+
+            job.queue = scan.queue.slice(0, job.maxClients);
         }
 
-        job.queue = scan.queue.slice(0, job.maxClients);
         job.summary.queued = job.queue.length;
         job.status = "processing";
 
@@ -376,6 +411,12 @@ export function startClientQueue(data = {}) {
             ? Math.min(Number(data.delayMs), 60000)
             : 3000;
 
+    const clientNames = Array.isArray(data.clientNames)
+        ? data.clientNames
+            .map(normalize)
+            .filter(Boolean)
+        : [];
+
     const jobId = crypto.randomUUID();
     const job = {
         jobId,
@@ -387,6 +428,7 @@ export function startClientQueue(data = {}) {
         eligibleStatuses,
         maxClients,
         delayMs,
+        clientNames,
         queue: [],
         currentClient: null,
         results: [],
