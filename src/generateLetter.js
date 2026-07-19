@@ -657,14 +657,62 @@ export async function generateLetters(chain, analysis, context = {}) {
             // sections for the bureau to continue.
             const furnisherName = String(item.furnisher ?? source?.furnisher ?? "").trim();
 
-            if (!furnisherName) {
-                withheld.push({
+            if (permissiblePurpose) {
+                const ev = permissiblePurpose.evidence ?? {};
+                const inquirySource = ev.furnisher ?? item.furnisher ?? null;
+
+                // A dispute that cannot name the inquiry source cannot identify
+                // what it is disputing.
+                if (!inquirySource) {
+                    withheld.push({
+                        stableItemKey: item.stableItemKey,
+                        bureau,
+                        furnisher: null,
+                        reason:
+                            "No inquiry source is reported for this inquiry, so the dispute cannot " +
+                            "identify it. Withheld rather than sent unidentifiable.",
+                    });
+                    continue;
+                }
+
+                const dateLine = ev.inquiry_date ? [`Inquiry Date: ${ev.inquiry_date}`] : [];
+                const historyLine = item.escalated
+                    ? [`Previously disputed. The inquiry remains on my file and was not removed.`, ``]
+                    : [];
+
+                sections.push({
                     stableItemKey: item.stableItemKey,
-                    bureau,
-                    furnisher: null,
-                    reason:
-                        "No furnisher name is reported for this bureau tradeline. The item is withheld " +
-                        "for human review rather than sent with a blank or invented creditor name.",
+                    stableAccountKey: null, // an inquiry exists at ONE bureau
+                    furnisher: inquirySource,
+                    maskedAccount: null,    // an inquiry has no account number
+                    round: item.round,
+                    escalated: item.escalated,
+                    requestedRemedy: item.requestedRemedy ?? INQUIRY_REMEDY,
+                    strategy: item.strategy?.strategy ?? null,
+                    decisionRecord: item.decisionRecord,
+                    reason: item.reason?.reason ?? null,
+                    instruction: item.instruction?.instruction ?? null,
+                    blueprint: item.blueprint?.blueprint ?? null,
+                    baseline: false,
+                    complianceGated: false,
+                    unspeccedFindings: [],
+                    findingCodes: ["INQ_NO_ASSOCIATED_ACCOUNT"],
+                    // AN INQUIRY IS NOT AN ACCOUNT. Reconciliation balances letter
+                    // ACCOUNT sections against disputed TRADELINES; an inquiry is
+                    // neither, so counting it there would break a true invariant
+                    // with a false population.
+                    isInquiry: true,
+                    text: [
+                        `${inquirySource}`,
+                        ...dateLine,
+                        ``,
+                        ...historyLine,
+                        INQUIRY_STATEMENT,
+                        ``,
+                        AUTH.PERMISSIBLE_PURPOSE,
+                        ``,
+                        `Requested action: ${item.requestedRemedy ?? INQUIRY_REMEDY}`,
+                    ].join("\n"),
                 });
                 continue;
             }
