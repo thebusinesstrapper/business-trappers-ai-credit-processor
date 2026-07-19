@@ -1,5 +1,5 @@
 /**
- * crcSecureMessage.js — CRC secure-message delivery for M8 (Elizabeth Kelley test).
+ * crcSecureMessage.js — CRC secure-message delivery for M8.
  *
  * Sends the M7 bureau-letter PDFs to a client via the client dashboard
  * "Send Secure Message" button (which opens compose with the client prefilled),
@@ -20,10 +20,8 @@
  *   Submit          : visible green button, exact text "Submit"
  */
 
-export const SECURE_MESSAGE_VERSION = "BT-M8-SECURE-MESSAGE-1.0";
+export const SECURE_MESSAGE_VERSION = "BT-M8-SECURE-MESSAGE-1.1";
 
-const AUTHORIZED_CLIENT_ID = "15";
-const AUTHORIZED_CLIENT_NAME = "Elizabeth Kelley";
 
 const SUBJECT_TEXT = "Your Credit Dispute Letters Are Ready";
 const BODY_TEXT =
@@ -45,6 +43,18 @@ function fail(stage, reason, extra = {}) {
 // Compose-render wait window (spinner after the dashboard "Send Secure Message" click).
 const COMPOSE_RENDER_TIMEOUT_MS = 15000;
 const COMPOSE_POLL_MS = 300;
+
+function normalizeClientName(value) {
+    return typeof value === "string"
+        ? value.trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US")
+        : "";
+}
+
+function namesMatch(left, right) {
+    const a = normalizeClientName(left);
+    const b = normalizeClientName(right);
+    return Boolean(a && b && a === b);
+}
 
 async function openComposeForm(page, crcClientId) {
     // ---- DIAGNOSTIC-ONLY logging. ----
@@ -154,7 +164,7 @@ async function selectExactClient(page, clientName) {
             return el ? (el.value || "") : "";
         }).catch(() => "")) || "";
     console.log("[M8 client] prefilled client value:", JSON.stringify(prefilled));
-    if (prefilled === clientName || prefilled.includes(clientName)) {
+    if (namesMatch(prefilled, clientName)) {
         console.log("[M8 client] prefilled client verified; not reselecting.");
         return { ok: true, selectedClient: clientName, resultingValue: prefilled, viaPrefill: true };
     }
@@ -172,17 +182,18 @@ async function selectExactClient(page, clientName) {
         options = await page.getByRole("option").evaluateAll((nodes) =>
             nodes.map((n) => (n.textContent || "").replace(/\s+/g, " ").trim())
         ).catch(() => []);
-        if (options.some((o) => o === clientName)) break;
+        if (options.some((o) => namesMatch(o, clientName))) break;
         await page.waitForTimeout(250);
     }
-    const exact = options.filter((o) => o === clientName);
+    const exact = options.filter((o) => namesMatch(o, clientName));
     if (exact.length !== 1) {
         return fail("client_select",
             `Expected exactly one "${clientName}" option; found ${exact.length}.`,
             { optionsSample: options.slice(0, 10) });
     }
     // Click the exact option.
-    await page.getByRole("option", { name: clientName, exact: true }).first()
+    const matchingOptionText = exact[0];
+    await page.getByRole("option", { name: matchingOptionText, exact: true }).first()
         .click({ timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(400);
 
@@ -193,8 +204,7 @@ async function selectExactClient(page, clientName) {
         const el = document.querySelector('input[name="client_id"]');
         return el ? (el.value || "") : "";
     }).catch(() => "");
-    const confirmed = val === clientName || selectedText === clientName ||
-        val.includes(clientName) || selectedText.includes(clientName);
+    const confirmed = namesMatch(val, clientName) || namesMatch(selectedText, clientName);
     if (!confirmed) {
         return fail("client_verify",
             `Selected client value "${val || selectedText}" does not equal "${clientName}".`);
@@ -273,8 +283,8 @@ async function uploadOnePdf(page, pdf, tmpDir, fsMod, pathMod) {
  *
  * @param {object} page                 Playwright page (already logged in + client open)
  * @param {object} opts
- * @param {string} opts.clientName       must be "Elizabeth Kelley"
- * @param {string} opts.crcClientId      must be "15"
+ * @param {string} opts.clientName       requested client name; compared case-insensitively
+ * @param {string} opts.crcClientId      authoritative CRC client ID verified by M8
  * @param {Array}  opts.pdfs             [{ bureau, filename, buffer, bytes }]
  * @param {boolean} opts.submitApproved  explicit gate for the live Submit click
  * @param {object} deps                  { fs, path, os } injected for testability
@@ -301,11 +311,13 @@ export async function sendSecureMessage(page, opts, deps) {
         failureReason: null,
     };
 
-    // HARD client identity guard.
-    if (clientName !== AUTHORIZED_CLIENT_NAME || String(crcClientId) !== AUTHORIZED_CLIENT_ID) {
+    // HARD identity-input guard. The authoritative CRC Client ID was already
+    // verified by the M8 orchestrator against the opened client dashboard.
+    // This delivery module independently requires both identity inputs to be
+    // present, while treating name capitalization as non-authoritative.
+    if (!normalizeClientName(clientName) || !String(crcClientId ?? "").trim()) {
         report.failedStage = "authorization";
-        report.failureReason =
-            `Sender authorized only for ${AUTHORIZED_CLIENT_NAME} (Client ${AUTHORIZED_CLIENT_ID}).`;
+        report.failureReason = "A client name and authoritative CRC Client ID are required.";
         return report;
     }
     if (!Array.isArray(pdfs) || pdfs.length === 0) {
@@ -360,7 +372,7 @@ export async function sendSecureMessage(page, opts, deps) {
         // reachable and report readiness WITHOUT leaving attachments behind.
         if (submitApproved !== true) {
             report.readyToSubmit =
-                report.selectedRecipient === AUTHORIZED_CLIENT_NAME &&
+                namesMatch(report.selectedRecipient, clientName) &&
                 report.subjectFilled &&
                 report.bodyFilled &&
                 report.expectedAttachmentCount > 0;
@@ -392,7 +404,7 @@ export async function sendSecureMessage(page, opts, deps) {
 
         // 7) PRE-SUBMIT HARD CHECKS (all must pass immediately before Submit).
         const hardChecks =
-            report.selectedRecipient === AUTHORIZED_CLIENT_NAME &&
+            namesMatch(report.selectedRecipient, clientName) &&
             report.subjectFilled &&
             report.bodyFilled &&
             report.verifiedAttachmentCount === report.expectedAttachmentCount &&
