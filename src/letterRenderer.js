@@ -234,6 +234,18 @@ function formatStandaloneDate(line) {
     return match ? `${match[2]}/${match[3]}/${match[1]}` : line;
 }
 
+/**
+ * Render an "Inquiry Date: YYYY-MM-DD" line as MM/DD/YYYY.
+ *
+ * Anchored to the exact "Inquiry Date:" prefix and to a full-line ISO date, so
+ * nothing else moves: not the account number, not a date quoted inside an
+ * account's factual text, not a word of any letter.
+ */
+function formatInquiryDateLine(line) {
+    const match = line.match(/^(\s*Inquiry Date:\s*)(\d{4})-(\d{2})-(\d{2})\s*$/);
+    return match ? `${match[1]}${match[3]}/${match[4]}/${match[2]}` : line;
+}
+
 export async function renderLetterPdf(letter) {
     if (!letter || typeof letter.body !== "string" || letter.body.length === 0) {
         throw new Error("renderLetterPdf: letter.body (non-empty string) is required.");
@@ -314,7 +326,8 @@ export async function renderLetterPdf(letter) {
                 // is the line directly beneath it. Both are bold.
                 const isCreditor = lineIndex === 0;
                 const isAccountNumber = lineIndex === 1 && /^Account Number:/.test(line.trim());
-                return makeRow(line, isCreditor || isAccountNumber);
+                // Display-only date normalization. Bolding is unchanged.
+                return makeRow(formatInquiryDateLine(line), isCreditor || isAccountNumber);
             });
 
         // Head = creditor name, the account number beneath it, and the first line
