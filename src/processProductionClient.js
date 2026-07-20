@@ -9,6 +9,7 @@
  */
 
 import { runMilestone7 } from "./milestone7.js";
+import { runInactiveWorkflow } from "./inactiveWorkflow.js";
 import { runMilestone8 } from "./milestone8.js";
 
 function findCrcClientId(value, seen = new Set()) {
@@ -73,6 +74,32 @@ export async function runProductionClient(data = {}) {
 
     const m7 = await runMilestone7({ clientName });
     const m7LettersOk = m7?.lettersOk === true || m7?.letters_ok === true;
+
+    // ---- CREDIT HERO INACTIVE BRANCH ---------------------------------------
+    //
+    // Positively confirmed CHS_NOT_ACTIVATED only. A generic
+    // CREDIT_HERO_UNAVAILABLE, a click that did not navigate, or a greyed
+    // control are NOT proof and keep the ordinary manual-review path below.
+    const capture = m7?.capture_result ?? null;
+
+    if (capture?.error_code === "CHS_NOT_ACTIVATED" && capture?.requiresInactiveWorkflow === true) {
+        const inactive = await runInactiveWorkflow({
+            clientName,
+            crcClientId: capture.crcClientId ?? findCrcClientId(m7),
+            inactiveWorkflowApproved: data.inactiveWorkflowApproved === true,
+        });
+
+        return {
+            ...base,
+            ok: inactive.noticeSent || inactive.reminderSent || inactive.statusUpdated,
+            stage: "credit_hero_inactive",
+            blockedReason: "credit_monitoring_inactive",
+            crcClientId: inactive.crcClientId,
+            creditHeroAccessState: "CHS_NOT_ACTIVATED",
+            inactive,
+            m7,
+        };
+    }
 
     if (!m7 || m7.success === false || !m7LettersOk) {
         return {

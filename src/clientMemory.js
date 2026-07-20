@@ -329,3 +329,73 @@ export async function releaseDeliveryLock(
         state: data?.processing_state ?? null,
     };
 }
+
+/**
+ * NARROW WRITER for the CreditHero inactive-monitoring workflow.
+ *
+ * WHAT IT CANNOT DO, BY CONSTRUCTION.
+ *
+ * The update object below is built from a fixed whitelist. current_round,
+ * processing_state, process_complete and every lock column are simply not
+ * assignable through it — not guarded against, absent. A dispute cycle cannot be
+ * advanced, completed, locked or unlocked by anything on the inactive path.
+ *
+ * It also matches on crc_client_id ALONE. markDeliveryCompleted() adds
+ * current_round and processing_state to its .eq() chain because it is doing a
+ * compare-and-swap against a lock it holds. This writer holds no lock and must
+ * never behave as though it does, so it neither reads nor depends on delivery
+ * state.
+ *
+ * @param {string|number} crcClientId
+ * @param {object} fields  any subset of the whitelist below
+ */
+export async function recordCreditHeroState(crcClientId, fields = {}) {
+    const id = String(crcClientId);
+
+    if (!/^\d+$/.test(id)) {
+        throw new Error(`recordCreditHeroState: invalid crcClientId "${crcClientId}".`);
+    }
+
+    // The whitelist IS the safety boundary.
+    const WRITABLE = [
+        "credit_hero_access_state",
+        "last_credit_hero_check_at",
+        "inactive_notice_sent_at",
+        "inactive_reminder_sent_at",
+        "inactive_notice_last_error",
+    ];
+
+    const update = {};
+
+    for (const key of WRITABLE) {
+        if (Object.prototype.hasOwnProperty.call(fields, key)) {
+            update[key] = fields[key];
+        }
+    }
+
+    if (Object.keys(update).length === 0) {
+        return { ok: false, reason: "no_writable_fields_supplied" };
+    }
+
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+        .from(CLIENT_STATE_TABLE)
+        .update(update)
+        .eq("crc_client_id", id)
+        .select(
+            "crc_client_id, credit_hero_access_state, last_credit_hero_check_at, " +
+            "inactive_notice_sent_at, inactive_reminder_sent_at, inactive_notice_last_error"
+        )
+        .maybeSingle();
+
+    if (error) {
+        throw new Error(`Failed to record CreditHero state: ${error.message}`);
+    }
+
+    if (!data) {
+        return { ok: false, reason: "client_state_row_not_found" };
+    }
+
+    return { ok: true, written: Object.keys(update), state: data };
+}

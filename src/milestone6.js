@@ -176,6 +176,12 @@ export async function runMilestone6(data = {}) {
                 {
                     milestone: "M6_CAPTURE",
                     stage: "credit_hero",
+
+                    // The inactive workflow keys its Supabase writes on this. It is
+                    // already grounded from openClient() above; omitting it made the
+                    // whole result unaddressable.
+                    crcClientId: client.crcClientId,
+
                     creditHeroAccessState: "CHS_NOT_ACTIVATED",
                     importAuditState: blocker.state,
                     observed: blocker.observed,

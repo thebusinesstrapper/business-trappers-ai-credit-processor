@@ -30,10 +30,15 @@ const MAX_RETAINED_RESULTS = 500;
 const DEFAULT_ELIGIBLE_STATUSES = Object.freeze([
     "Client",
     "Ready for Processing",
+    // Inactive clients are RECHECKED daily, not excluded. This is a monitored
+    // waiting state, not a terminal one — the whole point is to notice when
+    // monitoring comes back.
+    "Credit Monitoring Inactive",
 ]);
 
 const KNOWN_STATUSES = Object.freeze([
     "Client",
+    "Credit Monitoring Inactive",
     "Ready for Processing",
     "AI Processing",
     "Waiting for Bureau",
@@ -61,6 +66,7 @@ function publicJob(job) {
         completedAt: job.completedAt,
         submitApproved: job.submitApproved,
         diagnosticOnly: job.diagnosticOnly === true,
+        inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
         eligibleStatuses: job.eligibleStatuses,
         maxClients: job.maxClients,
         delayMs: job.delayMs,
@@ -518,6 +524,7 @@ async function runJob(job) {
                         clientName: item.clientName,
                         processingApproved: true,
                         submitApproved: job.submitApproved,
+                        inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
                     });
                 }
             } catch (error) {
@@ -597,6 +604,8 @@ async function runJob(job) {
                 // to a safe projection of what was there all along.
                 m7Summary: result?.m7Summary ?? m7Diagnostic ?? null,
                 m7Diagnostic,
+                creditHeroAccessState: result?.creditHeroAccessState ?? null,
+                inactive: result?.inactive ?? null,
                 m8: result?.m8
                     ? {
                         finalStatus: result.m8.finalStatus ?? null,
@@ -701,6 +710,9 @@ export function startClientQueue(data = {}) {
         completedAt: null,
         submitApproved: diagnosticOnly ? false : true,
         diagnosticOnly,
+        // A diagnostic run is read-only without exception, so the inactive
+        // workflow can never be armed inside one.
+        inactiveWorkflowApproved: diagnosticOnly ? false : data.inactiveWorkflowApproved === true,
         eligibleStatuses,
         maxClients,
         delayMs,
