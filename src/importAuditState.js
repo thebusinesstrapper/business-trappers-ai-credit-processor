@@ -32,6 +32,16 @@ const TAB_TIMEOUT = 20000;
 const STATE_MARKER_TIMEOUT = 20000;
 
 /**
+ * Window for the DASHBOARD blocker probe.
+ *
+ * Deliberately much shorter than STATE_MARKER_TIMEOUT. That timeout is sized for
+ * a panel we know is going to render something. The dashboard probe runs on
+ * EVERY client, and on an active one there is nothing to find — so a 20s wait
+ * would be 20s of nothing, per client, on every run.
+ */
+const DASHBOARD_BLOCKER_TIMEOUT = 6000;
+
+/**
  * Gap between successive observations of the marker set.
  *
  * This is not a fixed sleep before a blind read. It is the interval between two
@@ -85,7 +95,15 @@ export const CRC_STATES = {
  */
 const MARKERS = {
     // Hard blocker. Highest precedence — see recognizeImportAuditState().
-    CHS_NOT_ACTIVATED: /invite\s+your\s+lead\s+to\s+credit\s*hero\s*score/i,
+    // Same state, three observed phrasings. The Import/Audit panel says "Invite
+    // your lead to..."; the client DASHBOARD says "Client doesn't have a credit
+    // monitoring account yet? Send them an invite to...". One marker name, one
+    // state — a second key would need a second CRC_STATES entry and would be
+    // missed by the blocker-precedence check below.
+    //
+    // The apostrophe is matched loosely because CRC renders a curly one.
+    CHS_NOT_ACTIVATED:
+        /invite\s+your\s+lead\s+to\s+credit\s*hero\s*score|send\s+them\s+an\s+invite\s+to\s+credit\s*hero\s*score|doesn.?t\s+have\s+a\s+credit\s+monitoring\s+account/i,
 
     NEW_CLIENT: /no\s+credit\s+reports\s+have\s+been\s+imported\s+yet/i,
 
@@ -397,6 +415,65 @@ async function waitForStableMarkers(page) {
  *
  * @returns {Promise<{ state: string, observed: string[] }>}
  */
+/**
+ * Is the CreditHero hard blocker visible on the CLIENT DASHBOARD?
+ *
+ * WHY THIS EXISTS SEPARATELY FROM recognizeImportAuditState().
+ *
+ * That function begins by CLICKING the Import/Audit tab. Calling it before
+ * openCreditHero() would navigate every client away from the dashboard, and the
+ * CreditHero link only exists there — so every ACTIVE client would break. This
+ * probe reads the page it is given and navigates nothing.
+ *
+ * SCOPE. It answers one question: is the not-activated banner present? It does
+ * not classify the other Import/Audit states, which belong to a different page
+ * and a different decision. CHS_NOT_ACTIVATED is the highest-precedence marker
+ * in this module, so a positive match cannot be overridden by anything else and
+ * checking it alone preserves that precedence exactly.
+ *
+ * NOT HALF-RENDERED. A single visible read is not enough — a banner mid-paint is
+ * a banner we may be reading too early. The marker must be present on
+ * STABLE_INTERVALS_REQUIRED consecutive reads before it counts.
+ *
+ * FAILS OPEN, ON PURPOSE. No banner within the window means "not proven
+ * blocked", and the caller proceeds down the ordinary path. A missed banner
+ * costs a normal CreditHero attempt that then fails to CREDIT_HERO_UNAVAILABLE
+ * and manual review. The opposite error — declaring a paying client inactive and
+ * messaging them about payment — is the one worth engineering against.
+ *
+ * @returns {Promise<{blocked: boolean, state: string, observed: string[]}>}
+ */
+export async function recognizeDashboardBlocker(page, timeoutMs = DASHBOARD_BLOCKER_TIMEOUT) {
+    const pattern = MARKERS.CHS_NOT_ACTIVATED;
+    const deadline = Date.now() + timeoutMs;
+
+    let consecutive = 0;
+
+    while (Date.now() < deadline) {
+        const visible = await isMarkerVisible(page, pattern).catch(() => false);
+
+        if (visible) {
+            consecutive += 1;
+
+            if (consecutive >= STABLE_INTERVALS_REQUIRED) {
+                console.log("Dashboard blocker confirmed: Credit Hero Score not activated.");
+                return {
+                    blocked: true,
+                    state: CRC_STATES.CHS_NOT_ACTIVATED,
+                    observed: ["CHS_NOT_ACTIVATED"],
+                };
+            }
+        } else if (consecutive > 0) {
+            // It flickered. A set that will not hold still has not settled.
+            consecutive = 0;
+        }
+
+        await page.waitForTimeout(CONFIRM_INTERVAL_MS);
+    }
+
+    return { blocked: false, state: CRC_STATES.UNKNOWN, observed: [] };
+}
+
 export async function recognizeImportAuditState(page) {
     const urlBeforeClick = await openImportAuditTab(page);
 
