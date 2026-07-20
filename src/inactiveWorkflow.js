@@ -31,7 +31,7 @@ import { launchBrowser } from "./browserbase.js";
 import { loginToCRC } from "./crcLogin.js";
 import { openClient } from "./openClient.js";
 import { getCrcClientId } from "./crcClientId.js";
-import { loadOrCreateClientMemory } from "./clientMemory.js";
+import { loadOrCreateClientMemory, readClientState } from "./clientMemory.js";
 
 export const INACTIVE_WORKFLOW_VERSION = "BT-INACTIVE-1.0";
 
@@ -181,8 +181,13 @@ export async function runInactiveWorkflow(opts = {}) {
     let state = {};
 
     try {
-        const memory = await loadOrCreateClientMemory(String(crcClientId), clientName ?? null);
-        state = memory?.state ?? memory ?? {};
+        // Ensure the row exists (creates it on a genuinely new client), then read
+        // the FULL row. loadOrCreateClientMemory returns only a delivery-focused
+        // subset — round / processing_state / process_complete — which omits
+        // inactive_notice_sent_at and would make decideNoticeAction believe every
+        // client had never been notified.
+        await loadOrCreateClientMemory(String(crcClientId), clientName ?? null);
+        state = (await readClientState(String(crcClientId))) ?? {};
     } catch (error) {
         report.error_code = "MEMORY_READ_FAILED";
         report.failureReason = `Could not read client_state: ${error.message}`;

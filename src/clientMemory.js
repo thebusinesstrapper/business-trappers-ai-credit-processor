@@ -60,7 +60,16 @@ function buildInitialClientState(crcClientId, clientDisplayName) {
  *
  * @returns {Promise<object | null>} the record, or null if none exists
  */
-async function readClientState(crcClientId) {
+/**
+ * Read the FULL client_state row (all columns) or null.
+ *
+ * Exported deliberately: loadOrCreateClientMemory() returns only a delivery-focused
+ * subset (round / processing_state / process_complete), which is right for the
+ * delivery path but drops the inactive-workflow timestamps. Callers that need the
+ * whole row — the CreditHero inactive branch reading inactive_notice_sent_at —
+ * read it here instead of through that subset.
+ */
+export async function readClientState(crcClientId) {
     const supabase = getSupabase();
 
     const { data, error } = await supabase
