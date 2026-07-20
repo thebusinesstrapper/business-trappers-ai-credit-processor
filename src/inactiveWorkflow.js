@@ -41,6 +41,24 @@ const INACTIVE_STATUS = "Credit Monitoring Inactive";
 /** Reminder falls due seven days after the notice was SENT, not after detection. */
 const REMINDER_AFTER_DAYS = 7;
 
+/**
+ * PERSISTED values for client_state.credit_hero_access_state.
+ *
+ * The column is constrained to 'active' | 'inactive' | 'unknown', and 61 rows
+ * already carry 'unknown'. The workflow's own vocabulary — CHS_NOT_ACTIVATED,
+ * CRC_STATE_CHS_NOT_ACTIVATED — is richer than that on purpose: it records WHICH
+ * inactive condition was recognized, which is what the diagnostics need.
+ *
+ * Those two vocabularies are deliberately not merged. The database keeps the
+ * coarse fact it was designed to hold, the report keeps the specific one. Widening
+ * the constraint to store both casings and both granularities in one column would
+ * have made the column mean two different things depending on who wrote it.
+ */
+const DB_ACCESS_STATE = Object.freeze({
+    INACTIVE: "inactive",
+    ACTIVE: "active",
+});
+
 export const PLANNED_ACTION = Object.freeze({
     SEND_INITIAL_NOTICE: "send_initial_notice",
     SEND_REMINDER: "send_reminder",
@@ -216,7 +234,9 @@ export async function runInactiveWorkflow(opts = {}) {
     // ---- 1. Record that we looked, before anything can fail ---------------
     try {
         await recordCreditHeroState(crcClientId, {
-            credit_hero_access_state: "CHS_NOT_ACTIVATED",
+            // Coarse, schema-conforming value. The specific state stays in the
+            // report as creditHeroAccessState: "CHS_NOT_ACTIVATED".
+            credit_hero_access_state: DB_ACCESS_STATE.INACTIVE,
             last_credit_hero_check_at: nowIso,
         });
         report.memoryWritten = true;
@@ -332,7 +352,7 @@ export async function recordCreditHeroActive(crcClientId) {
 
     try {
         await recordCreditHeroState(crcClientId, {
-            credit_hero_access_state: "ACTIVE",
+            credit_hero_access_state: DB_ACCESS_STATE.ACTIVE,
             last_credit_hero_check_at: new Date().toISOString(),
         });
         report.memoryWritten = true;
@@ -344,4 +364,4 @@ export async function recordCreditHeroActive(crcClientId) {
     return report;
 }
 
-export { INACTIVE_STATUS, REMINDER_AFTER_DAYS };
+export { INACTIVE_STATUS, REMINDER_AFTER_DAYS, DB_ACCESS_STATE };
