@@ -1,315 +1,230 @@
 /**
- * orderPageReader.js
+ * orderPageReader.js — READ-ONLY classification of the CreditHero order page
+ * (mcc_order_select_v2.asp).
  *
- * READ-ONLY. Reads the Credit Hero Order New Report page and returns a
- * structured OrderPageState.
+ * WHY THIS MODULE IS ALLOWED TO TOUCH A FORBIDDEN PAGE.
  *
- * ---------------------------------------------------------------------------
- * THIS MODULE MAKES NO DECISIONS AND TAKES NO ACTIONS.
+ * openCreditReport.js forbids mcc_order_select_v2.asp and refuses to navigate
+ * there, because that page can order a report and charge the client. That rule
+ * is not relaxed here. This module never navigates anywhere — it is handed a
+ * page that has ALREADY landed on the order page (because CreditHero redirected
+ * a client whose free report is not yet available), and it only reads.
  *
- * It does not decide whether to order. It does not select. It does not submit.
- * It reads the page and describes what it sees.
+ * READ-ONLY BY CONSTRUCTION. The only Playwright verbs below are read verbs:
+ * locator, textContent, innerText, getAttribute, isDisabled, count, and evaluate
+ * used solely for property inspection. There is no click, check, selectOption,
+ * fill, type, press, setInputFiles, form submit, or page.goto anywhere in this
+ * file. The Submit button is never located as an actionable target — the reader
+ * does not need it, so it holds no handle that could be clicked.
  *
- * The decision belongs to acquisitionDecision.js (a pure function). The action,
- * if ever authorized, belongs to a separate Order Submitter module.
- *
- * Per Report Acquisition Authority™ §7: "The Submitter never makes decisions.
- * The Decision Engine never acts. Neither can, alone, spend the client's money."
- *
- * VERIFIABLE INVARIANT: this file contains no click, fill, check, selectOption,
- * press, tap, focus, hover, or submit call. Grep it.
- * ---------------------------------------------------------------------------
+ * FAIL CLOSED. If the free-report structure cannot be read, the answer is
+ * ORDER_PAGE_UNREADABLE (manual review), never a guess in either direction.
  */
 
-/**
- * Known option identifiers on the Order New Report page.
- *
- * These were supplied from discovery. Everything else with a productBuyNew_*
- * identifier is UNACCOUNTED FOR and is treated as a hard failure — see
- * Report Acquisition Authority™ §3.1:
- *
- *   "A page we cannot fully account for is a page we do not act on."
- *
- * The numbering (_01, _03) implies an _02 that we have never been shown. If it
- * exists, this reader will surface it and the decision engine will fail closed.
- */
-export const FREE_OPTION_ID = "productBuyNew_01";
-export const PAID_OPTION_ID = "productBuyNew_03";
+export const ORDER_STATE = Object.freeze({
+    WAITING_FOR_FREE_REPORT: "WAITING_FOR_FREE_REPORT",
+    FREE_REPORT_AVAILABLE: "FREE_REPORT_AVAILABLE",
+    ORDER_PAGE_UNREADABLE: "ORDER_PAGE_UNREADABLE",
+});
 
-const KNOWN_OPTION_IDS = [FREE_OPTION_ID, PAID_OPTION_ID];
+// The free option is identified by this visible label text. "&" not "&amp;":
+// textContent decodes entities, so we match the decoded form.
+const FREE_LABEL = "3 Bureau Report & Score FREE";
 
-// Any control whose id looks like a purchase option.
-const OPTION_ID_PATTERN = /^productBuyNew_\d+$/i;
+// Availability date, e.g. "Available 8/2/2026" -> "2026-08-02".
+const AVAILABLE_DATE_RE = /Available\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/i;
 
-const READ_TIMEOUT = 20000;
+// A dollar amount in visible text, e.g. "$18.95" -> 18.95.
+const PRICE_RE = /\$\s*(\d+(?:\.\d{2})?)/;
 
-/**
- * Parse an availability date from an option's label.
- *
- * Observed format: "(Available 8/10/2026) 3 Bureau Report & Score FREE."
- *
- * This matters because a disabled option is NOT necessarily an error. A free
- * report that becomes available on a future date is a NORMAL business state —
- * the client is simply waiting out their 30-day membership refresh. Treating
- * that as manual_review would escalate every waiting client to a human.
- *
- * Returns an ISO date string, or null if no date is stated.
- */
-export function parseAvailableFrom(text) {
-    if (typeof text !== "string") return null;
+// "Last Report Date: 7/2/2026" -> "2026-07-02". The newest report the client
+// currently has, read live from the order page.
+const LAST_REPORT_RE = /Last\s+Report\s+Date\s*:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i;
 
-    const match = text.match(/\bavailable\s+(\d{1,2})\/(\d{1,2})\/(\d{4})\b/i);
-    if (!match) return null;
+// TEMPORARY initial-rollout cutoff (inclusive). NOT the permanent rule — the
+// permanent future-cycle rule is 31 days since confirmed delivery AND a free
+// report, and is not built here.
+const ROLLOUT_CUTOFF_ISO = "2026-07-01";
 
-    const [, month, day, year] = match;
-    const iso = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+const READ_TIMEOUT = 8000;
 
-    // Reject impossible dates rather than emitting garbage.
-    const parsed = new Date(`${iso}T00:00:00Z`);
-    if (Number.isNaN(parsed.getTime())) return null;
+/** MM/DD/YYYY (as captured on the page) -> ISO YYYY-MM-DD. Null if absent. */
+function parseAvailableDate(text) {
+    const m = (text || "").match(AVAILABLE_DATE_RE);
+    if (!m) return null;
+    const [, mm, dd, yyyy] = m;
+    return `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+}
 
-    return iso;
+/** "Last Report Date: M/D/YYYY" -> ISO, or null. */
+function parseLastReportDate(text) {
+    const m = (text || "").match(LAST_REPORT_RE);
+    if (!m) return null;
+    const [, mm, dd, yyyy] = m;
+    return `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
 }
 
 /**
- * Parse a cost from text bound to a SPECIFIC option.
- *
- * Returns { cost, evidence } where cost is a number, or null if the cost could
- * not be affirmatively determined.
- *
- * CRITICAL — "null" is not "free". Per §3:
- *
- *   "Absence of evidence of cost is not evidence of no cost."
- *
- * A blank, missing, or unreadable price yields null, and null fails closed to
- * manual_review. It never becomes zero.
- *
- * Note also that this function is only ever applied to text read from a
- * specific option's own label/price region — never to the page at large. The
- * word "free" in a promotional banner elsewhere on the page must not be able to
- * price an option.
+ * TEMPORARY rollout eligibility hint. Read-only and advisory — it changes no
+ * status, triggers no processing. ISO date strings compare correctly with <,
+ * >=, so no Date parsing is needed.
  */
-export function parseCost(text) {
-    if (typeof text !== "string" || !text.trim()) {
-        return { cost: null, evidence: null };
+function computeEligibilityHint(lastReportDateIso, freeReportEnabled) {
+    if (!lastReportDateIso) return "ELIGIBILITY_UNKNOWN";
+
+    if (lastReportDateIso >= ROLLOUT_CUTOFF_ISO) {
+        return "ELIGIBLE_EXISTING_REPORT";
     }
+    return freeReportEnabled ? "ELIGIBLE_FREE_REPORT" : "WAITING_FOR_FREE_REPORT";
+}
 
-    const normalized = text.replace(/\s+/g, " ").trim();
-
-    // Collect EVERY dollar amount in this option's bound text.
-    //
-    // Multiple distinct prices is AMBIGUITY, not a puzzle to solve. "Was $39.99,
-    // now $0.00" — a strikethrough promo, a bundled price, a crossed-out list
-    // price — we cannot tell from text alone which one this control actually
-    // charges. Picking the lower one is how a client gets billed $39.99.
-    //
-    // Ambiguity never resolves toward spending. (§3)
-    const amounts = [...normalized.matchAll(/\$\s*(\d{1,5}(?:\.\d{2})?)/g)].map((m) => ({
-        value: Number(m[1]),
-        evidence: m[0],
-    }));
-
-    const distinct = [...new Set(amounts.map((a) => a.value))];
-
-    if (distinct.length > 1) {
-        // Two or more different prices bound to one option. Refuse to price it.
-        return { cost: null, evidence: null, ambiguous: true };
-    }
-
-    if (distinct.length === 1) {
-        return { cost: amounts[0].value, evidence: amounts[0].evidence };
-    }
-
-    // No dollar amount at all. Fall back to explicit no-cost wording — but only
-    // wording bound to THIS option, never the page at large.
-    const freeMatch = normalized.match(/\b(free|no\s*cost|included|complimentary)\b/i);
-    if (freeMatch) {
-        return { cost: 0, evidence: freeMatch[0] };
-    }
-
-    return { cost: null, evidence: null };
+/** First dollar amount in the given text as a number, or null. */
+function parsePrice(text) {
+    const m = (text || "").match(PRICE_RE);
+    return m ? Number(m[1]) : null;
 }
 
 /**
- * Runs INSIDE the browser. Reads. Changes nothing.
+ * Find the element that visibly contains the FREE label, searching every frame.
+ * Returns the closest "order-item" ancestor when present, so disabled state and
+ * the availability date (siblings of the radio) are read from one container.
  */
-function readOrderPageInFrame(optionPatternSource) {
-    const optionPattern = new RegExp(optionPatternSource, "i");
+async function findFreeContainer(page) {
+    for (const frame of page.frames()) {
+        // getByText locates the label; we then walk up to the order-item wrapper.
+        const label = frame.getByText(FREE_LABEL, { exact: false }).first();
 
-    const isVisible = (el) => {
-        const rect = el.getBoundingClientRect();
-        const style = window.getComputedStyle(el);
-        return (
-            rect.width > 0 &&
-            rect.height > 0 &&
-            style.visibility !== "hidden" &&
-            style.display !== "none"
-        );
-    };
+        const count = await label.count().catch(() => 0);
+        if (!count) continue;
 
-    /**
-     * The text bound to THIS option — its label, and the nearest block that
-     * contains it. This is where a price must be found. We deliberately do NOT
-     * fall back to page-wide text: a "FREE" banner elsewhere must never be able
-     * to price this control.
-     */
-    const boundText = (el) => {
-        const parts = [];
+        // Prefer the enclosing order-item container; fall back to the label node.
+        const container = label
+            .locator("xpath=ancestor-or-self::*[contains(@class,'order-item')][1]")
+            .first();
 
-        if (el.id) {
-            const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-            if (lbl) parts.push((lbl.innerText || "").trim());
-        }
+        const hasContainer = (await container.count().catch(() => 0)) > 0;
 
-        const wrapping = el.closest("label");
-        if (wrapping) parts.push((wrapping.innerText || "").trim());
+        return { frame, node: hasContainer ? container : label };
+    }
 
-        if (el.getAttribute("aria-label")) parts.push(el.getAttribute("aria-label"));
-        if (el.getAttribute("value")) parts.push(el.getAttribute("value"));
-        if ((el.innerText || "").trim()) parts.push((el.innerText || "").trim());
-
-        // Nearest containing block — where the price usually lives.
-        let node = el;
-        for (let i = 0; i < 4 && node.parentElement; i++) {
-            node = node.parentElement;
-            const t = (node.innerText || "").trim();
-            if (t && t.length < 500) {
-                parts.push(t);
-                break;
-            }
-        }
-
-        return parts.filter(Boolean);
-    };
-
-    // Every control that looks like a purchase option — known or not.
-    const controls = Array.from(
-        document.querySelectorAll('input, button, a, [role="radio"], [role="button"]')
-    ).filter((el) => el.id && optionPattern.test(el.id));
-
-    const options = controls.map((el) => ({
-        id: el.id,
-        tag: el.tagName.toLowerCase(),
-        type: el.getAttribute("type"),
-        name: el.getAttribute("name"),
-        value: el.getAttribute("value"),
-        visible: isVisible(el),
-        // READ. Never set.
-        disabled: Boolean(el.disabled) || el.getAttribute("aria-disabled") === "true",
-        checked_state: el.checked === undefined ? null : el.checked,
-        bound_text: boundText(el),
-    }));
-
-    return {
-        url: location.href,
-        title: document.title,
-        options,
-    };
+    return null;
 }
 
 /**
- * Read the Order New Report page.
+ * Classify the order page. Read-only.
  *
- * @param {import('playwright').Page} page - the ORDER page, already open
- * @returns {Promise<OrderPageState>}
+ * @param {import('playwright').Page} page  a page already on the order page
+ * @returns {Promise<{classification: string, freeReportEnabled: boolean,
+ *   nextFreeReportAvailableAt: string|null, paidReportPresent: boolean,
+ *   paidReportPrice: number|null, evidence: string[]}>}
  */
 export async function readOrderPage(page) {
-    console.log("Reading Order New Report page (READ-ONLY — nothing will be selected)...");
-
-    const deadline = Date.now() + READ_TIMEOUT;
-
-    let raw = null;
-
-    // Poll for the options to render. The options themselves are the readiness
-    // signal — the same approach used for Import/Audit, and for the same reason:
-    // there is nothing more authoritative to wait on.
-    while (Date.now() < deadline) {
-        for (const frame of page.frames()) {
-            try {
-                const result = await frame.evaluate(
-                    readOrderPageInFrame,
-                    OPTION_ID_PATTERN.source
-                );
-
-                if (result.options.length > 0) {
-                    raw = result;
-                    break;
-                }
-            } catch {
-                // detached / cross-origin frame
-            }
-        }
-
-        if (raw) break;
-
-        await page.waitForTimeout(250);
-    }
-
-    if (!raw) {
-        console.error("No purchase options found on the Order New Report page.");
-
-        return {
-            page_read: false,
-            url: page.url(),
-            options: [],
-            unaccounted_option_ids: [],
-            errors: ["No productBuyNew_* options found on the page."],
-        };
-    }
-
-    // Price each option from ITS OWN bound text.
-    const options = raw.options.map((option) => {
-        let cost = null;
-        let evidence = null;
-        let availableFrom = null;
-
-        for (const text of option.bound_text) {
-            const parsed = parseCost(text);
-
-            if (cost === null && parsed.cost !== null) {
-                cost = parsed.cost;
-                evidence = parsed.evidence;
-            }
-
-            if (availableFrom === null) {
-                availableFrom = parseAvailableFrom(text);
-            }
-        }
-
-        return {
-            ...option,
-            cost,                         // null = COULD NOT DETERMINE. Not free.
-            cost_evidence: evidence,
-            available_from: availableFrom, // ISO date, or null if not stated
-            is_known: KNOWN_OPTION_IDS.includes(option.id),
-        };
-    });
-
-    // §3.1 — anything we cannot account for.
-    const unaccounted = options.filter((o) => !o.is_known).map((o) => o.id);
-
-    if (unaccounted.length) {
-        console.error(
-            `UNACCOUNTED purchase options on the order page: ${unaccounted.join(", ")}. ` +
-            `We do not act on a page we cannot fully account for.`
-        );
-    }
-
-    console.log("Order page options read:");
-    for (const o of options) {
-        console.log(
-            `  ${o.id}: cost=${o.cost === null ? "UNKNOWN" : o.cost} ` +
-            `(evidence: ${o.cost_evidence ?? "none"}) ` +
-            `disabled=${o.disabled} visible=${o.visible} known=${o.is_known}`
-        );
-    }
-
-    return {
-        page_read: true,
-        url: raw.url,
-        title: raw.title,
-        options,
-        unaccounted_option_ids: unaccounted,
-        errors: [],
+    const result = {
+        classification: ORDER_STATE.ORDER_PAGE_UNREADABLE,
+        freeReportEnabled: false,
+        nextFreeReportAvailableAt: null,
+        paidReportPresent: false,
+        paidReportPrice: null,
+        // TEMPORARY rollout hint. Advisory only — no status/processing here.
+        lastReportDate: null,
+        eligibilityHint: "ELIGIBILITY_UNKNOWN",
+        temporaryOverrideApplied: false,
+        evidence: [],
     };
+
+    const free = await findFreeContainer(page).catch(() => null);
+
+    if (!free) {
+        // The free option is the anchor. Without it we do not trust anything else
+        // on the page — fail closed to unreadable.
+        result.evidence.push("free_label_not_found");
+        return result;
+    }
+
+    result.evidence.push("free_label_found");
+
+    // ---- Free-option enabled/disabled -------------------------------------
+    //
+    // Disabled if ANY signal says so: the radio's disabled property, Playwright's
+    // isDisabled(), or a "disabled" class on the container. Enabled must be
+    // POSITIVELY proven — a radio that is present and not disabled by any signal.
+    const containerText =
+        (await free.node.textContent({ timeout: READ_TIMEOUT }).catch(() => "")) || "";
+
+    result.nextFreeReportAvailableAt = parseAvailableDate(containerText);
+
+    const radio = free.node.locator('input[type="radio"]').first();
+    const radioCount = await radio.count().catch(() => 0);
+
+    let disabledBySignal = false;
+    let radioPresentAndReadable = false;
+
+    if (radioCount > 0) {
+        radioPresentAndReadable = true;
+
+        // 1. disabled ATTRIBUTE/property (authoritative).
+        const disabledAttr = await radio.getAttribute("disabled").catch(() => null);
+        // 2. Playwright's own disabled determination.
+        const isDisabled = await radio.isDisabled().catch(() => true);
+
+        if (disabledAttr !== null || isDisabled === true) disabledBySignal = true;
+    }
+
+    // 3. "disabled" class on the container.
+    const containerClass = (await free.node.getAttribute("class").catch(() => "")) || "";
+    if (/\bdisabled\b/.test(containerClass)) disabledBySignal = true;
+
+    // Positively enabled ONLY when the radio is present, readable, and no signal
+    // marks it disabled.
+    result.freeReportEnabled = radioPresentAndReadable && !disabledBySignal;
+
+    result.evidence.push(
+        `radio_present:${radioPresentAndReadable}`,
+        `disabled_signal:${disabledBySignal}`
+    );
+
+    // ---- Paid option ------------------------------------------------------
+    //
+    // Anchored on visible currency text anywhere in the frame that owns the free
+    // container. We do not assume the paid row's position relative to the free
+    // one — only that a price is visibly present.
+    let frameText = "";
+    try {
+        frameText = await free.frame.locator("body").innerText({ timeout: READ_TIMEOUT });
+    } catch {
+        frameText = "";
+    }
+
+    // Live newest report date, read from the order page. Reused source of truth
+    // for the temporary rollout hint — NOT client_state.last_report_date_used.
+    result.lastReportDate = parseLastReportDate(frameText);
+
+    const price = parsePrice(frameText);
+
+    if (price !== null) {
+        result.paidReportPresent = true;
+        result.paidReportPrice = price;
+        result.evidence.push(`paid_price:${price}`);
+    } else {
+        result.evidence.push("paid_price_not_found");
+    }
+
+    // ---- Classification ---------------------------------------------------
+    if (result.freeReportEnabled) {
+        result.classification = ORDER_STATE.FREE_REPORT_AVAILABLE;
+    } else if (radioPresentAndReadable) {
+        // Free option is present but disabled — the client is waiting for the
+        // next free refresh. This is the Dietrich case.
+        result.classification = ORDER_STATE.WAITING_FOR_FREE_REPORT;
+    } else {
+        result.classification = ORDER_STATE.ORDER_PAGE_UNREADABLE;
+    }
+
+    // Temporary rollout hint. Fails closed to ELIGIBILITY_UNKNOWN when the live
+    // report date is unreadable — never assumes eligibility.
+    result.eligibilityHint = computeEligibilityHint(result.lastReportDate, result.freeReportEnabled);
+    result.temporaryOverrideApplied =
+        result.eligibilityHint === "ELIGIBLE_EXISTING_REPORT" && !result.freeReportEnabled;
+
+    return result;
 }

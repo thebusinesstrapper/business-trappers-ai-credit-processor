@@ -50,6 +50,8 @@ import { readClientProfile } from "./crcClientProfile.js";
 import { verifyIdentity } from "./clientIdentity.js";
 import { openCreditHero } from "./openCreditHero.js";
 import { recognizeDashboardBlocker } from "./importAuditState.js";
+import { recognizeCreditHeroLanding, CH_LANDING_STATE } from "./creditHeroLandingState.js";
+import { readOrderPage, ORDER_STATE } from "./orderPageReader.js";
 import { openCreditReport } from "./openCreditReport.js";
 import { normalizeReport } from "./reportNormalize.js";
 import { readReportSelector, selectReport, verifyActiveReport } from "./reportSelector.js";
@@ -219,6 +221,41 @@ export async function runMilestone6(data = {}) {
         // in a way that looks like Credit Hero being broken.
         const chPage = creditHero.page;
 
+        // ---- STAGE 1 (READ-ONLY): CREDIT HERO LANDING STATE ----------------
+        //
+        // Diagnostic only. Classifies the page CreditHero landed on. No status,
+        // message, order, payment, or Supabase write happens here — the result is
+        // surfaced for classification and the existing flow continues unchanged.
+        const chLanding = await recognizeCreditHeroLanding(chPage).catch(() => null);
+
+        if (chLanding && chLanding.state === CH_LANDING_STATE.PAYMENT_REQUIRED) {
+            return successResponse({
+                milestone: "M6_CAPTURE",
+                result: "PAYMENT_REQUIRED",
+                stage: "credit_hero_landing",
+                creditHeroLandingState: "PAYMENT_REQUIRED",
+                classificationReason: chLanding.reason,
+                evidence: chLanding.evidence,
+                requiresInactiveWorkflow: true,
+                diagnosticOnly: true,
+                replayUrl,
+            });
+        }
+
+        if (chLanding && chLanding.state === CH_LANDING_STATE.CREDENTIALS_OR_AUTH_FAILED) {
+            return successResponse({
+                milestone: "M6_CAPTURE",
+                result: "CREDENTIALS_OR_AUTH_FAILED",
+                stage: "credit_hero_landing",
+                creditHeroLandingState: "CREDENTIALS_OR_AUTH_FAILED",
+                classificationReason: chLanding.reason,
+                evidence: chLanding.evidence,
+                requiresHumanReview: true,
+                diagnosticOnly: true,
+                replayUrl,
+            });
+        }
+
         console.log(
             creditHero.openedInNewTab
                 ? "CreditHeroScore opened in a NEW TAB — adopting that page handle."
@@ -257,11 +294,57 @@ export async function runMilestone6(data = {}) {
             // The order-page guard throws too. That is NOT a retryable condition —
             // it means Credit Hero tried to send us somewhere that spends the
             // client's money, and the correct response is to stop, not to try again.
+            //
+            // STAGE 1 (READ-ONLY): before failing, read the order page we were
+            // redirected to and classify it. This ONLY reads — the reader has no
+            // click/select/submit/goto — and it never removes the guard that
+            // brought us here. openCreditReport still refuses to navigate to the
+            // order page on the normal path; this classifies a page we already
+            // landed on.
+            const orderRead = await readOrderPage(chPage).catch(() => null);
+
+            if (orderRead && orderRead.classification === ORDER_STATE.WAITING_FOR_FREE_REPORT) {
+                return successResponse({
+                    milestone: "M6_CAPTURE",
+                    result: "WAITING_FOR_FREE_REPORT",
+                    stage: "order_page",
+                    classification: "WAITING_FOR_FREE_REPORT",
+                    freeReportEnabled: orderRead.freeReportEnabled,
+                    nextFreeReportAvailableAt: orderRead.nextFreeReportAvailableAt,
+                    paidReportPresent: orderRead.paidReportPresent,
+                    paidReportPrice: orderRead.paidReportPrice,
+                    lastReportDate: orderRead.lastReportDate,
+                    eligibilityHint: orderRead.eligibilityHint,
+                    temporaryOverrideApplied: orderRead.temporaryOverrideApplied,
+                    diagnosticOnly: true,
+                    replayUrl,
+                });
+            }
+
+            if (orderRead && orderRead.classification === ORDER_STATE.FREE_REPORT_AVAILABLE) {
+                return successResponse({
+                    milestone: "M6_CAPTURE",
+                    result: "FREE_REPORT_AVAILABLE",
+                    stage: "order_page",
+                    classification: "FREE_REPORT_AVAILABLE",
+                    freeReportEnabled: orderRead.freeReportEnabled,
+                    nextFreeReportAvailableAt: orderRead.nextFreeReportAvailableAt,
+                    paidReportPresent: orderRead.paidReportPresent,
+                    paidReportPrice: orderRead.paidReportPrice,
+                    lastReportDate: orderRead.lastReportDate,
+                    eligibilityHint: orderRead.eligibilityHint,
+                    temporaryOverrideApplied: orderRead.temporaryOverrideApplied,
+                    diagnosticOnly: true,
+                    replayUrl,
+                });
+            }
+
             return errorResponse("CREDIT_REPORT_PAGE_UNAVAILABLE",
                 `Could not reach the credit report page: ${error.message}`,
                 {
                     milestone: "M6_CAPTURE",
                     creditHeroLandingUrl: chPage.url(),
+                    orderPageClassification: orderRead ? orderRead.classification : null,
                     requiresHumanReview: true,
                 });
         }
