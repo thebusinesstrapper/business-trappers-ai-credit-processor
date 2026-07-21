@@ -643,6 +643,25 @@ async function runJob(job) {
                 m7Diagnostic,
                 creditHeroAccessState: result?.creditHeroAccessState ?? null,
                 inactive: result?.inactive ?? null,
+
+                // ---- STAGE 2: OPERATIONAL ROUTING METADATA -------------------
+                //
+                // Approval-gated branches return these; the projection must carry
+                // them or an approval-false run looks like a silent no-op. `false`
+                // and `null` are REAL values here (gate held, nothing written) —
+                // preserved with ?? so they are never collapsed to "missing".
+                classification: result?.classification ?? null,
+                proposedAction: result?.proposedAction ?? null,
+                statusUpdated:
+                    result?.statusUpdated ??
+                    result?.status?.statusUpdated ??
+                    result?.inactive?.statusUpdated ??
+                    false,
+                memoryWritten:
+                    result?.memoryWritten ??
+                    result?.inactive?.memoryWritten ??
+                    false,
+                operationalRoutingApproved: job.operationalRoutingApproved === true,
                 m8: result?.m8
                     ? {
                         finalStatus: result.m8.finalStatus ?? null,
