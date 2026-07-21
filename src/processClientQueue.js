@@ -340,7 +340,10 @@ function buildM7Diagnostic(m7, clientName = null) {
         withheldReasons[code] = (withheldReasons[code] ?? 0) + 1;
     }
 
-    const capture = m7.capture_result ?? null;
+    // M7 names this object DIFFERENTLY per path: capture_result on its failure
+    // branches, capture on the success branch. Read both so the eligibility
+    // metadata surfaces whether the client processed or was blocked.
+    const capture = m7.capture_result ?? m7.capture ?? null;
 
     const attemptLog = Array.isArray(capture?.attemptLog)
         ? capture.attemptLog.slice(0, 10)

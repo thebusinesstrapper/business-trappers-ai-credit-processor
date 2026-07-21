@@ -100,11 +100,27 @@ export async function runMilestone7(data = {}) {
             milestone: "M7_FULL_PIPELINE",
 
             // Capture/normalize summary carried through from M6.
+            //
+            // The eligibility metadata is set on M6's CAPTURED success response,
+            // but this success path builds a FRESH capture object rather than
+            // embedding m6 — so without carrying these fields through explicitly
+            // they are dropped here, before the queue projection ever sees them.
+            // Pass-through only: read from m6, no recomputation, no new behavior.
             capture: {
                 report_metadata: report.report_metadata,
                 counts: m6.normalized?.counts ?? null,
                 key_resolution: m6.normalized?.key_resolution ?? null,
                 completeness: m6.normalized?.completeness ?? null,
+
+                // Stage 1 read-only rollout eligibility metadata (diagnostic).
+                classification: m6.classification ?? null,
+                lastReportDate: m6.lastReportDate ?? null,
+                eligibilityHint: m6.eligibilityHint ?? null,
+                temporaryOverrideApplied: m6.temporaryOverrideApplied ?? null,
+                freeReportEnabled: m6.freeReportEnabled ?? null,
+                nextFreeReportAvailableAt: m6.nextFreeReportAvailableAt ?? null,
+                paidReportPresent: m6.paidReportPresent ?? null,
+                paidReportPrice: m6.paidReportPrice ?? null,
             },
 
             ...pipeline,
