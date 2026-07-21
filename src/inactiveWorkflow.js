@@ -251,7 +251,35 @@ export async function runInactiveWorkflow(opts = {}) {
         return report;
     }
 
-    // ---- 2. Send the message that is owed, if any -------------------------
+    // ---- 2. Status FIRST, while the page is still on the dashboard --------
+    //
+    // updateClientStatus needs a page on the client dashboard (it opens the
+    // View/Edit Profile modal). The notice composer navigates the page away, so
+    // status MUST run before the composer opens — otherwise the status write
+    // lands on the wrong page and fails. The approved rule is also that a notice
+    // failure must never undo the status, and doing status first guarantees that:
+    // the status result is captured before the notice can fail.
+    try {
+        const statusResult = await updateClientStatus(
+            page, crcClientId, INACTIVE_STATUS, { processingCycleComplete: true }
+        );
+
+        report.statusUpdated = statusResult?.ok === true;
+
+        if (statusResult?.ok !== true) {
+            report.error_code = statusResult?.error_code ?? "STATUS_UPDATE_FAILED";
+            report.failureReason = statusResult?.error ?? "Status update failed.";
+        }
+    } catch (error) {
+        report.error_code = "STATUS_UPDATE_EXCEPTION";
+        report.failureReason = error.message;
+    }
+
+    // ---- 3. Send the notice that is owed, if any (opens the composer) -----
+    //
+    // Runs AFTER status. A failure here records inactive_notice_last_error and
+    // leaves inactive_notice_sent_at blank so the notice retries next run — it
+    // never clears report.statusUpdated set above.
     let sendResult = null;
 
     if (decision.action !== PLANNED_ACTION.NO_MESSAGE_DUE) {
@@ -262,12 +290,11 @@ export async function runInactiveWorkflow(opts = {}) {
         const firstName = resolveFirstName(profile?.identity, clientName);
 
         if (!firstName) {
-            report.error_code = "FIRST_NAME_UNRESOLVED";
-            report.failureReason =
+            report.error_code = report.error_code ?? "FIRST_NAME_UNRESOLVED";
+            report.failureReason = report.failureReason ??
                 "Could not resolve a first name for the greeting. Not sending a message that " +
                 "would open with a blank or wrong name.";
-            // Fall through to the status write below — per the approved rule, a
-            // failed notice still sets the status and retries next run.
+            // Status already set above; leaving the notice unsent retries next run.
         } else {
             sendResult = await sendClientNotice(page, {
                 clientName,
@@ -294,12 +321,13 @@ export async function runInactiveWorkflow(opts = {}) {
                     }).catch(() => {});
                 }
             } else {
-                // FAILED SEND. The timestamp is deliberately left null, which is
-                // what makes the retry automatic: the decision above reads the
-                // timestamp, so an unsent notice is simply still owed tomorrow.
-                report.error_code = "NOTICE_SEND_FAILED";
-                report.failureReason =
-                    sendResult.failureReason ?? "The notice was not confirmed as sent.";
+                // FAILED SEND. inactive_notice_sent_at is deliberately left null,
+                // which is what makes the retry automatic: the decision reads the
+                // timestamp, so an unsent notice is simply still owed next run. The
+                // status set in step 2 is NOT touched here.
+                report.error_code = report.error_code ?? "NOTICE_SEND_FAILED";
+                report.failureReason = report.failureReason ??
+                    (sendResult.failureReason ?? "The notice was not confirmed as sent.");
 
                 await recordCreditHeroState(crcClientId, {
                     inactive_notice_last_error:
@@ -308,26 +336,6 @@ export async function runInactiveWorkflow(opts = {}) {
                 }).catch(() => {});
             }
         }
-    }
-
-    // ---- 3. Status, whether or not the message succeeded ------------------
-    //
-    // Approved rule: a failed notice still sets the status, so the client is
-    // visibly parked in the right place while the notice retries.
-    try {
-        const statusResult = await updateClientStatus(
-            page, crcClientId, INACTIVE_STATUS, { processingCycleComplete: true }
-        );
-
-        report.statusUpdated = statusResult?.ok === true;
-
-        if (statusResult?.ok !== true) {
-            report.error_code = report.error_code ?? statusResult?.error_code ?? "STATUS_UPDATE_FAILED";
-            report.failureReason = report.failureReason ?? statusResult?.error ?? "Status update failed.";
-        }
-    } catch (error) {
-        report.error_code = report.error_code ?? "STATUS_UPDATE_EXCEPTION";
-        report.failureReason = report.failureReason ?? error.message;
     }
 
     return report;

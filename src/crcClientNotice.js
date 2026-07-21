@@ -121,8 +121,26 @@ async function openComposeForm(page, crcClientId) {
 }
 
 /**
- * Verify the prefilled recipient. The dashboard flow prefills the client, so a
- * correct prefill is verified and left alone rather than cleared and retyped.
+ * Normalize a name for recipient comparison: trim, collapse internal whitespace,
+ * lower-case. Nothing else — no token dropping, no initial stripping. This makes
+ * "DEBRA BROWN" and "Debra Brown" equal while keeping "Debra Ann Brown" and
+ * "Debra Brown Jr" DISTINCT.
+ */
+function normalizeName(value) {
+    return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * Verify the prefilled recipient by NORMALIZED EXACT EQUALITY.
+ *
+ * The live compose DOM proved input[name="client_id"].value holds the visible
+ * display name (e.g. "Debra Brown"), not a numeric id — so that IS the correct
+ * name-bearing field to read.
+ *
+ * FAIL-CLOSED AND EXACT. The normalized recipient must EQUAL the normalized
+ * expected full name. No includes(), no startsWith(), no first-name match. A
+ * partial or extra-token name ("Debra Ann Brown", "Debra Brown Jr") does not
+ * verify, so a message can never go to the wrong or an ambiguous recipient.
  */
 async function verifyRecipient(page, clientName) {
     const combo = page.locator('input[name="client_id"]').first();
@@ -141,10 +159,11 @@ async function verifyRecipient(page, clientName) {
             .catch(() => "")) ||
         "";
 
-    if (prefilled === clientName || prefilled.includes(clientName)) {
+    if (normalizeName(prefilled) === normalizeName(clientName)) {
         return { ok: true, recipient: clientName, viaPrefill: true };
     }
 
+    // observedLength only — never the raw recipient text, which is client PII.
     return { ok: false, reason: "recipient_prefill_mismatch", observedLength: prefilled.length };
 }
 
