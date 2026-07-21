@@ -10,6 +10,8 @@
 
 import { runMilestone7 } from "./milestone7.js";
 import { runInactiveWorkflow } from "./inactiveWorkflow.js";
+import { statusOnlyUpdate } from "./statusOnlyUpdate.js";
+import { recordCreditHeroState } from "./clientMemory.js";
 import { runMilestone8 } from "./milestone8.js";
 
 function findCrcClientId(value, seen = new Set()) {
@@ -98,6 +100,119 @@ export async function runProductionClient(data = {}) {
             creditHeroAccessState: "CHS_NOT_ACTIVATED",
             inactive,
             m7,
+        };
+    }
+
+    // ---- STAGE 2: OPERATIONAL ROUTING OF BLOCKED CLASSIFICATIONS -----------
+    //
+    // The landing/order classifications are M6 successResponses that carry no
+    // report model, so M7 wraps them as NO_REPORT_MODEL with capture_result = the
+    // M6 object. The real classification is capture.result.
+    //
+    // GATING. operationalRoutingApproved must be explicitly true to write. When
+    // false (the default, and forced false under diagnosticOnly), each branch
+    // recognizes the state and returns a proposedAction, writing NOTHING.
+    //
+    // M8 PREVENTION. Every branch here RETURNS. runMilestone8 is called far below,
+    // so a blocked classification can never reach it.
+    const classification = capture?.result ?? null;
+    const routingApproved = data.operationalRoutingApproved === true;
+    const nowIso = new Date().toISOString();
+    const routeCrcId = capture?.crcClientId ?? findCrcClientId(m7);
+
+    // PAYMENT_REQUIRED -> inactive workflow (needs BOTH gates).
+    if (classification === "PAYMENT_REQUIRED") {
+        if (!routingApproved) {
+            return {
+                ...base, ok: false, stage: "payment_required",
+                blockedReason: "credit_monitoring_inactive",
+                classification, crcClientId: routeCrcId,
+                proposedAction: "ENTER_INACTIVE_WORKFLOW",
+                statusUpdated: false, m7,
+            };
+        }
+
+        const inactive = await runInactiveWorkflow({
+            clientName,
+            crcClientId: routeCrcId,
+            inactiveWorkflowApproved: data.inactiveWorkflowApproved === true,
+        });
+
+        return {
+            ...base,
+            ok: inactive.noticeSent || inactive.reminderSent || inactive.statusUpdated,
+            stage: "payment_required",
+            blockedReason: "credit_monitoring_inactive",
+            classification, crcClientId: inactive.crcClientId,
+            inactive, m7,
+        };
+    }
+
+    // CREDENTIALS_OR_AUTH_FAILED -> Manual Review Required (status only).
+    if (classification === "CREDENTIALS_OR_AUTH_FAILED") {
+        if (!routingApproved) {
+            return {
+                ...base, ok: false, stage: "credentials_or_auth_failed",
+                blockedReason: "credentials_or_auth_failed",
+                classification, crcClientId: routeCrcId,
+                proposedAction: "SET_MANUAL_REVIEW_REQUIRED",
+                statusUpdated: false, m7,
+            };
+        }
+
+        const status = await statusOnlyUpdate({
+            clientName, crcClientId: routeCrcId,
+            targetStatus: "Manual Review Required",
+            blockReason: "CREDENTIALS_OR_AUTH_FAILED",
+        });
+
+        if (status.statusUpdated) {
+            await recordCreditHeroState(String(routeCrcId), {
+                block_reason: "CREDENTIALS_OR_AUTH_FAILED",
+                last_credit_hero_check_at: nowIso,
+            }).catch(() => {});
+        }
+
+        return {
+            ...base, ok: status.statusUpdated,
+            stage: "credentials_or_auth_failed",
+            blockedReason: "credentials_or_auth_failed",
+            classification, crcClientId: routeCrcId,
+            status, m7,
+        };
+    }
+
+    // WAITING_FOR_FREE_REPORT -> Waiting For Bureau (status only) + durable marker.
+    if (classification === "WAITING_FOR_FREE_REPORT") {
+        if (!routingApproved) {
+            return {
+                ...base, ok: false, stage: "waiting_for_free_report",
+                blockedReason: "waiting_for_free_report",
+                classification, crcClientId: routeCrcId,
+                proposedAction: "SET_WAITING_FOR_BUREAU",
+                statusUpdated: false, m7,
+            };
+        }
+
+        const status = await statusOnlyUpdate({
+            clientName, crcClientId: routeCrcId,
+            targetStatus: "Waiting For Bureau",
+            blockReason: "WAITING_FOR_FREE_REPORT",
+        });
+
+        if (status.statusUpdated) {
+            await recordCreditHeroState(String(routeCrcId), {
+                block_reason: "WAITING_FOR_FREE_REPORT",
+                last_credit_hero_check_at: nowIso,
+            }).catch(() => {});
+        }
+
+        return {
+            ...base, ok: status.statusUpdated,
+            stage: "waiting_for_free_report",
+            blockedReason: "waiting_for_free_report",
+            classification, crcClientId: routeCrcId,
+            status, m7,
         };
     }
 

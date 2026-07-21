@@ -67,6 +67,7 @@ function publicJob(job) {
         submitApproved: job.submitApproved,
         diagnosticOnly: job.diagnosticOnly === true,
         inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
+        operationalRoutingApproved: job.operationalRoutingApproved === true,
         eligibleStatuses: job.eligibleStatuses,
         maxClients: job.maxClients,
         delayMs: job.delayMs,
@@ -560,6 +561,7 @@ async function runJob(job) {
                         processingApproved: true,
                         submitApproved: job.submitApproved,
                         inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
+                        operationalRoutingApproved: job.operationalRoutingApproved === true,
                     });
                 }
             } catch (error) {
@@ -745,9 +747,10 @@ export function startClientQueue(data = {}) {
         completedAt: null,
         submitApproved: diagnosticOnly ? false : true,
         diagnosticOnly,
-        // A diagnostic run is read-only without exception, so the inactive
-        // workflow can never be armed inside one.
+        // A diagnostic run is read-only without exception, so neither the
+        // inactive workflow nor operational routing can be armed inside one.
         inactiveWorkflowApproved: diagnosticOnly ? false : data.inactiveWorkflowApproved === true,
+        operationalRoutingApproved: diagnosticOnly ? false : data.operationalRoutingApproved === true,
         eligibleStatuses,
         maxClients,
         delayMs,

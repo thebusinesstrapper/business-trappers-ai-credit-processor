@@ -372,6 +372,11 @@ export async function recordCreditHeroState(crcClientId, fields = {}) {
         "inactive_notice_sent_at",
         "inactive_reminder_sent_at",
         "inactive_notice_last_error",
+        // Stage 2: durable marker for a blocked classification (e.g.
+        // "WAITING_FOR_FREE_REPORT", "CREDENTIALS_OR_AUTH_FAILED"). Nullable text.
+        // Deliberately narrow — this writer still cannot touch current_round,
+        // processing_state, delivery locks, or any success/dispute timestamp.
+        "block_reason",
     ];
 
     const update = {};
