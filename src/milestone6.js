@@ -233,6 +233,9 @@ export async function runMilestone6(data = {}) {
                 milestone: "M6_CAPTURE",
                 result: "PAYMENT_REQUIRED",
                 stage: "credit_hero_landing",
+                // Verified, in-scope ID from openClient's confirmed dashboard URL.
+                // Same value the CHS_NOT_ACTIVATED return already forwards.
+                crcClientId: client.crcClientId,
                 creditHeroLandingState: "PAYMENT_REQUIRED",
                 classificationReason: chLanding.reason,
                 evidence: chLanding.evidence,
@@ -247,6 +250,7 @@ export async function runMilestone6(data = {}) {
                 milestone: "M6_CAPTURE",
                 result: "CREDENTIALS_OR_AUTH_FAILED",
                 stage: "credit_hero_landing",
+                crcClientId: client.crcClientId,
                 creditHeroLandingState: "CREDENTIALS_OR_AUTH_FAILED",
                 classificationReason: chLanding.reason,
                 evidence: chLanding.evidence,
@@ -308,6 +312,7 @@ export async function runMilestone6(data = {}) {
                     milestone: "M6_CAPTURE",
                     result: "WAITING_FOR_FREE_REPORT",
                     stage: "order_page",
+                    crcClientId: client.crcClientId,
                     classification: "WAITING_FOR_FREE_REPORT",
                     freeReportEnabled: orderRead.freeReportEnabled,
                     nextFreeReportAvailableAt: orderRead.nextFreeReportAvailableAt,
@@ -326,6 +331,7 @@ export async function runMilestone6(data = {}) {
                     milestone: "M6_CAPTURE",
                     result: "FREE_REPORT_AVAILABLE",
                     stage: "order_page",
+                    crcClientId: client.crcClientId,
                     classification: "FREE_REPORT_AVAILABLE",
                     freeReportEnabled: orderRead.freeReportEnabled,
                     nextFreeReportAvailableAt: orderRead.nextFreeReportAvailableAt,
