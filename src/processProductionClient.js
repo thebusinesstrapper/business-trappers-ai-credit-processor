@@ -84,10 +84,33 @@ export async function runProductionClient(data = {}) {
     // control are NOT proof and keep the ordinary manual-review path below.
     const capture = m7?.capture_result ?? null;
 
+    // Gates computed ONCE, above every routing branch, so no branch can act
+    // without them. operationalRoutingApproved gates WHETHER we act at all;
+    // inactiveWorkflowApproved additionally gates the inactive workflow's writes.
+    const classification = capture?.result ?? null;
+    const routingApproved = data.operationalRoutingApproved === true;
+    const nowIso = new Date().toISOString();
+    const routeCrcId = capture?.crcClientId ?? findCrcClientId(m7);
+
+    // CHS_NOT_ACTIVATED -> inactive workflow. NOW GATED on operationalRoutingApproved,
+    // exactly like PAYMENT_REQUIRED — previously this branch entered the inactive
+    // workflow with no routing gate, which is how a blocked classification could
+    // reach write-capable code before approval.
     if (capture?.error_code === "CHS_NOT_ACTIVATED" && capture?.requiresInactiveWorkflow === true) {
+        if (!routingApproved) {
+            return {
+                ...base, ok: false, stage: "credit_hero_inactive",
+                blockedReason: "credit_monitoring_inactive",
+                classification: "CHS_NOT_ACTIVATED", crcClientId: routeCrcId,
+                creditHeroAccessState: "CHS_NOT_ACTIVATED",
+                proposedAction: "ENTER_INACTIVE_WORKFLOW",
+                statusUpdated: false, m7,
+            };
+        }
+
         const inactive = await runInactiveWorkflow({
             clientName,
-            crcClientId: capture.crcClientId ?? findCrcClientId(m7),
+            crcClientId: routeCrcId,
             inactiveWorkflowApproved: data.inactiveWorkflowApproved === true,
         });
 
@@ -107,7 +130,7 @@ export async function runProductionClient(data = {}) {
     //
     // The landing/order classifications are M6 successResponses that carry no
     // report model, so M7 wraps them as NO_REPORT_MODEL with capture_result = the
-    // M6 object. The real classification is capture.result.
+    // M6 object. The real classification is capture.result (computed above).
     //
     // GATING. operationalRoutingApproved must be explicitly true to write. When
     // false (the default, and forced false under diagnosticOnly), each branch
@@ -115,10 +138,6 @@ export async function runProductionClient(data = {}) {
     //
     // M8 PREVENTION. Every branch here RETURNS. runMilestone8 is called far below,
     // so a blocked classification can never reach it.
-    const classification = capture?.result ?? null;
-    const routingApproved = data.operationalRoutingApproved === true;
-    const nowIso = new Date().toISOString();
-    const routeCrcId = capture?.crcClientId ?? findCrcClientId(m7);
 
     // PAYMENT_REQUIRED -> inactive workflow (needs BOTH gates).
     if (classification === "PAYMENT_REQUIRED") {
