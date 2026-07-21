@@ -51,7 +51,7 @@ import { verifyIdentity } from "./clientIdentity.js";
 import { openCreditHero } from "./openCreditHero.js";
 import { recognizeDashboardBlocker } from "./importAuditState.js";
 import { recognizeCreditHeroLanding, CH_LANDING_STATE } from "./creditHeroLandingState.js";
-import { readOrderPage, ORDER_STATE } from "./orderPageReader.js";
+import { readOrderPage, ORDER_STATE, computeEligibilityHint } from "./orderPageReader.js";
 import { openCreditReport } from "./openCreditReport.js";
 import { normalizeReport } from "./reportNormalize.js";
 import { readReportSelector, selectReport, verifyActiveReport } from "./reportSelector.js";
@@ -565,6 +565,27 @@ export async function runMilestone6(data = {}) {
             selectorOptions: parsed.reports.map((r) => ({ text: r.text, date: r.reportDate })),
             selectorRejected: parsed.rejected,
             freshness: { action: freshness.action, reason: freshness.reason },
+
+            // ---- STAGE 1 (READ-ONLY): TEMPORARY ROLLOUT ELIGIBILITY HINT ------
+            //
+            // The client HAS a usable report, so the order page was never visited.
+            // The authoritative live report date is the selector's newest, and the
+            // eligibility hint reuses the SAME helper the order-page reader uses —
+            // one rule, not two. Fields the order page would have supplied are
+            // reported as null because they were NOT observed on this path; we do
+            // not infer them.
+            classification:
+                computeEligibilityHint(freshness.newestReportDate ?? null, null) === "ELIGIBLE_EXISTING_REPORT"
+                    ? "ELIGIBLE_EXISTING_REPORT"
+                    : "PROCESSED_EXISTING_REPORT",
+            lastReportDate: freshness.newestReportDate ?? null,
+            eligibilityHint: computeEligibilityHint(freshness.newestReportDate ?? null, null),
+            temporaryOverrideApplied:
+                computeEligibilityHint(freshness.newestReportDate ?? null, null) === "ELIGIBLE_EXISTING_REPORT",
+            freeReportEnabled: null,
+            nextFreeReportAvailableAt: null,
+            paidReportPresent: null,
+            paidReportPrice: null,
 
             // THE EVIDENCE. This is what the normalizer gets written against.
             capturedPayload: {

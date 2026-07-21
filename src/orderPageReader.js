@@ -44,7 +44,7 @@ const LAST_REPORT_RE = /Last\s+Report\s+Date\s*:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4}
 // TEMPORARY initial-rollout cutoff (inclusive). NOT the permanent rule — the
 // permanent future-cycle rule is 31 days since confirmed delivery AND a free
 // report, and is not built here.
-const ROLLOUT_CUTOFF_ISO = "2026-07-01";
+export const ROLLOUT_CUTOFF_ISO = "2026-07-01";
 
 const READ_TIMEOUT = 8000;
 
@@ -69,7 +69,7 @@ function parseLastReportDate(text) {
  * status, triggers no processing. ISO date strings compare correctly with <,
  * >=, so no Date parsing is needed.
  */
-function computeEligibilityHint(lastReportDateIso, freeReportEnabled) {
+export function computeEligibilityHint(lastReportDateIso, freeReportEnabled) {
     if (!lastReportDateIso) return "ELIGIBILITY_UNKNOWN";
 
     if (lastReportDateIso >= ROLLOUT_CUTOFF_ISO) {

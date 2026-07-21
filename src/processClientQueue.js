@@ -295,6 +295,21 @@ function safeReason(value) {
     return cleaned ? cleaned.slice(0, 160) : null;
 }
 
+/** A finite number or null. */
+function safeNumber(value) {
+    return value !== null && value !== "" && Number.isFinite(Number(value)) ? Number(value) : null;
+}
+
+/** Strict boolean or null — preserves the "not observed" (null) case. */
+function safeBool(value) {
+    return value === true ? true : value === false ? false : null;
+}
+
+/** ISO date YYYY-MM-DD or null. Rejects anything else rather than guessing. */
+function safeIsoDate(value) {
+    return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+}
+
 /**
  * SAFE DIAGNOSTIC PROJECTION of an M7 result.
  *
@@ -385,6 +400,23 @@ function buildM7Diagnostic(m7, clientName = null) {
         // Distinct sanitized reasons with counts, so a 106-client run can be read
         // without opening every result.
         attemptReasons,
+
+        // ---- STAGE 1 (READ-ONLY): TEMPORARY ROLLOUT ELIGIBILITY METADATA -----
+        //
+        // Set by milestone6 on the order-page path AND the successful-M7 path
+        // (both under capture.*). Whitelisted explicitly so the strict projection
+        // preserves them. Diagnostic only — no routing, count, or grouping depends
+        // on them. null is a real value here (a field the path did not observe).
+        classification: safeCode(capture?.classification) ?? safeCode(m7.classification),
+        lastReportDate: safeIsoDate(capture?.lastReportDate) ?? safeIsoDate(m7.lastReportDate),
+        eligibilityHint: safeCode(capture?.eligibilityHint) ?? safeCode(m7.eligibilityHint),
+        temporaryOverrideApplied:
+            safeBool(capture?.temporaryOverrideApplied) ?? safeBool(m7.temporaryOverrideApplied),
+        freeReportEnabled: safeBool(capture?.freeReportEnabled) ?? safeBool(m7.freeReportEnabled),
+        nextFreeReportAvailableAt:
+            safeIsoDate(capture?.nextFreeReportAvailableAt) ?? safeIsoDate(m7.nextFreeReportAvailableAt),
+        paidReportPresent: safeBool(capture?.paidReportPresent) ?? safeBool(m7.paidReportPresent),
+        paidReportPrice: safeNumber(capture?.paidReportPrice) ?? safeNumber(m7.paidReportPrice),
     };
 }
 
