@@ -61,6 +61,60 @@ function normalizeName(value) {
     return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+/**
+ * Resolve the real Playwright Page from whatever the caller hands us.
+ *
+ * openCreditReport() returns a PLAIN OBJECT — { reportOpened, reportUrl,
+ * pageTitle, page } — not a Page. Calling page methods on that wrapper throws
+ * "getByRole is not a function", which is exactly how this failed. Accept either
+ * shape and fail closed if neither is usable.
+ */
+function resolvePage(candidate) {
+    if (!candidate || typeof candidate !== "object") return null;
+
+    if (typeof candidate.locator === "function" && typeof candidate.frames === "function") {
+        return candidate;
+    }
+
+    const inner = candidate.page;
+
+    if (inner && typeof inner.locator === "function" && typeof inner.frames === "function") {
+        return inner;
+    }
+
+    return null;
+}
+
+/**
+ * Find the visible ORDER NEW REPORT control across every frame.
+ *
+ * Uses locator() + hasText only — the most broadly supported strategy — rather
+ * than getByRole(). CRC renders href-less anchors elsewhere in this app, and an
+ * <a> without an href carries NO link role, so a role query can silently match
+ * nothing even on a healthy page.
+ *
+ * FAILS CLOSED on ambiguity: exactly one visible match is required.
+ */
+async function findOrderLink(page) {
+    const matches = [];
+
+    for (const frame of page.frames()) {
+        const loc = frame.locator("a, button, [role=\"link\"], [role=\"button\"]", {
+            hasText: ORDER_LINK_RE,
+        });
+
+        const count = await loc.count().catch(() => 0);
+
+        for (let i = 0; i < count; i += 1) {
+            const candidate = loc.nth(i);
+            const visible = await candidate.isVisible().catch(() => false);
+            if (visible) matches.push(candidate);
+        }
+    }
+
+    return matches;
+}
+
 /** Frame that holds the order form. */
 async function findOrderFrame(page) {
     for (const frame of page.frames()) {
@@ -183,22 +237,37 @@ export async function acquireFreeReport(reportPage, opts = {}) {
     //
     // CreditHero does not redirect here when a usable report exists, so the link
     // must be used deliberately. This is navigation, not ordering.
-    const orderLink = reportPage
-        .getByRole("link", { name: ORDER_LINK_RE })
-        .or(reportPage.getByText(ORDER_LINK_RE))
-        .first();
+    const page = resolvePage(reportPage);
 
-    if (!(await orderLink.count().catch(() => 0))) {
-        report.error_code = "ORDER_LINK_NOT_FOUND";
-        report.failureReason = "The ORDER NEW REPORT link was not present. Nothing was clicked.";
+    if (!page) {
+        report.error_code = "REPORT_PAGE_UNUSABLE";
+        report.failureReason =
+            "The object passed in exposes no Playwright page interface. Nothing was clicked.";
         return report;
     }
 
-    await orderLink.click({ timeout: NAV_TIMEOUT }).catch(() => {});
-    await reportPage.waitForLoadState("domcontentloaded").catch(() => {});
+    const orderLinks = await findOrderLink(page).catch(() => []);
+
+    if (orderLinks.length === 0) {
+        report.error_code = "ORDER_LINK_NOT_FOUND";
+        report.failureReason =
+            "No visible ORDER NEW REPORT control was found. Nothing was clicked.";
+        return report;
+    }
+
+    if (orderLinks.length > 1) {
+        report.error_code = "ORDER_LINK_AMBIGUOUS";
+        report.failureReason =
+            `Found ${orderLinks.length} visible ORDER NEW REPORT controls. Ambiguity on this ` +
+            `page is indistinguishable from danger, so nothing was clicked.`;
+        return report;
+    }
+
+    await orderLinks[0].click({ timeout: NAV_TIMEOUT }).catch(() => {});
+    await page.waitForLoadState("domcontentloaded").catch(() => {});
 
     // ---- 2. Positively identify the order page -----------------------------
-    const frame = await findOrderFrame(reportPage).catch(() => null);
+    const frame = await findOrderFrame(page).catch(() => null);
 
     if (!frame) {
         report.error_code = "ORDER_PAGE_NOT_IDENTIFIED";
@@ -350,11 +419,11 @@ export async function acquireFreeReport(reportPage, opts = {}) {
     await submit.click({ timeout: NAV_TIMEOUT }).catch(() => {});
     report.submitClicked = true;
 
-    await reportPage.waitForLoadState("domcontentloaded").catch(() => {});
+    await page.waitForLoadState("domcontentloaded").catch(() => {});
 
     // ---- 8. Observe the result; never assume the report exists ------------
     const afterText =
-        (await reportPage.locator("body").innerText({ timeout: READ_TIMEOUT }).catch(() => "")) || "";
+        (await page.locator("body").innerText({ timeout: READ_TIMEOUT }).catch(() => "")) || "";
 
     report.postSubmitText = afterText.replace(/\s+/g, " ").trim().slice(0, 300);
     report.classification = ACQUISITION_STATE.FREE_REPORT_PENDING;
