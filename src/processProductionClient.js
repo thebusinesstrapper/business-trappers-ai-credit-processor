@@ -263,6 +263,44 @@ export async function runProductionClient(data = {}) {
         };
     }
 
+    // ---- PHASE A: STALE-REPORT ELIGIBILITY BLOCK ---------------------------
+    //
+    // The temporary July-1 rollout rule was previously computed and REPORTED but
+    // never enforced, so a client whose existing report predates the cutoff would
+    // still flow into M8 and have letters delivered off a stale report.
+    //
+    // The gate lives here, immediately before runMilestone8, rather than inside
+    // any acquisition flow. That placement is deliberate: a free-report
+    // acquisition that fails, stays pending, or lands on an unrecognized page can
+    // never bypass it, because delivery is gated on the VERIFIED eligibility of
+    // the report actually in hand.
+    //
+    // FAIL CLOSED. Only ELIGIBLE_EXISTING_REPORT proceeds. WAITING_FOR_FREE_REPORT,
+    // ELIGIBLE_FREE_REPORT (acquisition not built), ELIGIBILITY_UNKNOWN, and a
+    // missing hint all stop here. Returning BEFORE runMilestone8 means no delivery
+    // lock is taken, no round advances, and no letters are sent.
+    //
+    // M7's success response carries these under `capture` (its failure branches
+    // use `capture_result`), so the success-path hint is read from there.
+    const successCapture = m7?.capture ?? null;
+    const eligibilityHint = successCapture?.eligibilityHint ?? null;
+
+    if (eligibilityHint !== "ELIGIBLE_EXISTING_REPORT") {
+        return {
+            ...base,
+            ok: false,
+            stage: "eligibility_blocked",
+            blockedReason: "report_not_eligible_for_delivery",
+            classification: successCapture?.classification ?? null,
+            eligibilityHint,
+            lastReportDate: successCapture?.lastReportDate ?? null,
+            temporaryOverrideApplied: successCapture?.temporaryOverrideApplied ?? null,
+            crcClientId,
+            m7,
+            m8: null,
+        };
+    }
+
     const m8 = await runMilestone8({
         clientName,
         crcClientId,

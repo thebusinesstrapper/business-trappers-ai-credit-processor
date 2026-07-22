@@ -52,6 +52,7 @@ import { openCreditHero } from "./openCreditHero.js";
 import { recognizeDashboardBlocker } from "./importAuditState.js";
 import { recognizeCreditHeroLanding, CH_LANDING_STATE } from "./creditHeroLandingState.js";
 import { readOrderPage, ORDER_STATE, computeEligibilityHint } from "./orderPageReader.js";
+import { captureOrderPageDom } from "./orderPageDomCapture.js";
 import { openCreditReport } from "./openCreditReport.js";
 import { normalizeReport } from "./reportNormalize.js";
 import { readReportSelector, selectReport, verifyActiveReport } from "./reportSelector.js";
@@ -306,6 +307,27 @@ export async function runMilestone6(data = {}) {
             // order page on the normal path; this classifies a page we already
             // landed on.
             const orderRead = await readOrderPage(chPage).catch(() => null);
+
+            // PHASE C: read-only DOM evidence capture, only when explicitly asked.
+            // Selects nothing, submits nothing, writes nothing.
+            let orderPageDom = null;
+
+            if (data.captureOrderPageDom === true) {
+                orderPageDom = await captureOrderPageDom(chPage).catch(() => null);
+
+                return successResponse({
+                    milestone: "M6_CAPTURE",
+                    result: "ORDER_PAGE_DOM_CAPTURED",
+                    stage: "order_page_dom_capture",
+                    crcClientId: client.crcClientId,
+                    classification: orderRead ? orderRead.classification : null,
+                    freeReportEnabled: orderRead ? orderRead.freeReportEnabled : null,
+                    lastReportDate: orderRead ? orderRead.lastReportDate : null,
+                    orderPageDom,
+                    diagnosticOnly: true,
+                    replayUrl,
+                });
+            }
 
             if (orderRead && orderRead.classification === ORDER_STATE.WAITING_FOR_FREE_REPORT) {
                 return successResponse({
