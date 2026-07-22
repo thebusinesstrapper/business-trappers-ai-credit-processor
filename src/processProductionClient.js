@@ -40,6 +40,40 @@ function findCrcClientId(value, seen = new Set()) {
     return null;
 }
 
+/**
+ * Set CRC status to "Waiting For Bureau" via the existing verified status-only
+ * helper, then persist the exact confirmed status. Shared by BOTH places this
+ * module can determine WAITING_FOR_FREE_REPORT:
+ *   - capture_result.result (an M6 blocked/landing-page classification)
+ *   - m7.capture.eligibilityHint (Phase A, on an otherwise-successful M7 run)
+ *
+ * Never touches M8, current_round, or letters. Persists crc_client_status
+ * only when statusOnlyUpdate() reports both statusUpdated === true AND a
+ * non-blank statusWritten — never the requested targetStatus as a substitute.
+ */
+async function routeToWaitingForBureau(clientName, crcClientId, nowIso) {
+    const status = await statusOnlyUpdate({
+        clientName, crcClientId,
+        targetStatus: "Waiting For Bureau",
+        blockReason: "WAITING_FOR_FREE_REPORT",
+    });
+
+    if (status.statusUpdated) {
+        await recordCreditHeroState(String(crcClientId), {
+            block_reason: "WAITING_FOR_FREE_REPORT",
+            last_credit_hero_check_at: nowIso,
+        }).catch(() => {});
+
+        if (status?.statusUpdated === true && status?.statusWritten) {
+            await recordCreditHeroState(String(crcClientId), {
+                crc_client_status: status.statusWritten,
+            }).catch(() => {});
+        }
+    }
+
+    return status;
+}
+
 export async function runProductionClient(data = {}) {
     const clientName =
         typeof data.clientName === "string"
@@ -238,25 +272,7 @@ export async function runProductionClient(data = {}) {
             };
         }
 
-        const status = await statusOnlyUpdate({
-            clientName, crcClientId: routeCrcId,
-            targetStatus: "Waiting For Bureau",
-            blockReason: "WAITING_FOR_FREE_REPORT",
-        });
-
-        if (status.statusUpdated) {
-            await recordCreditHeroState(String(routeCrcId), {
-                block_reason: "WAITING_FOR_FREE_REPORT",
-                last_credit_hero_check_at: nowIso,
-            }).catch(() => {});
-
-            // Same confirmed-status persistence as CREDENTIALS_OR_AUTH_FAILED above.
-            if (status?.statusUpdated === true && status?.statusWritten) {
-                await recordCreditHeroState(String(routeCrcId), {
-                    crc_client_status: status.statusWritten,
-                }).catch(() => {});
-            }
-        }
+        const status = await routeToWaitingForBureau(clientName, routeCrcId, nowIso);
 
         return {
             ...base, ok: status.statusUpdated,
@@ -317,6 +333,43 @@ export async function runProductionClient(data = {}) {
     const successCapture = m7?.capture ?? null;
     const eligibilityHint = successCapture?.eligibilityHint ?? null;
 
+    // ---- WAITING_FOR_FREE_REPORT, DETECTED ON THE SUCCESS PATH -------------
+    //
+    // M6 can determine, even on an otherwise-successful M7 run, that the
+    // existing report is outside the eligible window and a new free report is
+    // required but not yet available. This is the SAME outcome as the
+    // capture_result-based WAITING_FOR_FREE_REPORT classification handled far
+    // above (routeToWaitingForBureau) — just surfaced through
+    // m7.capture.eligibilityHint instead of capture_result.result. It MUST
+    // route the same way and MUST NOT fall through to the generic "not
+    // eligible" manual-review return below, which has no way to distinguish
+    // "waiting on a free report" from any other ineligibility reason.
+    if (eligibilityHint === "WAITING_FOR_FREE_REPORT") {
+        if (!routingApproved) {
+            return {
+                ...base, ok: false, stage: "waiting_for_free_report",
+                blockedReason: "waiting_for_free_report",
+                classification: successCapture?.classification ?? null,
+                eligibilityHint, crcClientId,
+                proposedAction: "SET_WAITING_FOR_BUREAU",
+                statusUpdated: false, m7,
+            };
+        }
+
+        const status = await routeToWaitingForBureau(clientName, crcClientId, nowIso);
+
+        return {
+            ...base, ok: status.statusUpdated,
+            stage: "waiting_for_free_report",
+            blockedReason: "waiting_for_free_report",
+            classification: successCapture?.classification ?? null,
+            eligibilityHint,
+            lastReportDate: successCapture?.lastReportDate ?? null,
+            crcClientId,
+            status, m7,
+        };
+    }
+
     if (eligibilityHint !== "ELIGIBLE_EXISTING_REPORT") {
         return {
             ...base,
@@ -329,6 +382,46 @@ export async function runProductionClient(data = {}) {
             temporaryOverrideApplied: successCapture?.temporaryOverrideApplied ?? null,
             crcClientId,
             m7,
+            m8: null,
+        };
+    }
+
+    // ---- CORRECTION 2: NO ACTIONABLE DISPUTE ITEMS -------------------------
+    //
+    // M7 can succeed (success:true, lettersOk:true — both already guaranteed
+    // by the "if (!m7 || m7.success === false || !m7LettersOk)" gate above)
+    // and still have generated zero letters and withheld zero items — e.g. no
+    // negative accounts are present, or the only negative item present (such
+    // as a bankruptcy) is intentionally outside the current processing scope
+    // and was never surfaced by M7 as either a letter or a withheld item. That
+    // is a legitimate business outcome, not a capture failure and not a
+    // letter-generation failure. It must never reach M8, which would
+    // otherwise reject it as "m7_letters_missing" — a message meant for a
+    // genuine pipeline defect, not for "there was nothing to dispute".
+    //
+    // NO CRC status change. Current business rules do not define a target CRC
+    // status for this condition, so CRC is left exactly as it was: no
+    // statusOnlyUpdate call, no block_reason write, no crc_client_status
+    // write. current_round is untouched, no delivery lock is taken, and M8 is
+    // never invoked.
+    const letterCount = Array.isArray(m7.letters) ? m7.letters.length : 0;
+    const withheldCount = Array.isArray(m7.withheld) ? m7.withheld.length : 0;
+
+    if (letterCount === 0 && withheldCount === 0) {
+        return {
+            ...base,
+            ok: true,
+            stage: "no_actionable_dispute_items",
+            outcome: "NO_ACTIONABLE_DISPUTE_ITEMS",
+            blockedReason: null,
+            failureReason: null,
+            crcClientId,
+            m7Summary: {
+                success: m7.success !== false,
+                lettersOk: m7LettersOk,
+                letterCount,
+                withheldCount,
+            },
             m8: null,
         };
     }
