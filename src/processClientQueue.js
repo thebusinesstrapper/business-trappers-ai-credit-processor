@@ -548,7 +548,25 @@ async function runJob(job) {
                     // no CRC status write, no delivery lock, no completion
                     // marker, and no round change on this path, because none of
                     // that code is called at all.
-                    const m7 = await runMilestone7({ clientName: item.clientName });
+                    // The acquisition flags must be forwarded here too. This branch
+                    // bypasses runProductionClient entirely, so fixing the flag
+                    // chain there did nothing for diagnostic runs — M6 still saw
+                    // undefined and skipped the free-report branch.
+                    //
+                    // These flags do not make a diagnostic run write anything:
+                    // submitOrderApproved gates Submit, and it stays false unless
+                    // explicitly sent. M8 remains unreachable from this branch.
+                    const effectiveFreeReportAcquisitionApproved =
+                        job.freeReportAcquisitionApproved === true;
+                    const effectiveSubmitOrderApproved = job.submitOrderApproved === true;
+
+                    const m7 = await runMilestone7({
+                        clientName: item.clientName,
+                        freeReportAcquisitionApproved: effectiveFreeReportAcquisitionApproved,
+                        submitOrderApproved: effectiveSubmitOrderApproved,
+                        captureOrderPageDom: job.captureOrderPageDom === true,
+                    });
+
                     const lettersOk = m7?.lettersOk === true || m7?.letters_ok === true;
 
                     result = {
@@ -556,6 +574,10 @@ async function runJob(job) {
                         diagnosticOnly: true,
                         ok: m7?.success !== false && lettersOk,
                         stage: "m7_diagnostic",
+                        // Echo what M6 actually received, so a skipped branch is
+                        // provably a flag problem or provably not one.
+                        effectiveFreeReportAcquisitionApproved,
+                        effectiveSubmitOrderApproved,
                         m7,
                     };
                 } else {
