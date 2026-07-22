@@ -80,21 +80,62 @@ function publicJob(job) {
     };
 }
 
+// MUI DataGrid semantics. The CRC Clients grid is a DataGrid: it renders
+// role="row" / role="gridcell" divs, NOT a <table>. Any selector that leans on
+// table/tr/tbody finds nothing here.
+const GRID_ROW_SELECTOR = '[role="row"]';
+const GRID_CELL_SELECTOR = '[role="gridcell"]';
+const HEADER_CELL_SELECTOR = '[role="columnheader"]';
+
+const ROWS_READY_TIMEOUT_MS = 15000;
+const ROWS_POLL_MS = 250;
+
+/**
+ * Wait for the grid to actually contain DATA cells.
+ *
+ * The scan previously ran after a flat 1200ms sleep. If the DataGrid had not
+ * finished rendering by then, every locator returned zero and the queue reported
+ * scannedRows: 0 on a page that was about to be full of clients — a fixed sleep
+ * cannot tell "empty" from "not painted yet".
+ *
+ * Waiting on role="gridcell" rather than role="row" matters: the header row is a
+ * role="row" too, so rows alone can be non-zero while no client data exists yet.
+ */
+async function waitForGridRows(page, timeoutMs = ROWS_READY_TIMEOUT_MS) {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+        const cells = await page.locator(GRID_CELL_SELECTOR).count().catch(() => 0);
+        if (cells > 0) return true;
+        await page.waitForTimeout(ROWS_POLL_MS);
+    }
+
+    return false;
+}
+
 async function visibleRows(page) {
-    return page.locator('[role="row"]:visible, table tr:visible');
+    return page.locator(GRID_ROW_SELECTOR);
 }
 
 async function extractVisibleClientRows(page) {
+    await waitForGridRows(page);
+
     const rows = await visibleRows(page);
     const count = await rows.count();
     const found = [];
 
     for (let i = 0; i < count; i += 1) {
         const row = rows.nth(i);
-        const cells = row.locator('[role="gridcell"], td');
+
+        // Explicitly exclude the column-header row. It carries role="row" and
+        // would otherwise be treated as a client whose name is a column title.
+        const headerCells = await row.locator(HEADER_CELL_SELECTOR).count().catch(() => 0);
+        if (headerCells > 0) continue;
+
+        const cells = row.locator(GRID_CELL_SELECTOR);
         const cellCount = await cells.count();
 
-        if (cellCount === 0) continue; // header row
+        if (cellCount === 0) continue; // header row or a spacer/filler row
 
         const cellTexts = [];
         for (let c = 0; c < cellCount; c += 1) {
