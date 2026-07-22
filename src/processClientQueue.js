@@ -720,7 +720,18 @@ export function startClientQueue(data = {}) {
     // not merely unnecessary — there is nothing for it to approve.
     const diagnosticOnly = data.diagnosticOnly === true;
 
-    if (!diagnosticOnly && data.submitApproved !== true) {
+    // A production run must make its sending intent EXPLICIT — silence is still
+    // rejected, exactly as before. What changed is that an explicit `false` is now
+    // a valid answer rather than being treated as "unapproved".
+    //
+    // That enables production-path/no-submit mode: the real processProductionClient
+    // path runs (so routing, the eligibility guard, and classification are all
+    // exercised against a live client) while submitApproved stays false end to end,
+    // so M8 cannot submit, no delivery lock is taken, and no round advances.
+    const submitDecisionSupplied =
+        data.submitApproved === true || data.submitApproved === false;
+
+    if (!diagnosticOnly && !submitDecisionSupplied) {
         return {
             ok: false,
             blockedReason: "submit_approval_required_for_production_queue",
