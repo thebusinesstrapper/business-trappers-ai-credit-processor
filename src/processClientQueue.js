@@ -68,6 +68,9 @@ function publicJob(job) {
         diagnosticOnly: job.diagnosticOnly === true,
         inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
         operationalRoutingApproved: job.operationalRoutingApproved === true,
+        freeReportAcquisitionApproved: job.freeReportAcquisitionApproved === true,
+        submitOrderApproved: job.submitOrderApproved === true,
+        captureOrderPageDom: job.captureOrderPageDom === true,
         eligibleStatuses: job.eligibleStatuses,
         maxClients: job.maxClients,
         delayMs: job.delayMs,
@@ -562,6 +565,9 @@ async function runJob(job) {
                         submitApproved: job.submitApproved,
                         inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
                         operationalRoutingApproved: job.operationalRoutingApproved === true,
+                        freeReportAcquisitionApproved: job.freeReportAcquisitionApproved === true,
+                        submitOrderApproved: job.submitOrderApproved === true,
+                        captureOrderPageDom: job.captureOrderPageDom === true,
                     });
                 }
             } catch (error) {
@@ -662,6 +668,12 @@ async function runJob(job) {
                     result?.inactive?.memoryWritten ??
                     false,
                 operationalRoutingApproved: job.operationalRoutingApproved === true,
+
+                // Acquisition rehearsal evidence; null when the branch did not run.
+                acquisition: result?.m7?.capture_result?.acquisition ?? null,
+                effectiveFreeReportAcquisitionApproved:
+                    result?.effectiveFreeReportAcquisitionApproved ?? null,
+                effectiveSubmitOrderApproved: result?.effectiveSubmitOrderApproved ?? null,
                 m8: result?.m8
                     ? {
                         finalStatus: result.m8.finalStatus ?? null,
@@ -770,6 +782,15 @@ export function startClientQueue(data = {}) {
         // inactive workflow nor operational routing can be armed inside one.
         inactiveWorkflowApproved: diagnosticOnly ? false : data.inactiveWorkflowApproved === true,
         operationalRoutingApproved: diagnosticOnly ? false : data.operationalRoutingApproved === true,
+
+        // NOT forced false by diagnosticOnly. Those two flags gate CRC/Supabase
+        // WRITES, which a diagnostic run must never do. These gate the free-report
+        // acquisition rehearsal, whose entire purpose is to run under
+        // diagnosticOnly. Safety here comes from submitOrderApproved staying false
+        // — the Submit gate, not the diagnostic flag, is what prevents an order.
+        freeReportAcquisitionApproved: data.freeReportAcquisitionApproved === true,
+        submitOrderApproved: data.submitOrderApproved === true,
+        captureOrderPageDom: data.captureOrderPageDom === true,
         eligibleStatuses,
         maxClients,
         delayMs,
