@@ -27,9 +27,20 @@ export const ORDER_STATE = Object.freeze({
     ORDER_PAGE_UNREADABLE: "ORDER_PAGE_UNREADABLE",
 });
 
-// The free option is identified by this visible label text. "&" not "&amp;":
-// textContent decodes entities, so we match the decoded form.
-const FREE_LABEL = "3 Bureau Report & Score FREE";
+// The free option's wording VARIES BY ACCOUNT. Two confirmed live forms:
+//   "3 Bureau Report & Score FREE"
+//   "3 Bureau Experian, Equifax and Transunion Report & Score FREE"
+// A fixed string anchored on the first would silently fail to find the second,
+// so identification is multi-signal: the row must mention a 3-bureau product AND
+// FREE, and must NOT carry a dollar amount.
+const FREE_BUREAU_RE = /3\s*[-\s]?bureau/i;
+const FREE_WORD_RE = /\bFREE\b/i;
+
+/** A row is the FREE row only if it says 3-Bureau, says FREE, and shows no price. */
+export function isFreeRowText(text) {
+    const t = (text ?? "").replace(/\s+/g, " ");
+    return FREE_BUREAU_RE.test(t) && FREE_WORD_RE.test(t) && !PRICE_RE.test(t);
+}
 
 // Availability date, e.g. "Available 8/2/2026" -> "2026-08-02".
 const AVAILABLE_DATE_RE = /Available\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/i;
@@ -91,20 +102,25 @@ function parsePrice(text) {
  */
 async function findFreeContainer(page) {
     for (const frame of page.frames()) {
-        // getByText locates the label; we then walk up to the order-item wrapper.
-        const label = frame.getByText(FREE_LABEL, { exact: false }).first();
+        const radios = frame.locator('input[type="radio"]');
+        const count = await radios.count().catch(() => 0);
 
-        const count = await label.count().catch(() => 0);
-        if (!count) continue;
+        for (let i = 0; i < count; i += 1) {
+            const radio = radios.nth(i);
 
-        // Prefer the enclosing order-item container; fall back to the label node.
-        const container = label
-            .locator("xpath=ancestor-or-self::*[contains(@class,'order-item')][1]")
-            .first();
+            const row = radio
+                .locator("xpath=ancestor-or-self::*[contains(@class,'order-item')][1]")
+                .first();
 
-        const hasContainer = (await container.count().catch(() => 0)) > 0;
+            const hasRow = (await row.count().catch(() => 0)) > 0;
+            const node = hasRow ? row : radio;
 
-        return { frame, node: hasContainer ? container : label };
+            const text = await node.textContent({ timeout: READ_TIMEOUT }).catch(() => "");
+
+            if (isFreeRowText(text)) {
+                return { frame, node };
+            }
+        }
     }
 
     return null;
