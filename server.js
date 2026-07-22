@@ -17,6 +17,7 @@ import { discoverM8Crc } from "./src/discoverM8Crc.js"; // TEMPORARY — M8 disc
 import { discoverM8CrcV2 } from "./src/discoverM8CrcV2.js"; // TEMPORARY — M8 discovery V2
 import { discoverM8Messages } from "./src/discoverM8Messages.js"; // TEMPORARY — M8 Messages discovery
 import { runMilestone8 } from "./src/milestone8.js"; // M8 secure-message delivery
+import { authorizeDashboardRequest, getDashboardData } from "./src/dashboardData.js"; // read-only dashboard export
 import { runStatusOnlyVerification } from "./src/verifyStatusOnly.js"; // TEMPORARY — Elizabeth/15 status-only verification
 import { runControlledClient } from "./src/processControlledClient.js"; // TEMPORARY — five-client controlled validation
 import { startClientQueue, getClientQueueJob } from "./src/processClientQueue.js"; // Production CRC queue
@@ -718,6 +719,43 @@ app.post("/debug/collision-map", async (req, res) => {
     } catch (error) {
         console.error(error);
         return res.status(500).json({ ok: false, error: error.message });
+    }
+
+});
+
+/**
+ * GET /dashboard-data — READ-ONLY export of client_state for the Google Sheets
+ * Executive Operations Dashboard.
+ *
+ * Authenticated by the x-dashboard-secret header against DASHBOARD_SYNC_SECRET.
+ * The Supabase service-role key stays server-side and is never sent, echoed, or
+ * accepted as a substitute credential.
+ *
+ * This route reads. It runs no milestone, opens no browser, sends no message,
+ * changes no status, and writes nothing.
+ */
+app.get("/dashboard-data", async (req, res) => {
+
+    const auth = authorizeDashboardRequest(req.get("x-dashboard-secret"));
+
+    if (!auth.ok) {
+        return res.status(auth.status).json({
+            ok: false,
+            error_code: auth.error_code,
+            error: auth.error,
+        });
+    }
+
+    try {
+        const payload = await getDashboardData();
+        return res.status(200).json(payload);
+    } catch (error) {
+        // Never echo the underlying connection string or key material.
+        return res.status(500).json({
+            ok: false,
+            error_code: "DASHBOARD_READ_FAILED",
+            error: "Could not read dashboard data.",
+        });
     }
 
 });
