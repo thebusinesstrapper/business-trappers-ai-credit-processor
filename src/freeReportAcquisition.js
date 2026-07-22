@@ -40,7 +40,14 @@ export const ACQUISITION_STATE = Object.freeze({
     FREE_REPORT_REHEARSAL_OK: "FREE_REPORT_REHEARSAL_OK",
 });
 
-const ORDER_LINK_RE = /order\s*new\s*report/i;
+// Confirmed live DOM: BOTH controls share href="mcc_order_select_v2.asp" —
+//   <a id="reportActionBtn" href="mcc_order_select_v2.asp">REFRESH REPORT</a>
+//   <a                      href="mcc_order_select_v2.asp">ORDER NEW REPORT</a>
+// So href alone is AMBIGUOUS and cannot be the deciding signal. The normalized
+// exact link text is what distinguishes them.
+const ORDER_LINK_HREF = "mcc_order_select_v2.asp";
+const ORDER_LINK_RE = /order\s+new\s+report/i;
+const ORDER_LINK_EXACT = "ORDER NEW REPORT";
 const ORDER_HEADING_RE = /order\s+a\s+new\s+credit\s+report\s+and\s+score/i;
 const PRICE_RE = /\$\s*\d/;
 const ZERO_TOTAL_RE = /\$\s*0(\.00)?\b/;
@@ -99,16 +106,32 @@ async function findOrderLink(page) {
     const matches = [];
 
     for (const frame of page.frames()) {
-        const loc = frame.locator("a, button, [role=\"link\"], [role=\"button\"]", {
-            hasText: ORDER_LINK_RE,
-        });
+        const loc = frame.locator(`a[href="${ORDER_LINK_HREF}"]`, { hasText: ORDER_LINK_RE });
 
         const count = await loc.count().catch(() => 0);
 
         for (let i = 0; i < count; i += 1) {
             const candidate = loc.nth(i);
-            const visible = await candidate.isVisible().catch(() => false);
-            if (visible) matches.push(candidate);
+
+            // 1. Visible.
+            if (!(await candidate.isVisible().catch(() => false))) continue;
+
+            // 2. Enabled.
+            if (await candidate.isDisabled().catch(() => true)) continue;
+
+            // 3. href is EXACTLY the order page (not a longer path that merely
+            //    contains it).
+            const href = await candidate.getAttribute("href").catch(() => null);
+            if ((href ?? "").trim() !== ORDER_LINK_HREF) continue;
+
+            // 4. THE DECIDING SIGNAL. Normalized text must equal ORDER NEW REPORT
+            //    exactly. "REFRESH REPORT" shares the href and would otherwise be a
+            //    plausible match; it cannot survive this check.
+            const raw = await candidate.textContent().catch(() => "");
+            const normalized = (raw ?? "").replace(/\s+/g, " ").trim().toUpperCase();
+            if (normalized !== ORDER_LINK_EXACT) continue;
+
+            matches.push(candidate);
         }
     }
 
