@@ -52,8 +52,6 @@ import { openCreditHero } from "./openCreditHero.js";
 import { recognizeDashboardBlocker } from "./importAuditState.js";
 import { recognizeCreditHeroLanding, CH_LANDING_STATE } from "./creditHeroLandingState.js";
 import { readOrderPage, ORDER_STATE, computeEligibilityHint } from "./orderPageReader.js";
-import { captureOrderPageDom } from "./orderPageDomCapture.js";
-import { acquireFreeReport, ACQUISITION_STATE } from "./freeReportAcquisition.js";
 import { openCreditReport } from "./openCreditReport.js";
 import { normalizeReport } from "./reportNormalize.js";
 import { readReportSelector, selectReport, verifyActiveReport } from "./reportSelector.js";
@@ -309,27 +307,6 @@ export async function runMilestone6(data = {}) {
             // landed on.
             const orderRead = await readOrderPage(chPage).catch(() => null);
 
-            // PHASE C: read-only DOM evidence capture, only when explicitly asked.
-            // Selects nothing, submits nothing, writes nothing.
-            let orderPageDom = null;
-
-            if (data.captureOrderPageDom === true) {
-                orderPageDom = await captureOrderPageDom(chPage).catch(() => null);
-
-                return successResponse({
-                    milestone: "M6_CAPTURE",
-                    result: "ORDER_PAGE_DOM_CAPTURED",
-                    stage: "order_page_dom_capture",
-                    crcClientId: client.crcClientId,
-                    classification: orderRead ? orderRead.classification : null,
-                    freeReportEnabled: orderRead ? orderRead.freeReportEnabled : null,
-                    lastReportDate: orderRead ? orderRead.lastReportDate : null,
-                    orderPageDom,
-                    diagnosticOnly: true,
-                    replayUrl,
-                });
-            }
-
             if (orderRead && orderRead.classification === ORDER_STATE.WAITING_FOR_FREE_REPORT) {
                 return successResponse({
                     milestone: "M6_CAPTURE",
@@ -432,41 +409,6 @@ export async function runMilestone6(data = {}) {
 
         if (freshness.action === ACTION.MANUAL_REVIEW) {
             return errorResponse("FRESHNESS_MANUAL_REVIEW", freshness.reason, { milestone: "M6_CAPTURE" });
-        }
-
-        // ---- FREE-REPORT ACQUISITION DECISION ------------------------------
-        //
-        // The existing report opened successfully, but if it does not meet the
-        // temporary eligibility rule we must NOT analyze it yet. CreditHero will
-        // not redirect us to the order page while a usable report exists, so the
-        // confirmed ORDER NEW REPORT link is used deliberately to check whether a
-        // free three-bureau refresh is available.
-        //
-        // Gated: nothing here runs without freeReportAcquisitionApproved, and
-        // Submit additionally requires submitOrderApproved.
-        const staleHint = computeEligibilityHint(freshness.newestReportDate ?? null, null);
-
-        if (staleHint !== "ELIGIBLE_EXISTING_REPORT" && data.freeReportAcquisitionApproved === true) {
-            const acquisition = await acquireFreeReport(reportPage, {
-                clientName,
-                priorReportDate: freshness.newestReportDate ?? null,
-                freeReportAcquisitionApproved: true,
-                submitOrderApproved: data.submitOrderApproved === true,
-            });
-
-            // Never fall through to the stale report after an acquisition attempt.
-            return successResponse({
-                milestone: "M6_CAPTURE",
-                result: acquisition.classification,
-                stage: "free_report_acquisition",
-                crcClientId: client.crcClientId,
-                classification: acquisition.classification,
-                lastReportDate: freshness.newestReportDate ?? null,
-                eligibilityHint: staleHint,
-                acquisition,
-                diagnosticOnly: data.submitOrderApproved !== true,
-                replayUrl,
-            });
         }
 
         // NO_ACTION_REQUIRED means memory has already analyzed this report. That is

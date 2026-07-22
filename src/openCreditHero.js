@@ -125,101 +125,6 @@ async function clickAndFollow(page, context) {
     return { page, openedInNewTab: false };
 }
 
-/**
- * POSITIVE identity of the CreditHeroScore application.
- *
- * The previous gate was NEGATIVE — it only asked "are we still on CRC?" — and it
- * was skipped entirely when a new tab opened. Any popup, interstitial, ad, or
- * login tab therefore satisfied it, and an unverified page was handed to
- * Milestone 6, which read a report selector off it and produced a real-looking
- * report date from a page nobody had proven was CreditHero.
- *
- * Confirmed live: https://www.creditheroscore.com/cp6/mcc_creditscores.asp
- */
-const CREDIT_HERO_ORIGIN = "https://www.creditheroscore.com";
-const CREDIT_HERO_PATH_PREFIX = "/cp6/";
-
-/**
- * Strip the query string from a URL before it is logged, returned, or persisted.
- *
- * CreditHero carries tGUID (and similar session identifiers) in the query string.
- * Those must never leave this module, so sanitisation happens at the boundary
- * rather than being left to each caller to remember.
- */
-function sanitizeUrl(rawUrl) {
-    if (typeof rawUrl !== "string" || !rawUrl) return null;
-
-    try {
-        const u = new URL(rawUrl);
-        return `${u.origin}${u.pathname}`;
-    } catch {
-        // Unparseable: drop everything from the first query/fragment marker.
-        return String(rawUrl).split(/[?#]/)[0] || null;
-    }
-}
-
-/**
- * Prove the landed page IS CreditHeroScore. Applies to BOTH the same-tab and
- * new-tab paths — there is no bypass.
- *
- * @returns {{ok: boolean, reason?: string, safeUrl: string|null}}
- */
-async function verifyCreditHeroPage(landedPage) {
-    if (!landedPage) {
-        return { ok: false, reason: "No page was returned by the click.", safeUrl: null };
-    }
-
-    if (typeof landedPage.isClosed === "function" && landedPage.isClosed()) {
-        return { ok: false, reason: "The landed page was already closed.", safeUrl: null };
-    }
-
-    let rawUrl = null;
-
-    try {
-        rawUrl = landedPage.url();
-    } catch (error) {
-        return { ok: false, reason: `The landed page URL could not be read: ${error.message}`, safeUrl: null };
-    }
-
-    if (!rawUrl) {
-        return { ok: false, reason: "The landed page reported no URL.", safeUrl: null };
-    }
-
-    const safeUrl = sanitizeUrl(rawUrl);
-
-    if (/^about:blank/i.test(rawUrl)) {
-        return { ok: false, reason: "The landed page is about:blank.", safeUrl };
-    }
-
-    let parsed;
-
-    try {
-        parsed = new URL(rawUrl);
-    } catch {
-        return { ok: false, reason: "The landed page URL is not parseable.", safeUrl };
-    }
-
-    if (parsed.origin !== CREDIT_HERO_ORIGIN) {
-        // Report the ORIGIN only — never the path or query of an unknown page.
-        return {
-            ok: false,
-            reason: `The landed page origin is not CreditHeroScore (saw ${parsed.origin}).`,
-            safeUrl,
-        };
-    }
-
-    if (!parsed.pathname.startsWith(CREDIT_HERO_PATH_PREFIX)) {
-        return {
-            ok: false,
-            reason: `The landed page is on the CreditHeroScore origin but not under ` +
-                `${CREDIT_HERO_PATH_PREFIX} (saw ${parsed.pathname}).`,
-            safeUrl,
-        };
-    }
-
-    return { ok: true, safeUrl };
-}
-
 const MAX_OPEN_ATTEMPTS = 3;
 
 // How long to wait for the dashboard to still be there, and for the control to
@@ -309,26 +214,18 @@ async function attemptOpen(page, context, attempt) {
         return { ok: false, reason: "The page never finished loading after the click." };
     }
 
-    // POSITIVE VERIFICATION. Applies to BOTH paths — the previous
-    // `!landed.openedInNewTab` bypass is gone, because "a new tab appeared" is
-    // not evidence that the new tab is CreditHero.
-    const verified = await verifyCreditHeroPage(landed.page);
+    const url = landed.page.url();
 
-    if (!verified.ok) {
-        const stillOnCrc = /app\.creditrepaircloud\.com/i.test(verified.safeUrl ?? "");
-
+    // Still on CRC means the click did nothing. This is the silent no-op above,
+    // and it is the failure mode a naive "did we click?" check cannot see.
+    if (!landed.openedInNewTab && /app\.creditrepaircloud\.com/i.test(url)) {
         return {
             ok: false,
-            code: "CREDIT_HERO_NAVIGATION_NOT_PROVEN",
-            reason: stillOnCrc
-                ? `The click did not navigate — still on CRC (${verified.safeUrl}). ` +
-                  `The control was likely not yet wired up.`
-                : verified.reason,
-            safeUrl: verified.safeUrl,
+            reason: `The click did not navigate — still on CRC (${url}). The control was likely not yet wired up.`,
         };
     }
 
-    return { ok: true, ...landed, safeUrl: verified.safeUrl };
+    return { ok: true, ...landed };
 }
 
 /**
@@ -380,9 +277,7 @@ export async function openCreditHero(page, context) {
             // it in a retry change.
             await creditHeroPage.waitForTimeout(DISCOVERY_SETTLE_MS);
 
-            // Sanitized at the boundary: origin + pathname only. tGUID and any
-            // other query identifier never leave this module.
-            const currentUrl = sanitizeUrl(creditHeroPage.url());
+            const currentUrl = creditHeroPage.url();
             const pageTitle = await creditHeroPage.title();
 
             console.log("CreditHeroScore URL:", currentUrl);
@@ -402,9 +297,7 @@ export async function openCreditHero(page, context) {
             };
         }
 
-        // Carry the code so the caller can distinguish "never reached CreditHero"
-        // from "control was missing/disabled/unclickable".
-        attempts.push({ attempt, reason: result.reason, code: result.code ?? null });
+        attempts.push({ attempt, reason: result.reason });
 
         console.error(`Attempt ${attempt} failed: ${result.reason}`);
 
@@ -415,18 +308,9 @@ export async function openCreditHero(page, context) {
         }
     }
 
-    // If every attempt failed the POSITIVE CreditHero verification (as opposed to
-    // never finding/clicking the control), say so precisely. milestone6 already
-    // halts on !ok, so no page or report date reaches Milestone 6 either way.
-    const allNavigationNotProven =
-        attempts.length > 0 &&
-        attempts.every((a) => a.code === "CREDIT_HERO_NAVIGATION_NOT_PROVEN");
-
     return {
         ok: false,
-        error_code: allNavigationNotProven
-            ? "CREDIT_HERO_NAVIGATION_NOT_PROVEN"
-            : "CREDIT_HERO_UNAVAILABLE",
+        error_code: "CREDIT_HERO_UNAVAILABLE",
         error:
             `CreditHeroScore could not be opened after ${MAX_OPEN_ATTEMPTS} attempts. Each attempt ` +
             `re-verified the dashboard, re-located the control, and waited for it to be visible and ` +

@@ -74,16 +74,7 @@ export async function runProductionClient(data = {}) {
         };
     }
 
-    // M7 forwards its whole `data` object to M6, and M6 reads the acquisition
-    // flags off it. Passing only { clientName } here meant M6 always saw
-    // undefined, so the free-report branch could never fire regardless of what
-    // the POST body said. Forward them explicitly.
-    const m7 = await runMilestone7({
-        clientName,
-        freeReportAcquisitionApproved: data.freeReportAcquisitionApproved === true,
-        submitOrderApproved: data.submitOrderApproved === true,
-        captureOrderPageDom: data.captureOrderPageDom === true,
-    });
+    const m7 = await runMilestone7({ clientName });
     const m7LettersOk = m7?.lettersOk === true || m7?.letters_ok === true;
 
     // ---- CREDIT HERO INACTIVE BRANCH ---------------------------------------
@@ -291,11 +282,6 @@ export async function runProductionClient(data = {}) {
     //
     // M7's success response carries these under `capture` (its failure branches
     // use `capture_result`), so the success-path hint is read from there.
-    // Echo what was actually forwarded, so a skipped branch is provably a flag
-    // problem or provably not one.
-    const effectiveFreeReportAcquisitionApproved = data.freeReportAcquisitionApproved === true;
-    const effectiveSubmitOrderApproved = data.submitOrderApproved === true;
-
     const successCapture = m7?.capture ?? null;
     const eligibilityHint = successCapture?.eligibilityHint ?? null;
 
@@ -307,8 +293,6 @@ export async function runProductionClient(data = {}) {
             blockedReason: "report_not_eligible_for_delivery",
             classification: successCapture?.classification ?? null,
             eligibilityHint,
-            effectiveFreeReportAcquisitionApproved,
-            effectiveSubmitOrderApproved,
             lastReportDate: successCapture?.lastReportDate ?? null,
             temporaryOverrideApplied: successCapture?.temporaryOverrideApplied ?? null,
             crcClientId,

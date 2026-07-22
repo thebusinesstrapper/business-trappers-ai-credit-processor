@@ -68,9 +68,6 @@ function publicJob(job) {
         diagnosticOnly: job.diagnosticOnly === true,
         inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
         operationalRoutingApproved: job.operationalRoutingApproved === true,
-        freeReportAcquisitionApproved: job.freeReportAcquisitionApproved === true,
-        submitOrderApproved: job.submitOrderApproved === true,
-        captureOrderPageDom: job.captureOrderPageDom === true,
         eligibleStatuses: job.eligibleStatuses,
         maxClients: job.maxClients,
         delayMs: job.delayMs,
@@ -548,25 +545,7 @@ async function runJob(job) {
                     // no CRC status write, no delivery lock, no completion
                     // marker, and no round change on this path, because none of
                     // that code is called at all.
-                    // The acquisition flags must be forwarded here too. This branch
-                    // bypasses runProductionClient entirely, so fixing the flag
-                    // chain there did nothing for diagnostic runs — M6 still saw
-                    // undefined and skipped the free-report branch.
-                    //
-                    // These flags do not make a diagnostic run write anything:
-                    // submitOrderApproved gates Submit, and it stays false unless
-                    // explicitly sent. M8 remains unreachable from this branch.
-                    const effectiveFreeReportAcquisitionApproved =
-                        job.freeReportAcquisitionApproved === true;
-                    const effectiveSubmitOrderApproved = job.submitOrderApproved === true;
-
-                    const m7 = await runMilestone7({
-                        clientName: item.clientName,
-                        freeReportAcquisitionApproved: effectiveFreeReportAcquisitionApproved,
-                        submitOrderApproved: effectiveSubmitOrderApproved,
-                        captureOrderPageDom: job.captureOrderPageDom === true,
-                    });
-
+                    const m7 = await runMilestone7({ clientName: item.clientName });
                     const lettersOk = m7?.lettersOk === true || m7?.letters_ok === true;
 
                     result = {
@@ -574,10 +553,6 @@ async function runJob(job) {
                         diagnosticOnly: true,
                         ok: m7?.success !== false && lettersOk,
                         stage: "m7_diagnostic",
-                        // Echo what M6 actually received, so a skipped branch is
-                        // provably a flag problem or provably not one.
-                        effectiveFreeReportAcquisitionApproved,
-                        effectiveSubmitOrderApproved,
                         m7,
                     };
                 } else {
@@ -587,9 +562,6 @@ async function runJob(job) {
                         submitApproved: job.submitApproved,
                         inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
                         operationalRoutingApproved: job.operationalRoutingApproved === true,
-                        freeReportAcquisitionApproved: job.freeReportAcquisitionApproved === true,
-                        submitOrderApproved: job.submitOrderApproved === true,
-                        captureOrderPageDom: job.captureOrderPageDom === true,
                     });
                 }
             } catch (error) {
@@ -690,12 +662,6 @@ async function runJob(job) {
                     result?.inactive?.memoryWritten ??
                     false,
                 operationalRoutingApproved: job.operationalRoutingApproved === true,
-
-                // Acquisition rehearsal evidence; null when the branch did not run.
-                acquisition: result?.m7?.capture_result?.acquisition ?? null,
-                effectiveFreeReportAcquisitionApproved:
-                    result?.effectiveFreeReportAcquisitionApproved ?? null,
-                effectiveSubmitOrderApproved: result?.effectiveSubmitOrderApproved ?? null,
                 m8: result?.m8
                     ? {
                         finalStatus: result.m8.finalStatus ?? null,
@@ -804,15 +770,6 @@ export function startClientQueue(data = {}) {
         // inactive workflow nor operational routing can be armed inside one.
         inactiveWorkflowApproved: diagnosticOnly ? false : data.inactiveWorkflowApproved === true,
         operationalRoutingApproved: diagnosticOnly ? false : data.operationalRoutingApproved === true,
-
-        // NOT forced false by diagnosticOnly. Those two flags gate CRC/Supabase
-        // WRITES, which a diagnostic run must never do. These gate the free-report
-        // acquisition rehearsal, whose entire purpose is to run under
-        // diagnosticOnly. Safety here comes from submitOrderApproved staying false
-        // — the Submit gate, not the diagnostic flag, is what prevents an order.
-        freeReportAcquisitionApproved: data.freeReportAcquisitionApproved === true,
-        submitOrderApproved: data.submitOrderApproved === true,
-        captureOrderPageDom: data.captureOrderPageDom === true,
         eligibleStatuses,
         maxClients,
         delayMs,
