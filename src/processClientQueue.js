@@ -80,32 +80,42 @@ function publicJob(job) {
     };
 }
 
-// MUI DataGrid semantics. The CRC Clients grid is a DataGrid: it renders
-// role="row" / role="gridcell" divs, NOT a <table>. Any selector that leans on
-// table/tr/tbody finds nothing here.
-const GRID_ROW_SELECTOR = '[role="row"]';
-const GRID_CELL_SELECTOR = '[role="gridcell"]';
-const HEADER_CELL_SELECTOR = '[role="columnheader"]';
+// CRC's MUI DataGrid, confirmed against the live DOM.
+//
+// Two things here are not what a generic DataGrid reader would assume:
+//
+//   1. Cells carry role="cell", NOT role="gridcell". Waiting on gridcell waits
+//      forever on a fully-populated page.
+//   2. ONE client is rendered as TWO row fragments — the pinned left/name
+//      section and the center/status section — each a separate role="row"
+//      element carrying the SAME data-id. Name and status therefore do not
+//      co-exist inside one row element, and counting row elements counts every
+//      client twice.
+//
+// So rows are grouped by data-id and one logical client is emitted per id.
+const GRID_ROW_SELECTOR = '[role="row"][data-id]';
+const NAME_CELL_SELECTOR = '[role="cell"][data-field="name"]';
+const STATUS_CELL_SELECTOR = '[role="cell"][data-field="status_name"]';
+const STATUS_VALUE_SELECTOR = ".clientStatusValue";
 
 const ROWS_READY_TIMEOUT_MS = 15000;
 const ROWS_POLL_MS = 250;
 
 /**
- * Wait for the grid to actually contain DATA cells.
+ * Wait for real client cells to exist.
  *
- * The scan previously ran after a flat 1200ms sleep. If the DataGrid had not
- * finished rendering by then, every locator returned zero and the queue reported
- * scannedRows: 0 on a page that was about to be full of clients — a fixed sleep
- * cannot tell "empty" from "not painted yet".
+ * The scan previously ran after a flat 1200ms sleep, so a grid that painted
+ * slightly later reported scannedRows: 0 on a page about to be full of clients.
+ * A fixed sleep cannot tell "empty" from "not painted yet".
  *
- * Waiting on role="gridcell" rather than role="row" matters: the header row is a
- * role="row" too, so rows alone can be non-zero while no client data exists yet.
+ * Waits on the NAME cell specifically: it is the field we cannot proceed
+ * without, and header rows do not have one.
  */
 async function waitForGridRows(page, timeoutMs = ROWS_READY_TIMEOUT_MS) {
     const deadline = Date.now() + timeoutMs;
 
     while (Date.now() < deadline) {
-        const cells = await page.locator(GRID_CELL_SELECTOR).count().catch(() => 0);
+        const cells = await page.locator(NAME_CELL_SELECTOR).count().catch(() => 0);
         if (cells > 0) return true;
         await page.waitForTimeout(ROWS_POLL_MS);
     }
@@ -117,63 +127,91 @@ async function visibleRows(page) {
     return page.locator(GRID_ROW_SELECTOR);
 }
 
+/** Read the client name from a row fragment, or "" if this fragment lacks it. */
+async function readNameFromFragment(row) {
+    const cell = row.locator(NAME_CELL_SELECTOR).first();
+
+    if (!(await cell.count().catch(() => 0))) return "";
+
+    const anchor = cell.locator("a").first();
+
+    if (await anchor.count().catch(() => 0)) {
+        const viaAnchor = normalize(await anchor.innerText().catch(() => ""));
+        if (viaAnchor) return viaAnchor;
+    }
+
+    // Fallback: the cell text, for a name rendered without an anchor.
+    return normalize(await cell.innerText().catch(() => ""));
+}
+
+/** Read the status from a row fragment, or null if this fragment lacks it. */
+async function readStatusFromFragment(row) {
+    const cell = row.locator(STATUS_CELL_SELECTOR).first();
+
+    if (!(await cell.count().catch(() => 0))) return null;
+
+    const value = cell.locator(STATUS_VALUE_SELECTOR).first();
+
+    if (await value.count().catch(() => 0)) {
+        const text = normalize(await value.innerText().catch(() => ""));
+        if (text) return text;
+
+        // Fallback: the title attribute carries the same label.
+        const title = normalize(await value.getAttribute("title").catch(() => ""));
+        if (title) return title;
+    }
+
+    const cellText = normalize(await cell.innerText().catch(() => ""));
+    return cellText || null;
+}
+
+/**
+ * Return ONE entry per logical client, joined across pinned/center fragments.
+ * Header rows are excluded structurally: they carry no data-id, so the selector
+ * never returns them.
+ */
 async function extractVisibleClientRows(page) {
     await waitForGridRows(page);
 
     const rows = await visibleRows(page);
     const count = await rows.count();
-    const found = [];
+
+    // data-id -> merged client. A Map both joins fragments and de-duplicates.
+    const byId = new Map();
 
     for (let i = 0; i < count; i += 1) {
         const row = rows.nth(i);
 
-        // Explicitly exclude the column-header row. It carries role="row" and
-        // would otherwise be treated as a client whose name is a column title.
-        const headerCells = await row.locator(HEADER_CELL_SELECTOR).count().catch(() => 0);
-        if (headerCells > 0) continue;
+        const dataId = normalize(await row.getAttribute("data-id").catch(() => ""));
+        if (!dataId) continue; // header/spacer row
 
-        const cells = row.locator(GRID_CELL_SELECTOR);
-        const cellCount = await cells.count();
+        const entry = byId.get(dataId) ?? {
+            crcClientId: dataId,
+            clientName: "",
+            status: null,
+            rowText: "",
+        };
 
-        if (cellCount === 0) continue; // header row or a spacer/filler row
-
-        const cellTexts = [];
-        for (let c = 0; c < cellCount; c += 1) {
-            const text = normalize(await cells.nth(c).innerText().catch(() => ""));
-            if (text) cellTexts.push(text);
+        if (!entry.clientName) {
+            const name = await readNameFromFragment(row);
+            if (name) entry.clientName = name;
         }
 
-        const anchors = row.locator("a:visible");
-        let clientName = "";
-
-        for (let a = 0; a < await anchors.count(); a += 1) {
-            const text = normalize(await anchors.nth(a).innerText().catch(() => ""));
-            if (text) {
-                clientName = text;
-                break;
-            }
+        if (!entry.status) {
+            const status = await readStatusFromFragment(row);
+            if (status) entry.status = status;
         }
 
-        // CRC sometimes renders the name as a clickable styled span/div.
-        if (!clientName && cellTexts.length > 0) {
-            clientName = cellTexts[0];
+        const fragmentText = normalize(await row.innerText().catch(() => ""));
+        if (fragmentText) {
+            entry.rowText = entry.rowText ? `${entry.rowText} ${fragmentText}` : fragmentText;
         }
 
-        if (!clientName) continue;
-
-        const status =
-            cellTexts.find((text) =>
-                KNOWN_STATUSES.some((known) => normalizedKey(text) === normalizedKey(known))
-            ) ?? null;
-
-        found.push({
-            clientName,
-            status,
-            rowText: normalize(await row.innerText().catch(() => "")),
-        });
+        byId.set(dataId, entry);
     }
 
-    return found;
+    // A client we cannot name cannot be opened, so it is not a queue candidate.
+    return [...byId.values()].filter((entry) => entry.clientName);
 }
 
 async function nextPageButton(page) {
@@ -249,7 +287,11 @@ async function readEligibleQueue(eligibleStatuses) {
                     reason: "duplicate_client_name_requires_manual_review",
                 });
             } else {
-                queue.push({ clientName: row.clientName, status: row.status });
+                queue.push({
+                    clientName: row.clientName,
+                    status: row.status,
+                    crcClientId: row.crcClientId ?? null,
+                });
             }
         }
 
