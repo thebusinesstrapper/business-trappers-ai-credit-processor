@@ -114,6 +114,15 @@ export async function runProductionClient(data = {}) {
             inactiveWorkflowApproved: data.inactiveWorkflowApproved === true,
         });
 
+        // Persist the exact CRC status runInactiveWorkflow() confirmed it wrote —
+        // its own report.statusWritten, passed through from updateClientStatus()'s
+        // read-back, never the planned/target string. Only on confirmed success.
+        if (inactive?.statusUpdated === true && inactive?.statusWritten) {
+            await recordCreditHeroState(String(inactive.crcClientId), {
+                crc_client_status: inactive.statusWritten,
+            }).catch(() => {});
+        }
+
         return {
             ...base,
             ok: inactive.noticeSent || inactive.reminderSent || inactive.statusUpdated,
@@ -157,6 +166,13 @@ export async function runProductionClient(data = {}) {
             inactiveWorkflowApproved: data.inactiveWorkflowApproved === true,
         });
 
+        // Same confirmed-status persistence as the CHS_NOT_ACTIVATED branch above.
+        if (inactive?.statusUpdated === true && inactive?.statusWritten) {
+            await recordCreditHeroState(String(inactive.crcClientId), {
+                crc_client_status: inactive.statusWritten,
+            }).catch(() => {});
+        }
+
         return {
             ...base,
             ok: inactive.noticeSent || inactive.reminderSent || inactive.statusUpdated,
@@ -190,6 +206,15 @@ export async function runProductionClient(data = {}) {
                 block_reason: "CREDENTIALS_OR_AUTH_FAILED",
                 last_credit_hero_check_at: nowIso,
             }).catch(() => {});
+
+            // Persist the exact CRC status statusOnlyUpdate() confirmed it wrote —
+            // its own report.statusWritten, passed through from updateClientStatus()'s
+            // read-back, never the requested targetStatus. Only on confirmed success.
+            if (status?.statusUpdated === true && status?.statusWritten) {
+                await recordCreditHeroState(String(routeCrcId), {
+                    crc_client_status: status.statusWritten,
+                }).catch(() => {});
+            }
         }
 
         return {
@@ -224,6 +249,13 @@ export async function runProductionClient(data = {}) {
                 block_reason: "WAITING_FOR_FREE_REPORT",
                 last_credit_hero_check_at: nowIso,
             }).catch(() => {});
+
+            // Same confirmed-status persistence as CREDENTIALS_OR_AUTH_FAILED above.
+            if (status?.statusUpdated === true && status?.statusWritten) {
+                await recordCreditHeroState(String(routeCrcId), {
+                    crc_client_status: status.statusWritten,
+                }).catch(() => {});
+            }
         }
 
         return {
@@ -319,6 +351,30 @@ export async function runProductionClient(data = {}) {
             m8?.statusUpdateResult?.ok === true
           ) || duplicatePrevented
         : m8?.finalStatus === "READY_NOT_SENT" && m8?.readyToSubmit === true;
+
+    // ---- ITEM 5: PERSIST THE EXACT STATUS M8 CONFIRMED IT WROTE -----------
+    //
+    // milestone8.js's contract (see report.statusUpdateResult in
+    // runMilestone8()) is:
+    //
+    //   report.statusUpdateResult = {
+    //       ok: statusResult?.ok === true,
+    //       statusWritten: statusResult?.statusWritten ?? null,
+    //       error_code: statusResult?.error_code ?? null,
+    //   };
+    //
+    // So the ONLY value ever persisted here is m8.statusUpdateResult.statusWritten
+    // (never .status — that key does not exist on this contract), and ONLY when
+    // m8.statusUpdateResult.ok === true. There is no fallback to a requested or
+    // proposed status string: if ok is not exactly true, or statusWritten is
+    // absent/blank, nothing is written — recordCreditHeroState()'s own
+    // crc_client_status guard would reject a blank/non-string value anyway, but
+    // the check here means we never even attempt a write on a failed update.
+    if (m8?.statusUpdateResult?.ok === true && m8.statusUpdateResult.statusWritten) {
+        await recordCreditHeroState(String(crcClientId), {
+            crc_client_status: m8.statusUpdateResult.statusWritten,
+        }).catch(() => {});
+    }
 
     return {
         ...base,

@@ -56,6 +56,11 @@ const DASHBOARD_FIELDS = [
     "inactive_reminder_sent_at",
     "last_credit_hero_check_at",
     "inactive_notice_last_error",
+    // Observation-only: the CRC status text last positively observed on the
+    // live DataGrid, or the exact status a routing/M8 path confirmed it wrote.
+    // Written only via clientMemory.recordCreditHeroState()'s guarded
+    // crc_client_status field — this endpoint remains select-only.
+    "crc_client_status",
 ];
 
 const SELECT_COLUMNS = DASHBOARD_FIELDS.join(", ");

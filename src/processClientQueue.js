@@ -17,6 +17,7 @@ import { runProductionClient } from "./processProductionClient.js";
 // M7 succeeds, so routing diagnostics through it would deliver letters to any
 // client whose CreditHero access has since been restored.
 import { runMilestone7 } from "./milestone7.js";
+import { recordCreditHeroState } from "./clientMemory.js";
 
 const jobs = new Map();
 
@@ -295,11 +296,29 @@ async function readEligibleQueue(eligibleStatuses) {
             }
         }
 
+        // Every positively observed logical client, taken from allRows BEFORE
+        // eligibility filtering. This is what lets an excluded status (e.g.
+        // "Waiting For Bureau") reach the observation-memory sync in runJob()
+        // without ever being placed into `queue` or `eligible` above — those
+        // two arrays are unrelated to how `observations` is built.
+        //
+        // "Positively observed" means the scanner actually read a status for
+        // that row; a row whose status cell never resolved (row.status is
+        // null) contributes no observation.
+        const observations = allRows
+            .filter((row) => row.status)
+            .map((row) => ({
+                crcClientId: row.crcClientId ?? null,
+                clientName: row.clientName,
+                crcClientStatus: row.status,
+            }));
+
         return {
             queue,
             ambiguous,
             scannedRows: allRows.length,
             eligibleRows: eligible.length,
+            observations,
         };
     } finally {
         await browser.close().catch(() => {});
@@ -341,7 +360,7 @@ function escapeForRegex(value) {
 /**
  * Remove the client's own name from engine text.
  *
- * M6 phrases CLIENT_NOT_OPENED as: Could not open client "<NAME>". The queue
+ * M6 phrases CLIENT_NOT_OPENED as: Could not open client "<n>". The queue
  * already knows the name it dispatched, so we redact that exact string and its
  * name parts rather than trying to guess which quoted text is a person and which
  * is a UI label — "View CreditHeroScore Account" is quoted too, and is not PII.
@@ -550,6 +569,69 @@ function classifyResult(result) {
     return "manualReview";
 }
 
+/**
+ * Persist every positively observed CRC status into client_state, using the
+ * existing narrow writer (recordCreditHeroState).
+ *
+ * OBSERVATION-ONLY, BY CONSTRUCTION:
+ *   - no browser, no CRC navigation, no client open — this function receives
+ *     already-scanned data and touches Supabase only
+ *   - no M6/M7/M8, no notices, no messages, no CRC status write
+ *   - current_round / processing_state are structurally unwritable through
+ *     recordCreditHeroState() (they are simply absent from its whitelist)
+ *   - each observation gets its OWN try/catch, so one bad write can never
+ *     stop the sync, and the sync can never stop the queue that follows it
+ *
+ * @param {Array<{crcClientId, clientName, crcClientStatus}>} observations
+ * @returns {Promise<{attempted:number, written:number, skipped:number, failed:number, failures:object[]}>}
+ */
+async function syncObservations(observations) {
+    const result = {
+        attempted: 0,
+        written: 0,
+        skipped: 0,
+        failed: 0,
+        failures: [],
+    };
+
+    for (const observation of observations ?? []) {
+        result.attempted += 1;
+
+        const crcClientId = observation?.crcClientId;
+
+        // No usable identifier -> cannot write, but this is not a write
+        // FAILURE (nothing was attempted against Supabase), so it is
+        // counted as skipped rather than failed.
+        if (!crcClientId || !/^\d+$/.test(String(crcClientId))) {
+            result.skipped += 1;
+            continue;
+        }
+
+        try {
+            const write = await recordCreditHeroState(String(crcClientId), {
+                crc_client_status: observation?.crcClientStatus,
+            });
+
+            if (write?.ok) {
+                result.written += 1;
+            } else {
+                // e.g. client_state_row_not_found, or the status text was
+                // rejected by validCrcClientStatus() inside the writer.
+                result.skipped += 1;
+            }
+        } catch (error) {
+            result.failed += 1;
+            result.failures.push({
+                crcClientId: crcClientId ?? null,
+                clientName: observation?.clientName ?? null,
+                error: error.message,
+            });
+        }
+    }
+
+    return result;
+}
+
 async function runJob(job) {
     job.status = "scanning_crc";
     job.startedAt = new Date().toISOString();
@@ -603,6 +685,32 @@ async function runJob(job) {
             }
 
             job.queue = scan.queue.slice(0, job.maxClients);
+
+            // ---- OBSERVATION-MEMORY SYNC ---------------------------------
+            //
+            // scan.observations already holds every positively observed
+            // logical client, BEFORE eligibility filtering — including
+            // clients whose status excludes them from job.queue above (e.g.
+            // "Waiting For Bureau"). Persisting them here is what lets such
+            // a client be recorded in memory without ever being queued or
+            // processed.
+            //
+            // Runs ONLY when both gates hold. Diagnostic runs are already
+            // routed through the supplied-clientNames branch above and never
+            // reach this scan, but the explicit check is kept so this block
+            // stays safe on its own regardless of that routing.
+            if (job.operationalRoutingApproved === true && job.diagnosticOnly !== true) {
+                job.summary.observationSync = await syncObservations(scan.observations);
+            } else {
+                job.summary.observationSync = {
+                    attempted: 0,
+                    written: 0,
+                    skipped: 0,
+                    failed: 0,
+                    failures: [],
+                    skippedReason: "operational_routing_not_approved_or_diagnostic",
+                };
+            }
         }
 
         job.summary.queued = job.queue.length;
@@ -898,6 +1006,10 @@ export function startClientQueue(data = {}) {
             diagnosticGroups: {},
             diagnosticTopLevelGroups: {},
             diagnosticAttemptReasons: {},
+            // Populated only when the CRC-scan branch runs (job.clientNames
+            // was empty). Stays null on a supplied-name run, where there is
+            // no scan and therefore nothing to observe.
+            observationSync: null,
         },
     };
 

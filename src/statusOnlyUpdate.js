@@ -146,6 +146,10 @@ export async function statusOnlyUpdate(opts = {}) {
         targetStatus: targetStatus ?? null,
         previousStatus: null,
         statusUpdated: false,
+        // Authoritative confirmed status, passed through from updateClientStatus()'s
+        // own statusResult.statusWritten — set below ONLY when the write succeeds.
+        // Never falls back to targetStatus.
+        statusWritten: null,
         labelVerified: false,
         // Structural attestations.
         creditHeroOpened: false,
@@ -221,6 +225,12 @@ export async function statusOnlyUpdate(opts = {}) {
 
         report.previousStatus = result?.previousStatus ?? null;
         report.statusUpdated = result?.ok === true;
+        // Authoritative confirmed status ONLY on success. A failed update leaves
+        // this null — never the requested exact/targetStatus as a substitute.
+        report.statusWritten =
+            result?.ok === true
+                ? result?.statusWritten ?? null
+                : null;
 
         if (result?.ok !== true) {
             report.error_code = result?.error_code ?? "STATUS_UPDATE_FAILED";

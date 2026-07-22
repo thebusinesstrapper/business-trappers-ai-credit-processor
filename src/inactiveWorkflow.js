@@ -156,6 +156,11 @@ export async function runInactiveWorkflow(opts = {}) {
         noticeSent: false,
         reminderSent: false,
         statusUpdated: false,
+        // Authoritative confirmed status, passed through from updateClientStatus()'s
+        // own statusResult.statusWritten — set below ONLY when the CRC status write
+        // succeeds. Never falls back to plannedStatus; never set by notice, reminder,
+        // or memory-write success.
+        statusWritten: null,
         memoryWritten: false,
         // Structural attestations.
         pdfsGenerated: 0,
@@ -265,6 +270,13 @@ export async function runInactiveWorkflow(opts = {}) {
         );
 
         report.statusUpdated = statusResult?.ok === true;
+        // Authoritative confirmed status ONLY on success. A failed update leaves
+        // this null — never the planned INACTIVE_STATUS as a substitute, and
+        // never set by notice/reminder/memory success elsewhere in this function.
+        report.statusWritten =
+            statusResult?.ok === true
+                ? statusResult?.statusWritten ?? null
+                : null;
 
         if (statusResult?.ok !== true) {
             report.error_code = statusResult?.error_code ?? "STATUS_UPDATE_FAILED";

@@ -340,14 +340,39 @@ export async function releaseDeliveryLock(
 }
 
 /**
- * NARROW WRITER for the CreditHero inactive-monitoring workflow.
+ * Field-specific guard for crc_client_status.
+ *
+ * This column is populated from live CRC DataGrid text, which is read, not
+ * generated — so it is validated strictly. Anything that is not a real,
+ * nonblank string is REJECTED. A rejected value returns null, which signals
+ * the caller to OMIT the key entirely (never write null/"" over it), so a
+ * known status already on the row can never be clobbered by a bad or missing
+ * observation.
+ *
+ *   - null / undefined          -> rejected
+ *   - non-string (number, etc.) -> rejected
+ *   - ""                        -> rejected
+ *   - "   " (whitespace only)   -> rejected
+ *   - " Waiting For Bureau "    -> accepted, trimmed to "Waiting For Bureau"
+ */
+function validCrcClientStatus(value) {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+}
+
+/**
+ * NARROW WRITER for the CreditHero inactive-monitoring workflow, and for
+ * observation-only CRC status syncing.
  *
  * WHAT IT CANNOT DO, BY CONSTRUCTION.
  *
  * The update object below is built from a fixed whitelist. current_round,
  * processing_state, process_complete and every lock column are simply not
  * assignable through it — not guarded against, absent. A dispute cycle cannot be
- * advanced, completed, locked or unlocked by anything on the inactive path.
+ * advanced, completed, locked or unlocked by anything on the inactive path, and
+ * the same is true of the observation-sync path added below: it uses this exact
+ * same whitelist and the same absence of those columns.
  *
  * It also matches on crc_client_id ALONE. markDeliveryCompleted() adds
  * current_round and processing_state to its .eq() chain because it is doing a
@@ -377,14 +402,33 @@ export async function recordCreditHeroState(crcClientId, fields = {}) {
         // Deliberately narrow — this writer still cannot touch current_round,
         // processing_state, delivery locks, or any success/dispute timestamp.
         "block_reason",
+        // Observation-only: the CRC status text as last positively observed on
+        // the live DataGrid scan, or the exact status a routing/M8 path
+        // confirmed it wrote. Guarded separately below — see
+        // validCrcClientStatus(). Still cannot touch current_round,
+        // processing_state, or any lock column.
+        "crc_client_status",
     ];
 
     const update = {};
 
     for (const key of WRITABLE) {
-        if (Object.prototype.hasOwnProperty.call(fields, key)) {
-            update[key] = fields[key];
+        if (!Object.prototype.hasOwnProperty.call(fields, key)) continue;
+
+        if (key === "crc_client_status") {
+            // Reject non-string / empty / whitespace-only values by OMITTING
+            // the key from the update, rather than writing null/"" over a
+            // known value.
+            const valid = validCrcClientStatus(fields[key]);
+            if (valid === null) continue;
+            update[key] = valid;
+            continue;
         }
+
+        // Every other whitelisted field keeps its existing, unguarded
+        // behavior — including block_reason's ability to be explicitly
+        // cleared by passing null.
+        update[key] = fields[key];
     }
 
     if (Object.keys(update).length === 0) {
@@ -399,7 +443,8 @@ export async function recordCreditHeroState(crcClientId, fields = {}) {
         .eq("crc_client_id", id)
         .select(
             "crc_client_id, credit_hero_access_state, last_credit_hero_check_at, " +
-            "inactive_notice_sent_at, inactive_reminder_sent_at, inactive_notice_last_error"
+            "inactive_notice_sent_at, inactive_reminder_sent_at, inactive_notice_last_error, " +
+            "crc_client_status"
         )
         .maybeSingle();
 
