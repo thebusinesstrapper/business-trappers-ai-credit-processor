@@ -40,14 +40,24 @@ export const ACQUISITION_STATE = Object.freeze({
     FREE_REPORT_REHEARSAL_OK: "FREE_REPORT_REHEARSAL_OK",
 });
 
-// Confirmed live DOM: BOTH controls share href="mcc_order_select_v2.asp" —
+// Confirmed live DOM: BOTH controls point at the SAME destination —
 //   <a id="reportActionBtn" href="mcc_order_select_v2.asp">REFRESH REPORT</a>
 //   <a                      href="mcc_order_select_v2.asp">ORDER NEW REPORT</a>
-// So href alone is AMBIGUOUS and cannot be the deciding signal. The normalized
-// exact link text is what distinguishes them.
-const ORDER_LINK_HREF = "mcc_order_select_v2.asp";
-const ORDER_LINK_RE = /order\s+new\s+report/i;
-const ORDER_LINK_EXACT = "ORDER NEW REPORT";
+//
+// Because the destination is identical, there is nothing to gain from locating
+// and clicking the visible text, and text matching has already proven brittle on
+// these pages. We reuse the navigation pattern openCreditReport.js already uses
+// successfully: resolve the confirmed relative path against the current page URL
+// and navigate the real page. Clicking would also execute whatever handler the
+// anchor carries; a verified goto() does not.
+const ORDER_PAGE_FILE = "mcc_order_select_v2.asp";
+
+// The CreditHero report page we must already be on before navigating.
+const REPORT_PAGE_FILE = "mcc_creditreports_v2.asp";
+
+// Positive proof we are on the client's report page: this element holds the
+// LAST REPORT DATE value.
+const LAST_REPORT_DATE_ID = "#lastReportDate";
 const ORDER_HEADING_RE = /order\s+a\s+new\s+credit\s+report\s+and\s+score/i;
 const PRICE_RE = /\$\s*\d/;
 const ZERO_TOTAL_RE = /\$\s*0(\.00)?\b/;
@@ -93,113 +103,52 @@ function resolvePage(candidate) {
 }
 
 /**
- * Find the visible ORDER NEW REPORT control across every frame.
- *
- * Uses locator() + hasText only — the most broadly supported strategy — rather
- * than getByRole(). CRC renders href-less anchors elsewhere in this app, and an
- * <a> without an href carries NO link role, so a role query can silently match
- * nothing even on a healthy page.
- *
- * FAILS CLOSED on ambiguity: exactly one visible match is required.
+ * Resolve the order-page URL from the CURRENT page URL, with same-origin and
+ * pathname proof. Returns null if anything cannot be positively verified.
  */
-async function findOrderLink(page) {
-    const matches = [];
+function resolveOrderUrl(currentUrl) {
+    try {
+        const current = new URL(currentUrl);
+        const target = new URL(ORDER_PAGE_FILE, currentUrl);
 
-    for (const frame of page.frames()) {
-        const loc = frame.locator(`a[href="${ORDER_LINK_HREF}"]`, { hasText: ORDER_LINK_RE });
+        // Must not leave the active CreditHero origin.
+        if (target.origin !== current.origin) return null;
 
-        const count = await loc.count().catch(() => 0);
-
-        for (let i = 0; i < count; i += 1) {
-            const candidate = loc.nth(i);
-
-            // 1. Visible.
-            if (!(await candidate.isVisible().catch(() => false))) continue;
-
-            // 2. Enabled.
-            if (await candidate.isDisabled().catch(() => true)) continue;
-
-            // 3. href is EXACTLY the order page (not a longer path that merely
-            //    contains it).
-            const href = await candidate.getAttribute("href").catch(() => null);
-            if ((href ?? "").trim() !== ORDER_LINK_HREF) continue;
-
-            // 4. THE DECIDING SIGNAL. Normalized text must equal ORDER NEW REPORT
-            //    exactly. "REFRESH REPORT" shares the href and would otherwise be a
-            //    plausible match; it cannot survive this check.
-            const raw = await candidate.textContent().catch(() => "");
-            const normalized = (raw ?? "").replace(/\s+/g, " ").trim().toUpperCase();
-            if (normalized !== ORDER_LINK_EXACT) continue;
-
-            matches.push(candidate);
+        // Must resolve to exactly the order page, not something merely containing
+        // that name.
+        if (!target.pathname.toLowerCase().endsWith(`/${ORDER_PAGE_FILE.toLowerCase()}`)) {
+            return null;
         }
-    }
 
-    return matches;
-}
-
-/** Frame that holds the order form. */
-async function findOrderFrame(page) {
-    for (const frame of page.frames()) {
-        const n = await frame.locator('input[type="radio"]').count().catch(() => 0);
-        if (n > 0) return frame;
+        return target.href;
+    } catch {
+        return null;
     }
-    return null;
 }
 
 /**
- * Enumerate every radio and classify its row. Returns all rows plus the subset
- * that satisfies every FREE signal.
+ * Prove we are on the client's CreditHero report page before navigating anywhere.
+ * Returns { ok, lastReportDate, reason }.
  */
-async function surveyRows(frame) {
-    const radios = frame.locator('input[type="radio"]');
-    const count = await radios.count().catch(() => 0);
-    const rows = [];
+async function verifyOnReportPage(page) {
+    const url = page.url() || "";
 
-    for (let i = 0; i < count; i += 1) {
-        const radio = radios.nth(i);
-
-        const row = radio
-            .locator("xpath=ancestor-or-self::*[contains(@class,'order-item')][1]")
-            .first();
-
-        const hasRow = (await row.count().catch(() => 0)) > 0;
-        const node = hasRow ? row : radio;
-
-        const text = (await node.textContent({ timeout: READ_TIMEOUT }).catch(() => "")) || "";
-        const cls = (await node.getAttribute("class").catch(() => "")) || "";
-
-        const props = await radio
-            .evaluate((el) => ({
-                id: el.id || null,
-                name: el.name || null,
-                checked: el.checked === true,
-                disabled: el.disabled === true,
-            }))
-            .catch(() => null);
-
-        if (!props) continue;
-
-        const disabled =
-            props.disabled ||
-            /\bdisabled\b/.test(cls) ||
-            (await radio.isDisabled().catch(() => true));
-
-        rows.push({
-            index: i,
-            radio,
-            node,
-            id: props.id,
-            name: props.name,
-            checked: props.checked,
-            disabled,
-            hasPrice: PRICE_RE.test(text),
-            isFree: isFreeRowText(text),
-            text: text.replace(/\s+/g, " ").trim().slice(0, 200),
-        });
+    if (!url.toLowerCase().includes(REPORT_PAGE_FILE.toLowerCase())) {
+        return { ok: false, reason: "current_url_is_not_the_report_page" };
     }
 
-    return rows;
+    // LAST REPORT DATE is rendered on the report page and nowhere else in this
+    // flow, so its presence is positive identification.
+    for (const frame of page.frames()) {
+        const el = frame.locator(LAST_REPORT_DATE_ID).first();
+
+        if ((await el.count().catch(() => 0)) > 0) {
+            const text = ((await el.textContent().catch(() => "")) || "").trim();
+            if (text) return { ok: true, lastReportDate: text };
+        }
+    }
+
+    return { ok: false, reason: "last_report_date_not_present" };
 }
 
 /**
@@ -269,25 +218,31 @@ export async function acquireFreeReport(reportPage, opts = {}) {
         return report;
     }
 
-    const orderLinks = await findOrderLink(page).catch(() => []);
+    // Prove we are on the client's report page BEFORE navigating anywhere.
+    const onReport = await verifyOnReportPage(page).catch(() => ({ ok: false, reason: "probe_failed" }));
 
-    if (orderLinks.length === 0) {
-        report.error_code = "ORDER_LINK_NOT_FOUND";
+    if (!onReport.ok) {
+        report.error_code = "ORDER_PAGE_NAVIGATION_NOT_PROVEN";
         report.failureReason =
-            "No visible ORDER NEW REPORT control was found. Nothing was clicked.";
+            `Not positively on the CreditHero report page (${onReport.reason}). Nothing was navigated.`;
         return report;
     }
 
-    if (orderLinks.length > 1) {
-        report.error_code = "ORDER_LINK_AMBIGUOUS";
+    report.observedLastReportDate = onReport.lastReportDate ?? null;
+
+    const orderUrl = resolveOrderUrl(page.url());
+
+    if (!orderUrl) {
+        report.error_code = "ORDER_PAGE_NAVIGATION_NOT_PROVEN";
         report.failureReason =
-            `Found ${orderLinks.length} visible ORDER NEW REPORT controls. Ambiguity on this ` +
-            `page is indistinguishable from danger, so nothing was clicked.`;
+            "The order-page URL did not resolve to the same origin and the expected pathname. " +
+            "Nothing was navigated.";
         return report;
     }
 
-    await orderLinks[0].click({ timeout: NAV_TIMEOUT }).catch(() => {});
-    await page.waitForLoadState("domcontentloaded").catch(() => {});
+    report.resolvedOrderUrl = orderUrl;
+
+    await page.goto(orderUrl, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT }).catch(() => {});
 
     // ---- 2. Positively identify the order page -----------------------------
     const frame = await findOrderFrame(page).catch(() => null);
