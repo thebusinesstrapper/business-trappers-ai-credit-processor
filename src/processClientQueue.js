@@ -764,7 +764,18 @@ export function startClientQueue(data = {}) {
         createdAt: new Date().toISOString(),
         startedAt: null,
         completedAt: null,
-        submitApproved: diagnosticOnly ? false : true,
+        // A diagnostic run never sends, unconditionally.
+        //
+        // Otherwise the production DEFAULT stays true, but an explicitly supplied
+        // `submitApproved: false` is now preserved instead of being overwritten.
+        // Previously it was impossible to run the real production wrapper with
+        // sending disabled, which left the eligibility guard as the single thing
+        // standing between a stale report and delivered letters. This restores a
+        // second, independent layer without changing the default.
+        //
+        // Strict === false, so only an explicit false disables sending; omitted,
+        // null, undefined, or any other value keeps the production default.
+        submitApproved: diagnosticOnly ? false : data.submitApproved !== false,
         diagnosticOnly,
         // A diagnostic run is read-only without exception, so neither the
         // inactive workflow nor operational routing can be armed inside one.
