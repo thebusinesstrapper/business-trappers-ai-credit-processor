@@ -201,58 +201,86 @@ export function decideAcquisition(orderPageState, memoryState = {}) {
         );
     }
 
-    // --- Precondition 4: positively EXCLUDE the paid option. ---------------
+    // --- Precondition 4: EXCLUDE the paid option WHEN ONE IS PRESENT. ------
     //
-    // Identifying the free option is not sufficient. We must know where the
-    // paid option is, and know that it is not the one we are selecting.
+    // APPROVED BUSINESS RULE CHANGE. A paid option must always be excluded from
+    // selection when present, but it does not have to EXIST for a verified free
+    // option to be usable.
+    //
+    // This branch previously returned manual_review whenever PAID_OPTION_ID was
+    // absent, on the reasoning that the page then did not match the characterised
+    // structure. That was observed to be wrong against a live account: Marcos
+    // Lopez's order page offers the 3-bureau FREE refresh included with his
+    // membership and presents no paid option at all. Refusing there stalls a
+    // client over the absence of a control we would never have touched.
+    //
+    // WHAT STILL PROTECTS US WHEN NO PAID OPTION IS PRESENT — all of it checked
+    // ABOVE this line, so reaching here means every one of these already held:
+    //
+    //   * unaccounted_option_ids is EMPTY. Every control on the page resolved to
+    //     a known id. A page carrying anything we cannot name — including a radio
+    //     with no id at all — returned manual_review long before this point. So
+    //     "no paid option" means genuinely absent, never "present but
+    //     unrecognised".
+    //   * EVERY option is priced. A single unreadable cost is manual_review.
+    //   * The free option is FREE_OPTION_ID specifically, at cost 0, where that 0
+    //     came from a positive reading of the row (3-bureau AND the word FREE AND
+    //     no dollar amount) rather than from an absent price.
+    //   * That same option is enabled and visible.
+    //
+    // With nothing unaccounted for on the page, an absent paid option is not
+    // ambiguity — there is simply no priced control to confuse the free one with.
+    // The dangerous case remains fully guarded: when a paid option IS present it
+    // is still located, still required to be non-zero, still checked for identity
+    // collision, and still never selected.
     const paidOption = options.find((o) => o.id === PAID_OPTION_ID);
 
-    if (!paidOption) {
-        // The paid option is expected on this page. Its absence means the page
-        // is not the one we characterised — so we do not recognise this page.
-        return manualReview(
-            `paid_option_absent: the expected paid option (${PAID_OPTION_ID}) was not ` +
-            `found. The page does not match the characterised structure. ` +
-            `An unrecognised page is not one we act on.`
-        );
-    }
+    if (paidOption) {
+        if (paidOption.cost === 0) {
+            // The option we believed was paid is priced at zero. Either the page
+            // changed, or our identification is wrong. Either way we are confused
+            // about which control costs money, and that is the worst possible state
+            // in which to submit.
+            return manualReview(
+                `paid_option_priced_zero: ${PAID_OPTION_ID} is priced at 0, which contradicts ` +
+                `its expected role. We cannot confidently distinguish the free option from the ` +
+                `paid one. Not submitting.`
+            );
+        }
 
-    if (paidOption.cost === 0) {
-        // The option we believed was paid is priced at zero. Either the page
-        // changed, or our identification is wrong. Either way we are confused
-        // about which control costs money, and that is the worst possible state
-        // in which to submit.
-        return manualReview(
-            `paid_option_priced_zero: ${PAID_OPTION_ID} is priced at 0, which contradicts ` +
-            `its expected role. We cannot confidently distinguish the free option from the ` +
-            `paid one. Not submitting.`
-        );
-    }
-
-    if (freeOption.id === paidOption.id) {
-        return manualReview("option_identity_collision: free and paid options resolved to the same control.");
+        if (freeOption.id === paidOption.id) {
+            return manualReview("option_identity_collision: free and paid options resolved to the same control.");
+        }
     }
 
     // --- All preconditions met. -------------------------------------------
     return {
         decision: DECISIONS.SUBMIT_FREE_REPORT,
         free_available: true,
-        paid_available: true,
+        // FALSE means "no paid option exists on this page", not "unknown". The
+        // unaccounted-options gate above guarantees the difference.
+        paid_available: Boolean(paidOption),
         selected_option: {
             id: freeOption.id,
             cost: freeOption.cost,
             cost_evidence: freeOption.cost_evidence,
         },
-        excluded_paid_option: {
-            id: paidOption.id,
-            cost: paidOption.cost,
-            cost_evidence: paidOption.cost_evidence,
-        },
+        // Null when there is nothing to exclude. When a paid option exists this
+        // records exactly which control was excluded and at what price.
+        excluded_paid_option: paidOption
+            ? {
+                id: paidOption.id,
+                cost: paidOption.cost,
+                cost_evidence: paidOption.cost_evidence,
+            }
+            : null,
         reason:
             `Free membership report (${FREE_OPTION_ID}) positively identified at cost 0 ` +
-            `(evidence: ${freeOption.cost_evidence}); paid option (${PAID_OPTION_ID}) ` +
-            `positively excluded at cost ${paidOption.cost}; option enabled and visible; ` +
-            `AI Memory requires a newer report.`,
+            `(evidence: ${freeOption.cost_evidence}); ` +
+            (paidOption
+                ? `paid option (${PAID_OPTION_ID}) positively excluded at cost ${paidOption.cost}; `
+                : `no paid option is present on this page and no option was unaccounted for; `) +
+            `option enabled and visible; AI Memory requires a newer report.`,
 
         // INVARIANT. This engine never submits. Whether anything acts on this
         // recommendation is not its business.
