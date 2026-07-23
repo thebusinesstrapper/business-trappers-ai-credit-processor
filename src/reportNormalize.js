@@ -51,6 +51,7 @@ import {
     KEY_PREFIX, mintKey, resolveKey, buildRegistry, RESOLUTION,
     accountSignatures, tradelineSignatures, inquirySignatures,
     readVendorIdentifiers, acctLast4, furnisherNorm,
+    canonicalAccountNumber,
 } from "./itemKey.js";
 
 export const MODEL_VERSION = "BT-CRM-1.1";
@@ -423,6 +424,12 @@ function tradelineIdentity(bureau, maskedAccount, furnisher) {
     return {
         bureau,
         masked_account: maskedAccount,
+        // THE IDENTITY FIELD. The complete displayed account number, normalized
+        // for formatting only (whitespace, hyphens, case). Every masking
+        // character is preserved — see itemKey.canonicalAccountNumber.
+        account_canonical: canonicalAccountNumber(maskedAccount),
+        // Retained for DIAGNOSTICS ONLY. It is no longer consulted by the fold
+        // decision or the slot key; the last four digits are not identity.
         last4: acctLast4(maskedAccount),
         // The SAME normalization the key cascade uses (itemKey.furnisherNorm),
         // including its alias table — so a tradeline's fold identity and its key
@@ -443,22 +450,31 @@ function tradelineIdentity(bureau, maskedAccount, furnisher) {
 function sameTradelineIdentity(a, b) {
     if (a.bureau !== b.bureau) return false;
 
-    // Prefer exact full masked-account equality. This covers bureau formats that
-    // contain no readable trailing digits at all (for example
-    // SSE001XXXXXXXXXX). Two rows with the same Array account id, same bureau,
-    // and the exact same bureau-reported masked account are the same tradeline,
-    // even when acctLast4() correctly returns null.
-    const fullA = canonicalMaskedAccount(a.masked_account);
-    const fullB = canonicalMaskedAccount(b.masked_account);
+    // ---- THE COMPLETE DISPLAYED ACCOUNT NUMBER IS THE IDENTITY ----------
+    const fullA = a.account_canonical;
+    const fullB = b.account_canonical;
 
-    if (fullA && fullB && fullA === fullB) return true;
+    // ABSENCE NEVER CONFIRMS IDENTITY. If either row displayed no account
+    // number, there is nothing to match on and we do not guess.
+    if (!fullA || !fullB) return false;
 
-    // Otherwise require a real matching last-4. Absence never confirms identity.
-    if (a.last4 === null || b.last4 === null || a.last4 !== b.last4) return false;
+    // TWO DIFFERENT DISPLAYED ACCOUNT NUMBERS ARE TWO DIFFERENT TRADELINES.
+    // This holds even when the furnisher is identical, even when both last-4
+    // values are unreadable, and even when Array assigned the same account id.
+    // A consumer can hold several accounts with one furnisher, and the string
+    // the bureau printed is what tells them apart.
+    if (fullA !== fullB) return false;
 
-    // Furnisher-name differences alone never split an account that account-number
-    // evidence joins. The exact bureau-reported furnisher string is still
-    // preserved for the letter.
+    // Same displayed account number at the same bureau. The furnisher must not
+    // CONTRADICT that. Two different furnishers reporting the identical account
+    // number is ambiguity, and ambiguity fails closed rather than folding.
+    //
+    // An ABSENT furnisher does not contradict anything, so it does not block a
+    // fold that the account number already proves.
+    if (a.furnisher_norm && b.furnisher_norm && a.furnisher_norm !== b.furnisher_norm) {
+        return false;
+    }
+
     return true;
 }
 
@@ -723,13 +739,14 @@ function readCreditor(liability) {
  * bureau and the same full masked account string after punctuation/spacing
  * normalization.
  */
-function canonicalMaskedAccount(value) {
-    if (value === null || value === undefined) return null;
-
-    const normalized = String(value).toUpperCase().replace(/[^A-Z0-9]/g, "");
-
-    return normalized || null;
-}
+// canonicalMaskedAccount() was REMOVED. It stripped [^A-Z0-9], which deleted
+// masking characters outright: "****1234" and "**** **** **** 1234" both became
+// "1234", while "XXXX1234" kept its mask only because X is a letter. Whether a
+// mask survived depended on which character the bureau happened to print with.
+//
+// itemKey.canonicalAccountNumber() replaces it everywhere, so the fold
+// identity, the slot key and the cross-run key cascade all normalize the
+// account number the same way and cannot disagree about what it is.
 
 function mergeExactDuplicateTradelines(existing, incoming) {
     const existingSpecific = existing.observation?.basis === BASIS.BUREAU_SPECIFIC;
@@ -807,7 +824,7 @@ function consolidateCrossGroupDuplicates(accounts, warnings, keyResolution) {
         const keptTradelines = [];
 
         for (const tradeline of account.bureau_tradelines ?? []) {
-            const masked = canonicalMaskedAccount(tradeline.masked_account);
+            const masked = canonicalAccountNumber(tradeline.masked_account);
 
             if (!masked) {
                 keptTradelines.push(tradeline);
@@ -1004,11 +1021,22 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
                 // may describe one TransUnion tradeline as a merged {TU, EXP} row
                 // AND a separate {TU} row in the same report. Both observe the SAME
                 // tradeline; they are folded, not treated as two.
-                // Slot key is bureau + last-4, NOT bureau alone. Two DIFFERENT
-                // accounts reported by the same bureau (different last-4 — e.g. two
-                // separate Aidvantage student loans) must occupy DIFFERENT slots and
-                // remain independent tradelines. Same last-4 shares a slot and folds.
-                const bureauSlot = `${bureau}|${candidateTradeline.identity.last4 ?? "no-last4"}`;
+                // ---- SLOT KEY: bureau + THE FULL DISPLAYED ACCOUNT NUMBER ----
+                //
+                // This was `bureau + last-4`. When a bureau masks an account so
+                // that fewer than four digits are readable, acctLast4() returns
+                // null for every such row, and they were ALL forced into one
+                // `no-last4` slot — where any difference between them raised an
+                // identity conflict instead of being recognised as what it was:
+                // two different accounts.
+                //
+                // Keying on the complete displayed number means two different
+                // account numbers never share a slot at all. They simply become
+                // two independent tradelines, with no conflict to resolve,
+                // exactly as a consumer holding two accounts with one furnisher
+                // should be represented.
+                const bureauSlot =
+                    `${bureau}|${candidateTradeline.identity.account_canonical ?? "no-account"}`;
 
                 if (byBureau.has(bureauSlot)) {
                     const existing = byBureau.get(bureauSlot);

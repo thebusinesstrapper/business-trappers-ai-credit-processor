@@ -182,6 +182,47 @@ export function acctLast4(masked) {
 }
 
 /**
+ * THE FULL DISPLAYED ACCOUNT NUMBER, normalized for FORMATTING ONLY.
+ *
+ * ---------------------------------------------------------------------------
+ * THIS IS THE TRADELINE'S IDENTITY. THE LAST FOUR DIGITS ARE NOT.
+ *
+ * A consumer can hold several tradelines with the same furnisher at the same
+ * bureau. When the bureau masks the account so that fewer than four digits are
+ * readable, acctLast4() correctly returns null for all of them — and any
+ * identity built on last-4 then collapses genuinely separate accounts into one
+ * bucket. The complete displayed string is what distinguishes them, and it is
+ * what the bureau actually printed.
+ *
+ * WHAT IS REMOVED: whitespace and hyphens, and case is folded. These carry no
+ * account information; "4111 1111" and "4111-1111" are one account rendered two
+ * ways.
+ *
+ * WHAT IS KEPT: EVERYTHING ELSE, including every masking character. Asterisks,
+ * X's, bullets and hashes are part of what the bureau displayed and are
+ * frequently the only thing distinguishing two masked accounts.
+ *
+ * The previous implementation stripped [^A-Z0-9], which deleted asterisks
+ * outright: "****1234" and "**** **** **** 1234" both became "1234", while
+ * "XXXX1234" kept its mask purely because X is a letter. Whether a mask
+ * survived depended on which character the bureau happened to use.
+ *
+ * NOTHING IS RECONSTRUCTED. Hidden digits stay hidden; this only strips
+ * separators.
+ * ---------------------------------------------------------------------------
+ */
+export function canonicalAccountNumber(value) {
+    if (value === null || value === undefined) return null;
+
+    const normalized = String(value)
+        .toUpperCase()
+        .replace(/\s/g, "")   // spaces, tabs, non-breaking spaces
+        .replace(/-/g, "");    // hyphens
+
+    return normalized || null;
+}
+
+/**
  * Date opened, to YYYY-MM.
  *
  * Day-level precision is DISCARDED because bureaus disagree by days on the same
@@ -253,7 +294,7 @@ export function accountSignatures(account) {
 export function tradelineSignatures(tradeline, stableAccountKey) {
     const vendor = readVendorIdentifiers(tradeline);
 
-    const last4 = acctLast4(tradeline.masked_account);
+    const account = canonicalAccountNumber(tradeline.masked_account);
     const furnisher = furnisherNorm(tradeline.furnisher);
     const bureau = tradeline.bureau;
 
@@ -263,13 +304,37 @@ export function tradelineSignatures(tradeline, stableAccountKey) {
         sigs.push({ tier: "T0", value: `T0|${vendor.tradeline_hash_simple}` });
     }
 
-    // T1: an account reports AT MOST ONCE per bureau. Strong.
-    if (stableAccountKey && bureau) {
-        sigs.push({ tier: "T1", value: `T1|${stableAccountKey}|${bureau}` });
+    // ---- T1: account + bureau + THE FULL DISPLAYED ACCOUNT NUMBER --------
+    //
+    // T1 was previously `account|bureau` alone, on the stated assumption that
+    // "an account reports AT MOST ONCE per bureau."
+    //
+    // THE FULL-ACCOUNT-NUMBER IDENTITY RULE INVALIDATES THAT ASSUMPTION. One
+    // Array account id can legitimately carry two tradelines at the same bureau
+    // when their displayed account numbers differ, and they are two separate
+    // legal units of work.
+    //
+    // Left as account+bureau, T1 would emit ONE signature for BOTH of them. On
+    // the next run buildRegistry() would map that single signature to two keys,
+    // and resolveKey() would fail closed as AMBIGUOUS — on exactly the pair we
+    // had deliberately kept separate. Including the account number keeps each
+    // tradeline's strongest signature unique to it.
+    if (stableAccountKey && bureau && account) {
+        sigs.push({ tier: "T1", value: `T1|${stableAccountKey}|${bureau}|${account}` });
     }
 
-    if (furnisher && last4 && bureau) {
-        sigs.push({ tier: "T2", value: `T2|${furnisher}|${last4}|${bureau}` });
+    // T1B: no account number is displayed at all. The at-most-once assumption
+    // is then the only evidence available, so it is used — but ONLY here, where
+    // there is nothing stronger, never in preference to a displayed number.
+    if (stableAccountKey && bureau && !account) {
+        sigs.push({ tier: "T1B", value: `T1B|${stableAccountKey}|${bureau}` });
+    }
+
+    // T2: furnisher + FULL account number + bureau. Was keyed on last-4, which
+    // is absent precisely when the mask hides it — so it could not distinguish
+    // two masked accounts from the same furnisher.
+    if (furnisher && account && bureau) {
+        sigs.push({ tier: "T2", value: `T2|${furnisher}|${account}|${bureau}` });
     }
 
     return sigs;
