@@ -42,6 +42,8 @@ export const ORDER_FREE_REPORT_VERSION = "BT-ORDER-FREE-1.0";
 const ORDER_PAGE = "mcc_order_select_v2.asp";
 
 const LINK_TIMEOUT = 20000;
+/** Budget for ONE selection interaction. Bounded so a hidden control fails fast. */
+const SELECT_TIMEOUT = 15000;
 const NAV_TIMEOUT = 60000;
 const READ_TIMEOUT = 8000;
 
@@ -59,9 +61,17 @@ const ORDER_LINK_PATTERN = /order\s+new\s+report/i;
  * Attribute-value form is used rather than the `#id` shorthand so that an id
  * containing a character illegal in a bare selector cannot break the query.
  */
+function attrEscape(value) {
+    return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function idSelector(optionId) {
-    const escaped = String(optionId).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    return `input[type="radio"][id="${escaped}"]`;
+    return `input[type="radio"][id="${attrEscape(optionId)}"]`;
+}
+
+/** The label explicitly bound to an input by id — the element a user clicks. */
+function labelSelector(optionId) {
+    return `label[for="${attrEscape(optionId)}"]`;
 }
 
 /**
@@ -351,6 +361,165 @@ async function verifyFreeOptionLive(frame, optionId) {
 }
 
 /**
+ * POSITIVE VERIFICATION THAT THE FREE OPTION — AND NOTHING ELSE — IS SELECTED.
+ *
+ * Asserting only "the free radio is checked" would be insufficient. These
+ * controls share one radio group, so the question that actually matters before
+ * submitting an order is which option the form will POST. Enumerating the group
+ * and requiring exactly one checked entry, whose id is FREE_OPTION_ID, answers
+ * that directly and makes a paid selection impossible to miss.
+ *
+ * isChecked() is a state query, not an action, so it reads correctly through a
+ * CSS-hidden native input.
+ */
+async function verifyOnlyFreeIsChecked(frame, optionId) {
+    // ENUMERATE FIRST, UNCONDITIONALLY.
+    //
+    // An earlier version short-circuited on "is the free radio checked?" before
+    // reading the group. That returned an empty checkedIds in precisely the case
+    // where the answer matters most — a click that checked SOMETHING ELSE — so
+    // the most dangerous outcome produced the least evidence. The group read
+    // subsumes the single-radio check anyway.
+    const radios = frame.locator('input[type="radio"]');
+    const count = await radios.count().catch(() => 0);
+    const checkedIds = [];
+
+    for (let i = 0; i < count; i += 1) {
+        const radio = radios.nth(i);
+
+        if (await radio.isChecked().catch(() => false)) {
+            checkedIds.push((await radio.getAttribute("id").catch(() => null)) ?? "(no id)");
+        }
+    }
+
+    if (checkedIds.length === 0) {
+        return {
+            ok: false,
+            reason: `"${optionId}" did not become checked; no option in the radio group is checked.`,
+            checkedIds,
+        };
+    }
+
+    if (checkedIds.length !== 1 || checkedIds[0] !== optionId) {
+        return {
+            ok: false,
+            reason:
+                `Expected exactly one checked option ("${optionId}"); the group reports ` +
+                `[${checkedIds.join(", ")}]. Not submitting.`,
+            checkedIds,
+        };
+    }
+
+    return { ok: true, checkedIds };
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * SELECT THE VERIFIED FREE OPTION.
+ *
+ * WHY radio.check() ALONE IS NOT ENOUGH. CreditHero CSS-replaces the native
+ * <input type="radio">: the input is hidden and a bound <label> is what is drawn
+ * and clicked. This was PROVEN on Marcos Lopez's live order page, where
+ * visibility resolved via `bound_label_visible` rather than
+ * `radio_input_visible`. Playwright's check() waits for actionability, so
+ * against a hidden input it does not misfire — it TIMES OUT. Live submission
+ * would have failed at the last step, after the acquisition intent was already
+ * recorded.
+ *
+ * WHY NOT force: true. force skips the actionability checks entirely and
+ * dispatches the event regardless. On a page whose controls spend a client's
+ * entitlement, that trades a clean, diagnosable stop for a synthetic interaction
+ * with a control we cannot confirm is behaving. Explicitly forbidden here.
+ *
+ * THE ORDER IS: real control first, bound label second, nothing third.
+ *
+ *   1. The native input, IF it is genuinely visible. Unchanged behaviour for any
+ *      account where CreditHero does not restyle it.
+ *   2. The bound label — the element a human clicks. Required to exist, to be
+ *      UNIQUE, and to be visible. Two labels bound to one id is ambiguity, and
+ *      we do not resolve ambiguity by picking one.
+ *   3. Nothing. No container click, no coordinate click, no force. If neither
+ *      the input nor a single visible bound label is available, the option
+ *      cannot be selected the way a user would select it, and we stop.
+ *
+ * Whatever path was taken, selection is then PROVEN by reading the radio group
+ * back. A click that appeared to succeed but left the group unchanged — or, far
+ * worse, left a different option checked — is a failure.
+ * ---------------------------------------------------------------------------
+ */
+async function selectVerifiedFreeOption(frame, optionId) {
+    const outcome = { via: null, clickAttempted: false, verification: null };
+
+    const radio = frame.locator(idSelector(optionId)).first();
+
+    if (await radio.isVisible().catch(() => false)) {
+        outcome.via = "native_input";
+        outcome.clickAttempted = true;
+
+        const done = await radio
+            .check({ timeout: SELECT_TIMEOUT })   // NO force.
+            .then(() => true)
+            .catch(() => false);
+
+        if (!done) {
+            return { ...outcome, ok: false, reason: "check() on the native radio did not complete." };
+        }
+    } else {
+        const labels = frame.locator(labelSelector(optionId));
+        const labelCount = await labels.count().catch(() => 0);
+
+        if (labelCount === 0) {
+            return {
+                ...outcome,
+                ok: false,
+                reason:
+                    `The native radio for "${optionId}" is not actionable and no bound ` +
+                    `<label for="${optionId}"> exists to click. Not selecting.`,
+            };
+        }
+
+        if (labelCount > 1) {
+            return {
+                ...outcome,
+                ok: false,
+                reason:
+                    `Ambiguous: ${labelCount} labels are bound to "${optionId}". We do not ` +
+                    `resolve ambiguity by choosing one. Not selecting.`,
+            };
+        }
+
+        const label = labels.first();
+
+        if (!(await label.isVisible().catch(() => false))) {
+            return {
+                ...outcome,
+                ok: false,
+                reason: `The label bound to "${optionId}" is present but not visible. Not clicking it.`,
+            };
+        }
+
+        outcome.via = "bound_label";
+        outcome.clickAttempted = true;
+
+        const done = await label
+            .click({ timeout: SELECT_TIMEOUT })   // NO force.
+            .then(() => true)
+            .catch(() => false);
+
+        if (!done) {
+            return { ...outcome, ok: false, reason: "The bound-label click did not complete." };
+        }
+    }
+
+    const verification = await verifyOnlyFreeIsChecked(frame, optionId);
+    outcome.verification = verification;
+
+    if (!verification.ok) return { ...outcome, ok: false, reason: verification.reason };
+
+    return { ...outcome, ok: true };
+}
+
+/**
  * Select and submit the FREE report.
  *
  * @param {import('playwright').Page} page   a page already on the order page
@@ -370,6 +539,12 @@ export async function selectAndSubmitFreeReport(page, opts = {}) {
         observedCost: observedCost ?? null,
         liveVerification: null,
         optionSelected: false,
+        // How the option was selected, and the proof it worked. Diagnostic, and
+        // the audit trail for an interaction with a money-spending page.
+        selectedVia: null,
+        clickAttempted: false,
+        selectionVerification: null,
+        preSubmitReconfirmed: false,
         submitClicked: false,
         error_code: null,
         failureReason: null,
@@ -448,12 +623,68 @@ export async function selectAndSubmitFreeReport(page, opts = {}) {
     }
 
     // ---- SELECT -----------------------------------------------------------
-    const radio = targetFrame.locator(idSelector(optionId)).first();
+    //
+    // Label-first when the native input is CSS-replaced, and PROVEN afterwards
+    // by reading the radio group back. Never forced.
+    const selection = await selectVerifiedFreeOption(targetFrame, optionId);
 
-    await radio.check({ timeout: LINK_TIMEOUT });
+    report.selectedVia = selection.via;
+    report.clickAttempted = selection.clickAttempted;
+    report.selectionVerification = selection.verification;
+
+    if (!selection.ok) {
+        // optionSelected stays FALSE because no option is selected — which is
+        // the literal truth, and is what lets the caller cancel the acquisition
+        // intent cleanly. Safe to cancel: the submit control is not even located
+        // below this point, so nothing can have been ordered.
+        report.error_code = "FREE_OPTION_NOT_SELECTED";
+        report.failureReason = `${selection.reason} Submit was not clicked.`;
+        return report;
+    }
+
     report.optionSelected = true;
 
-    console.log(`Selected the FREE option "${optionId}" (verified $0 on the live page).`);
+    console.log(
+        `Selected the FREE option "${optionId}" via ${selection.via}; ` +
+        `radio group confirms it is the only checked option.`
+    );
+
+    // ---- PRE-SUBMIT RECONFIRMATION ----------------------------------------
+    //
+    // THE LAST GATE BEFORE AN IRREVERSIBLE ACTION, deliberately re-proving what
+    // was already proven. Every earlier check was made against an earlier state
+    // of the page; this one is made against the state we are about to submit.
+    //
+    // Re-asserting the two constants (identity and cost) is intentionally
+    // redundant with GATE 1 and GATE 2. The redundancy is the point: it survives
+    // a future refactor that reorders or removes an earlier gate.
+    if (optionId !== FREE_OPTION_ID || observedCost !== 0) {
+        report.error_code = "PRE_SUBMIT_IDENTITY_OR_COST_CHANGED";
+        report.failureReason =
+            `Pre-submit reconfirmation failed: option "${optionId}" at cost ` +
+            `${observedCost === null ? "unknown" : observedCost} is not the verified free option ` +
+            `at cost 0. Submit was not clicked.`;
+        return report;
+    }
+
+    const reverified = await verifyFreeOptionLive(targetFrame, optionId);
+
+    if (!reverified.ok) {
+        report.error_code = "PRE_SUBMIT_VERIFICATION_FAILED";
+        report.failureReason = `${reverified.reason} Submit was not clicked.`;
+        return report;
+    }
+
+    const stillOnlyFree = await verifyOnlyFreeIsChecked(targetFrame, optionId);
+    report.selectionVerification = stillOnlyFree;
+
+    if (!stillOnlyFree.ok) {
+        report.error_code = "PRE_SUBMIT_SELECTION_CHANGED";
+        report.failureReason = `${stillOnlyFree.reason} Submit was not clicked.`;
+        return report;
+    }
+
+    report.preSubmitReconfirmed = true;
 
     // ---- SUBMIT -----------------------------------------------------------
     const submit = targetFrame
