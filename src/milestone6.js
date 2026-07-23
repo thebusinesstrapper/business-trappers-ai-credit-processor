@@ -367,6 +367,13 @@ export async function runMilestone6(data = {}) {
         // and THROWS on failure. It does NOT return `ok`. Checking `!report.ok`
         // would be false-negative on every successful run — exactly the bug that
         // made openCreditHero report CREDIT_HERO_UNAVAILABLE while succeeding.
+        // CAPTURED BEFORE WE LEAVE. openCreditReport() navigates this same handle
+        // onward to the report page, and "ORDER NEW REPORT" does not exist there
+        // — it lives here, on the member dashboard. Read live from the browser,
+        // so the acquisition path can return to a page we genuinely visited
+        // instead of constructing an address for one.
+        const memberDashboardUrl = chPage.url();
+
         let reportPage;
 
         try {
@@ -527,6 +534,7 @@ export async function runMilestone6(data = {}) {
                 baselineReportDate,
                 eligibilityHint,
                 reportPageUrl: reportPage.reportUrl,
+                memberDashboardUrl,
                 openIntent,
                 recovery,
                 replayUrl,
@@ -933,7 +941,7 @@ const ACQUISITION_POLL_INTERVAL_MS = 15000;
 async function runAcquisitionPath(ctx) {
     const {
         chPage, crcClientId, processingRunId, browserbaseSessionId,
-        baselineReportDate, eligibilityHint, reportPageUrl,
+        baselineReportDate, eligibilityHint, reportPageUrl, memberDashboardUrl,
         openIntent, recovery, replayUrl,
     } = ctx;
 
@@ -991,7 +999,7 @@ async function runAcquisitionPath(ctx) {
     }
 
     // ---- 2. READ THE ORDER PAGE (read-only) ------------------------------
-    const navigated = await navigateToOrderPage(chPage);
+    const navigated = await navigateToOrderPage(chPage, { memberDashboardUrl });
 
     if (!navigated.ok) {
         return {
@@ -999,7 +1007,16 @@ async function runAcquisitionPath(ctx) {
             response: errorResponse(
                 navigated.error_code ?? "ORDER_PAGE_UNREACHABLE",
                 navigated.error ?? "Could not reach the Credit Hero order page.",
-                { ...base, requiresHumanReview: true }
+                {
+                    ...base,
+                    // Sanitized DOM evidence: filenames and control labels only,
+                    // never a tGUID-bearing URL. Present so a repeat failure is
+                    // diagnosable from the job result itself.
+                    searchedPage: navigated.searchedPage ?? null,
+                    memberDashboardSearched: navigated.memberDashboardSearched ?? false,
+                    candidateControls: navigated.candidateControls ?? null,
+                    requiresHumanReview: true,
+                }
             ),
         };
     }

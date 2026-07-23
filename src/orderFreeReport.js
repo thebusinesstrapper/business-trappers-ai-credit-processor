@@ -127,6 +127,72 @@ async function findOrderPageUrl(page) {
 }
 
 /**
+ * Snapshot the controls that LOOK like the order entry point, for diagnostics.
+ *
+ * PRIVACY. CreditHero URLs carry tGUID transaction tokens. Per the rule already
+ * enforced in creditHeroLandingState.js — token-like identifiers are never read,
+ * returned, logged or persisted — this returns the href's FILENAME ONLY
+ * (everything before "?" and after the last "/"). "mcc_order_select_v2.asp"
+ * leaves; "?tGUID=..." never does.
+ *
+ * Read-only: querySelectorAll and property reads. Nothing is clicked.
+ */
+async function snapshotOrderCandidates(page) {
+    const seen = [];
+
+    for (const frame of page.frames()) {
+        try {
+            const found = await frame.evaluate((needle) => {
+                const fileOnly = (raw) => {
+                    if (!raw) return null;
+                    // Strip the query string FIRST — that is where the token is.
+                    const noQuery = String(raw).split("?")[0].split("#")[0];
+                    return noQuery.split("/").filter(Boolean).pop() ?? null;
+                };
+
+                const nodes = Array.from(
+                    document.querySelectorAll("a, button, input[type=button], input[type=submit]")
+                );
+
+                return nodes
+                    .filter((el) => {
+                        const label = (el.innerText || el.value || "").trim();
+                        const href = el.getAttribute ? el.getAttribute("href") : null;
+                        return (
+                            /order/i.test(label) ||
+                            /report/i.test(label) ||
+                            (href && href.toLowerCase().includes(needle.toLowerCase()))
+                        );
+                    })
+                    .slice(0, 12)
+                    .map((el) => ({
+                        tag: el.tagName.toLowerCase(),
+                        // Label only, trimmed and capped. No digits of any length
+                        // are expected in these labels, but cap anyway.
+                        label: (el.innerText || el.value || "").trim().replace(/\s+/g, " ").slice(0, 60),
+                        hasHref: Boolean(el.getAttribute && el.getAttribute("href")),
+                        hrefFile: fileOnly(el.getAttribute && el.getAttribute("href")),
+                        hasOnclick: Boolean(el.getAttribute && el.getAttribute("onclick")),
+                        type: el.getAttribute ? el.getAttribute("type") : null,
+                    }));
+            }, ORDER_PAGE);
+
+            seen.push(...found);
+        } catch {
+            // detached or cross-origin frame
+        }
+    }
+
+    return seen;
+}
+
+/** The page filename we are currently on, with any token stripped. */
+function pageFileOnly(url) {
+    if (!url) return null;
+    return String(url).split("?")[0].split("#")[0].split("/").filter(Boolean).pop() ?? null;
+}
+
+/**
  * Navigate the given page to the Credit Hero order page.
  *
  * READ-ONLY ONCE THERE. This function goes to the page and stops; it selects
@@ -135,24 +201,73 @@ async function findOrderPageUrl(page) {
  *
  * @returns {Promise<{ok: boolean, url?: string, error_code?: string, error?: string}>}
  */
-export async function navigateToOrderPage(page) {
-    const deadline = Date.now() + LINK_TIMEOUT;
+export async function navigateToOrderPage(page, opts = {}) {
+    const { memberDashboardUrl = null } = opts;
 
-    let orderUrl = null;
+    /** Poll the CURRENT page for the order link. */
+    async function findHere(budgetMs) {
+        const deadline = Date.now() + budgetMs;
 
-    while (Date.now() < deadline) {
-        orderUrl = await findOrderPageUrl(page);
-        if (orderUrl) break;
-        await page.waitForTimeout(250);
+        while (Date.now() < deadline) {
+            const found = await findOrderPageUrl(page);
+            if (found) return found;
+            await page.waitForTimeout(250);
+        }
+
+        return null;
+    }
+
+    let orderUrl = await findHere(LINK_TIMEOUT / 2);
+
+    // ---- THE PAGE-IDENTITY FIX --------------------------------------------
+    //
+    // WHY THIS EXISTS. "ORDER NEW REPORT" lives on the Credit Hero MEMBER
+    // DASHBOARD (mcc_creditscores.asp) — the page openCreditHero lands on,
+    // alongside "My Reports and Scores", "LAST REPORT DATE" and "VIEW REPORT".
+    //
+    // But by the time acquisition runs, openCreditReport() has already
+    // page.goto()'d this same handle onward to the REPORT page
+    // (mcc_creditreports_v2.asp) to reach the report selector. So we were
+    // searching the report page for a control that only exists on the page we
+    // had just navigated away from, and correctly reporting that no such link
+    // was there. The finder was never wrong; it was pointed at the wrong page.
+    //
+    // THIS IS NOT URL CONSTRUCTION. memberDashboardUrl is captured live from
+    // chPage.url() immediately BEFORE openCreditReport() navigates away — an
+    // address the browser was actually on, carried forward. Nothing is guessed,
+    // assembled from a known filename, or derived from an origin. If the caller
+    // supplies none, we do not invent one and the search simply fails closed.
+    if (!orderUrl && memberDashboardUrl && page.url() !== memberDashboardUrl) {
+        console.log(
+            `Order link not on ${pageFileOnly(page.url()) ?? "the current page"} — ` +
+            `returning to ${pageFileOnly(memberDashboardUrl) ?? "the member dashboard"} to look there.`
+        );
+
+        await page
+            .goto(memberDashboardUrl, { waitUntil: "load", timeout: NAV_TIMEOUT })
+            .catch(() => {});
+
+        orderUrl = await findHere(LINK_TIMEOUT);
     }
 
     if (!orderUrl) {
+        // FAIL CLOSED — but with EVIDENCE. The previous version reported only
+        // that nothing was found, which is what forced a second blind run. The
+        // snapshot names the controls that are actually present (tag, label,
+        // whether they carry an href or an onclick) so the next decision is made
+        // from the live DOM rather than from a guess about it.
+        const candidates = await snapshotOrderCandidates(page).catch(() => []);
+
         return {
             ok: false,
             error_code: "ORDER_PAGE_LINK_NOT_FOUND",
             error:
-                `No link to "${ORDER_PAGE}" was found on the Credit Hero dashboard. ` +
+                `No link to "${ORDER_PAGE}" was found on the Credit Hero member dashboard. ` +
                 `The URL is never constructed, so acquisition stops here.`,
+            searchedPage: pageFileOnly(page.url()),
+            memberDashboardSearched: Boolean(memberDashboardUrl),
+            // Diagnostic only. Filenames and labels; never a tGUID-bearing URL.
+            candidateControls: candidates,
         };
     }
 
