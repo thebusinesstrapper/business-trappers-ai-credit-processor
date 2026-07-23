@@ -1057,6 +1057,8 @@ async function runAcquisitionPath(ctx) {
             cost: o.cost,
             disabled: o.disabled,
             visible: o.visible,
+            // Which element proved visibility. Names a signal, never DOM content.
+            visibilityEvidence: o.visibility_evidence ?? null,
             available_from: o.available_from,
         })),
         unaccountedOptionIds: orderState.unaccounted_option_ids,

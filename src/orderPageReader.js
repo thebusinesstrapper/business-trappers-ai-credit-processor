@@ -302,6 +302,74 @@ export async function readOrderPage(page) {
  * @returns {Promise<{page_read: boolean, options: object[],
  *   unaccounted_option_ids: string[], evidence: string[]}>}
  */
+
+/** Escape an id for an attribute selector. Node-safe (CSS.escape is browser-only). */
+function attrEscape(value) {
+    return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * IS THIS OPTION ACTUALLY PRESENTED TO THE USER?
+ *
+ * THE DEFECT THIS SOLVES. Visibility was measured on the native
+ * <input type="radio">. CreditHero renders a STYLED control: the native input is
+ * hidden by CSS (display:none / zero-size / visibility:hidden) and a label or
+ * container is what is actually drawn, clicked, and seen.
+ *
+ * Playwright's isVisible() is therefore FALSE for an input that is present,
+ * enabled, and perfectly usable — because the thing the user sees is not the
+ * thing we were measuring. Marcos Lopez's live order page showed the free
+ * 3-bureau option plainly visible and unselected, and the reader reported
+ * `not visible`, which decideAcquisition() correctly refused to act on.
+ *
+ * The question "is this option presented?" is answered by the PRESENTED
+ * element, so all three candidates are consulted:
+ *
+ *   1. the native input itself      — true when CreditHero does not restyle it
+ *   2. label[for="<option id>"]     — the canonical HTML association
+ *   3. the .order-item container    — the row that owns the control
+ *
+ * ANY ONE being visible proves the option is on screen. This does NOT relax the
+ * separate `disabled` determination, and it does NOT touch cost verification —
+ * an option can be visible and still be rejected as disabled, unpriced, or not
+ * positively identified as the free row.
+ *
+ * FAIL CLOSED IS PRESERVED. If the input is hidden AND no label is bound to it
+ * AND the container is hidden (or absent), nothing proves the option is
+ * presented and visible stays false. A row CreditHero has hidden outright is
+ * still unusable, exactly as before.
+ * ---------------------------------------------------------------------------
+ *
+ * @returns {Promise<{visible: boolean, evidence: string|null}>}
+ */
+async function determineOptionVisibility(frame, radio, container, hasContainer, optionId) {
+    // 1. The native control, when it is genuinely rendered.
+    if (await radio.isVisible().catch(() => false)) {
+        return { visible: true, evidence: "radio_input_visible" };
+    }
+
+    // 2. The label explicitly bound to this input by id. This is the canonical
+    //    association and the element a user actually clicks on a styled control.
+    if (optionId) {
+        const label = frame.locator(`label[for="${attrEscape(optionId)}"]`).first();
+
+        if ((await label.count().catch(() => 0)) > 0) {
+            if (await label.isVisible().catch(() => false)) {
+                return { visible: true, evidence: "bound_label_visible" };
+            }
+        }
+    }
+
+    // 3. The order-item row that owns the control.
+    if (hasContainer && (await container.isVisible().catch(() => false))) {
+        return { visible: true, evidence: "order_item_container_visible" };
+    }
+
+    // Nothing proved it is presented. Fail closed.
+    return { visible: false, evidence: null };
+}
+
 export async function readOrderPageOptions(page) {
     const state = {
         page_read: false,
@@ -345,7 +413,12 @@ export async function readOrderPageOptions(page) {
             const disabled =
                 disabledAttr !== null || isDisabled === true || /\bdisabled\b/.test(containerClass);
 
-            const visible = await radio.isVisible().catch(() => false);
+            // Measured on the PRESENTED control, not the CSS-replaced native
+            // input. See determineOptionVisibility() above.
+            const presentation = await determineOptionVisibility(
+                frame, radio, node, hasRow, id
+            );
+            const visible = presentation.visible;
 
             // ---- Cost: affirmative, or null. -------------------------------
             const price = parsePrice(rowText);
@@ -369,6 +442,12 @@ export async function readOrderPageOptions(page) {
                 cost_evidence: costEvidence,
                 disabled,
                 visible,
+                // WHICH signal proved the option is on screen. Diagnostic only —
+                // decideAcquisition() reads `visible`, not this. It records
+                // whether the native input is genuinely rendered or is a hidden,
+                // CSS-replaced control, which is the difference between a radio
+                // that can be checked directly and one that cannot.
+                visibility_evidence: presentation.evidence,
                 available_from: parseAvailableDate(rowText),
             });
 
