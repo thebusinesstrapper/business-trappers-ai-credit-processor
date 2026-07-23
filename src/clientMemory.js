@@ -458,3 +458,306 @@ export async function recordCreditHeroState(crcClientId, fields = {}) {
 
     return { ok: true, written: Object.keys(update), state: data };
 }
+
+
+/**
+ * ===========================================================================
+ * LIFECYCLE WRITERS — current_round, processing_state, process_complete.
+ *
+ * THESE ARE DELIBERATELY SEPARATE FROM recordCreditHeroState().
+ *
+ * That writer's whitelist EXCLUDES current_round, processing_state and
+ * process_complete, and that exclusion is a safety boundary, not an oversight:
+ * it is what makes it impossible for the CreditHero/observation paths to
+ * advance a dispute cycle. Widening it to carry lifecycle fields would delete
+ * the boundary for every caller at once.
+ *
+ * So lifecycle transitions get their own writers. Each has a FIXED field set —
+ * not a caller-supplied whitelist — and each is a COMPARE-AND-SWAP against the
+ * exact state it expects to be transitioning from. A transition that does not
+ * match writes nothing and says so.
+ *
+ * Only fields already confirmed present in client_state are written:
+ *   current_round, processing_state, process_complete, next_eligible_date,
+ *   last_dispute_date, last_successful_processing_at, negative_items_remaining
+ * ===========================================================================
+ */
+
+/** The final dispute round. Delivering it completes the client. */
+export const FINAL_ROUND = 6;
+
+/**
+ * Days from confirmed delivery until the client is next eligible.
+ *
+ * NOT invented here. orderPageReader.js already records the permanent rule:
+ * "the permanent future-cycle rule is 31 days since confirmed delivery AND a
+ * free report". This is that rule, applied at the only moment we can know the
+ * delivery actually happened.
+ */
+export const CYCLE_DAYS = 31;
+
+/** ISO calendar date (YYYY-MM-DD) for a date column. */
+function isoDate(date = new Date()) {
+    return date.toISOString().slice(0, 10);
+}
+
+/** ISO date N days from now, for next_eligible_date. */
+function isoDatePlusDays(days, from = new Date()) {
+    const d = new Date(from.getTime() + days * 86400000);
+    return isoDate(d);
+}
+
+/**
+ * Advance to the next round after a CONFIRMED successful delivery.
+ *
+ * ---------------------------------------------------------------------------
+ * HOW PREMATURE ADVANCEMENT IS MADE IMPOSSIBLE.
+ *
+ * The .eq() chain requires processing_state === 'waiting'. Only
+ * markDeliveryCompleted() sets that, and it only runs after CRC has confirmed
+ * the secure message was sent. A client that is 'ready' (never delivered),
+ * 'processing' (mid-delivery), 'blocked' or 'complete' cannot match, so no
+ * failed, blocked, interrupted or withheld run can advance a round — not
+ * because the caller checks, but because the row does not match.
+ *
+ * HOW DUPLICATE ADVANCEMENT IS MADE IMPOSSIBLE.
+ *
+ * It also requires current_round === deliveredRound. Once advanced, the round
+ * no longer matches, so a second call writes nothing and reports
+ * already_advanced. The operation is idempotent under retry.
+ *
+ * WHAT HAPPENS NEXT. processing_state returns to 'ready' so the NEW round can
+ * eventually take its own delivery lock, and next_eligible_date is set 31 days
+ * out so the daily preflight short-circuits until then rather than re-disputing
+ * off the same report tomorrow.
+ * ---------------------------------------------------------------------------
+ *
+ * @param {string|number} crcClientId
+ * @param {number} deliveredRound  the round just confirmed delivered
+ */
+export async function advanceRoundAfterDelivery(crcClientId, deliveredRound) {
+    const id = String(crcClientId);
+    const round = Number(deliveredRound);
+
+    if (!/^\d+$/.test(id)) {
+        throw new Error(`advanceRoundAfterDelivery: invalid crcClientId "${crcClientId}".`);
+    }
+
+    if (!Number.isInteger(round) || round < 1) {
+        return { ok: false, reason: "invalid_delivered_round", deliveredRound };
+    }
+
+    if (round >= FINAL_ROUND) {
+        // Round 6 completes rather than advances. Refuse rather than silently
+        // rolling a finished client into a seventh round.
+        return { ok: false, reason: "final_round_requires_completion", deliveredRound: round };
+    }
+
+    const now = new Date();
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+        .from(CLIENT_STATE_TABLE)
+        .update({
+            current_round: round + 1,
+            processing_state: "ready",
+            last_dispute_date: isoDate(now),
+            next_eligible_date: isoDatePlusDays(CYCLE_DAYS, now),
+            last_successful_processing_at: now.toISOString(),
+        })
+        .eq("crc_client_id", id)
+        .eq("current_round", round)
+        .eq("processing_state", "waiting")
+        .select("crc_client_id, current_round, processing_state, next_eligible_date, last_dispute_date")
+        .maybeSingle();
+
+    if (error) {
+        throw new Error(`Failed to advance round: ${error.message}`);
+    }
+
+    if (!data) {
+        return { ok: false, reason: "already_advanced_or_not_delivered", deliveredRound: round };
+    }
+
+    return { ok: true, previousRound: round, newRound: data.current_round, state: data };
+}
+
+/**
+ * Mark a client COMPLETE. Terminal.
+ *
+ * Two approved routes, and the compare-and-swap differs because the states they
+ * arrive from differ:
+ *
+ *   "final_round_delivered"      — from processing_state 'waiting' at round 6,
+ *                                  i.e. a confirmed delivery, same guarantee as
+ *                                  advanceRoundAfterDelivery().
+ *   "no_disputable_items"        — from any NON-complete state; no delivery
+ *                                  occurred, so no delivery marker exists to
+ *                                  match on.
+ *
+ * NEITHER touches current_round. The round a client finished on is history and
+ * the dashboard reports it as the final round.
+ *
+ * Idempotent: a row already process_complete does not match and reports
+ * already_complete.
+ *
+ * @param {string|number} crcClientId
+ * @param {"final_round_delivered"|"no_disputable_items"} reason
+ * @param {object} [opts]
+ * @param {number} [opts.expectedRound]         required for final_round_delivered
+ * @param {number} [opts.negativeItemsRemaining] persisted when known (0 on the
+ *                                               no-disputable-items route)
+ */
+export async function markProcessComplete(crcClientId, reason, opts = {}) {
+    const id = String(crcClientId);
+
+    if (!/^\d+$/.test(id)) {
+        throw new Error(`markProcessComplete: invalid crcClientId "${crcClientId}".`);
+    }
+
+    if (!["final_round_delivered", "no_disputable_items"].includes(reason)) {
+        throw new Error(`markProcessComplete: unrecognized reason "${reason}".`);
+    }
+
+    const now = new Date();
+
+    const update = {
+        process_complete: true,
+        processing_state: "complete",
+        last_successful_processing_at: now.toISOString(),
+    };
+
+    if (reason === "final_round_delivered") {
+        update.last_dispute_date = isoDate(now);
+    }
+
+    if (Number.isInteger(opts.negativeItemsRemaining)) {
+        update.negative_items_remaining = opts.negativeItemsRemaining;
+    }
+
+    const supabase = getSupabase();
+
+    let query = supabase
+        .from(CLIENT_STATE_TABLE)
+        .update(update)
+        .eq("crc_client_id", id)
+        .eq("process_complete", false);
+
+    if (reason === "final_round_delivered") {
+        // Same delivery guarantee as a round advance: only a confirmed delivery
+        // leaves the row in 'waiting' at the round we just sent.
+        query = query
+            .eq("current_round", Number(opts.expectedRound))
+            .eq("processing_state", "waiting");
+    }
+
+    const { data, error } = await query
+        .select("crc_client_id, current_round, processing_state, process_complete")
+        .maybeSingle();
+
+    if (error) {
+        throw new Error(`Failed to mark client complete: ${error.message}`);
+    }
+
+    if (!data) {
+        return { ok: false, reason: "already_complete_or_state_mismatch", completionReason: reason };
+    }
+
+    return { ok: true, completionReason: reason, finalRound: data.current_round, state: data };
+}
+
+/**
+ * Persist a verified future eligibility date.
+ *
+ * WHAT THIS BUYS. The daily preflight reads next_eligible_date BEFORE launching
+ * Browserbase. A client waiting on a free report that CreditHero has already
+ * told us arrives on a specific date should not cost a browser session every
+ * morning until then.
+ *
+ * NARROW BY CONSTRUCTION: one field. It cannot touch current_round,
+ * processing_state, process_complete, or any lock column — they are absent from
+ * the update, not guarded against.
+ *
+ * Rejects anything that is not a real YYYY-MM-DD string, so an unreadable or
+ * absent date can never overwrite a known one.
+ */
+export async function recordNextEligibleDate(crcClientId, isoDateString) {
+    const id = String(crcClientId);
+
+    if (!/^\d+$/.test(id)) {
+        throw new Error(`recordNextEligibleDate: invalid crcClientId "${crcClientId}".`);
+    }
+
+    if (typeof isoDateString !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(isoDateString)) {
+        return { ok: false, reason: "invalid_date_omitted" };
+    }
+
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+        .from(CLIENT_STATE_TABLE)
+        .update({ next_eligible_date: isoDateString })
+        .eq("crc_client_id", id)
+        .select("crc_client_id, next_eligible_date")
+        .maybeSingle();
+
+    if (error) {
+        throw new Error(`Failed to record next_eligible_date: ${error.message}`);
+    }
+
+    if (!data) return { ok: false, reason: "client_state_row_not_found" };
+
+    return { ok: true, nextEligibleDate: data.next_eligible_date };
+}
+
+/**
+ * PURE. Should this client be opened in a browser today, given stored memory?
+ *
+ * Answers the daily-preflight question without touching Playwright, CRC or
+ * CreditHero — so it is fully unit-testable and cannot itself cause a session.
+ *
+ * @param {object|null} state  a client_state row, or null when none exists
+ * @param {string} todayIso    YYYY-MM-DD
+ */
+export const PREFLIGHT = Object.freeze({
+    PROCEED: "proceed",
+    SKIP_COMPLETE: "skip_complete",
+    SKIP_NOT_YET_ELIGIBLE: "skip_not_yet_eligible",
+});
+
+export function decideDailyPreflight(state, todayIso) {
+    if (!state) {
+        // No memory yet: a brand-new client. Nothing stored can justify skipping.
+        return { action: PREFLIGHT.PROCEED, reason: "No stored client_state; treating as a new client." };
+    }
+
+    if (state.process_complete === true || state.processing_state === "complete") {
+        return {
+            action: PREFLIGHT.SKIP_COMPLETE,
+            reason: "Client is Complete. Terminal — excluded from daily processing.",
+            finalRound: state.current_round ?? null,
+        };
+    }
+
+    const next = state.next_eligible_date ?? null;
+
+    // ISO dates compare correctly as strings; no Date parsing needed. An
+    // unreadable value is treated as absent rather than as a licence to skip.
+    if (typeof next === "string" && /^\d{4}-\d{2}-\d{2}$/.test(next) && next > todayIso) {
+        return {
+            action: PREFLIGHT.SKIP_NOT_YET_ELIGIBLE,
+            reason:
+                `A verified eligibility date of ${next} has not arrived (today ${todayIso}). ` +
+                `No CreditHero session is opened; the client is re-evaluated on the next daily run.`,
+            nextEligibleDate: next,
+        };
+    }
+
+    return {
+        action: PREFLIGHT.PROCEED,
+        reason: next
+            ? `Stored eligibility date ${next} has arrived. Verifying live state.`
+            : "No reliable future eligibility date stored. Verifying live state.",
+        nextEligibleDate: next,
+    };
+}

@@ -11,7 +11,11 @@
 import { runMilestone7 } from "./milestone7.js";
 import { runInactiveWorkflow } from "./inactiveWorkflow.js";
 import { statusOnlyUpdate } from "./statusOnlyUpdate.js";
-import { recordCreditHeroState } from "./clientMemory.js";
+import {
+    recordCreditHeroState, readClientState, decideDailyPreflight, PREFLIGHT,
+    advanceRoundAfterDelivery, markProcessComplete, recordNextEligibleDate,
+    FINAL_ROUND,
+} from "./clientMemory.js";
 import { runMilestone8 } from "./milestone8.js";
 
 function findCrcClientId(value, seen = new Set()) {
@@ -57,7 +61,7 @@ function findCrcClientId(value, seen = new Set()) {
  *                     itself reported success (recordCreditHeroState().ok
  *                     === true). Not merely whether a write was attempted.
  */
-async function routeToWaitingForBureau(clientName, crcClientId, nowIso) {
+async function routeToWaitingForBureau(clientName, crcClientId, nowIso, nextFreeReportAt = null) {
     const status = await statusOnlyUpdate({
         clientName, crcClientId,
         targetStatus: "Waiting For Bureau",
@@ -79,9 +83,53 @@ async function routeToWaitingForBureau(clientName, crcClientId, nowIso) {
 
             memoryWritten = write?.ok === true;
         }
+
+        // CLOSE THE LOOP FOR TOMORROW. When CreditHero stated the date the next
+        // free report becomes available, store it so the daily preflight can
+        // short-circuit until then instead of opening a session every morning.
+        // recordNextEligibleDate rejects anything that is not a real YYYY-MM-DD,
+        // so a missing or unreadable date never overwrites a known one.
+        if (nextFreeReportAt) {
+            await recordNextEligibleDate(String(crcClientId), nextFreeReportAt).catch(() => {});
+        }
     }
 
     return { status, memoryWritten };
+}
+
+/** The exact CRC dropdown labels. Confirmed against the live Status control. */
+const CRC_STATUS_COMPLETE = "Complete";
+
+/**
+ * Set CRC to the exact label "Complete", then mark memory complete.
+ *
+ * ORDER IS DELIBERATE. CRC first, memory second, and memory ONLY on a confirmed
+ * CRC write. A client marked complete in Supabase but still showing an active
+ * status in CRC would drop out of the daily queue while every human-facing
+ * surface said processing was ongoing.
+ */
+async function routeToComplete(clientName, crcClientId, reason, opts = {}) {
+    const status = await statusOnlyUpdate({
+        clientName, crcClientId,
+        targetStatus: CRC_STATUS_COMPLETE,
+        blockReason: reason,
+    });
+
+    let memory = { ok: false, reason: "crc_status_not_confirmed" };
+
+    if (status.statusUpdated === true) {
+        memory = await markProcessComplete(crcClientId, reason, opts).catch((error) => ({
+            ok: false, reason: "complete_write_failed", detail: error.message,
+        }));
+
+        if (status.statusWritten) {
+            await recordCreditHeroState(String(crcClientId), {
+                crc_client_status: status.statusWritten,
+            }).catch(() => {});
+        }
+    }
+
+    return { status, memory };
 }
 
 export async function runProductionClient(data = {}) {
@@ -116,6 +164,64 @@ export async function runProductionClient(data = {}) {
             stage: "authorization",
             blockedReason: "client_name_required",
         };
+    }
+
+    // ---- DAILY PREFLIGHT: SUPABASE BEFORE BROWSERBASE --------------------
+    //
+    // runMilestone7 -> runMilestone6 -> launchBrowser. Everything below this
+    // block costs a Browserbase session, a CRC login and a CreditHero page load.
+    // So the questions that stored memory can already answer are asked HERE,
+    // before any of that is spent:
+    //
+    //   * Is the client Complete? Terminal — nothing to do.
+    //   * Is there a VERIFIED future next_eligible_date? Then CreditHero has
+    //     already told us when the next free report arrives, and asking it again
+    //     today cannot change the answer.
+    //
+    // The client is still EVALUATED every day, as required — it is queued,
+    // examined and reported on. What it does not do is open a browser to
+    // rediscover a date we already hold.
+    //
+    // FAIL OPEN, DELIBERATELY. No stored row, an unreadable date, or a failed
+    // read all PROCEED to live verification. Only a positively parsed future
+    // date short-circuits, so a memory problem can never silently park a client.
+    const preflightId =
+        data.crcClientId != null && /^\d+$/.test(String(data.crcClientId).trim())
+            ? String(data.crcClientId).trim()
+            : null;
+
+    if (preflightId) {
+        const storedState = await readClientState(preflightId).catch(() => null);
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const preflight = decideDailyPreflight(storedState, todayIso);
+
+        if (preflight.action === PREFLIGHT.SKIP_COMPLETE) {
+            return {
+                ...base, ok: true, stage: "complete_terminal",
+                outcome: "ALREADY_COMPLETE",
+                crcClientId: preflightId,
+                finalRound: preflight.finalRound ?? null,
+                preflight,
+                browserOpened: false,
+                m7: null, m8: null,
+            };
+        }
+
+        if (preflight.action === PREFLIGHT.SKIP_NOT_YET_ELIGIBLE) {
+            return {
+                ...base, ok: true, stage: "waiting_not_yet_eligible",
+                outcome: "WAITING_FOR_STORED_ELIGIBILITY_DATE",
+                blockedReason: null,
+                crcClientId: preflightId,
+                nextEligibleDate: preflight.nextEligibleDate,
+                preflight,
+                // The attestation that matters: no session was opened.
+                browserOpened: false,
+                creditHeroOpened: false,
+                acquisitionIntentCreated: false,
+                m7: null, m8: null,
+            };
+        }
     }
 
     const m7 = await runMilestone7({ clientName });
@@ -282,7 +388,9 @@ export async function runProductionClient(data = {}) {
             };
         }
 
-        const { status, memoryWritten } = await routeToWaitingForBureau(clientName, routeCrcId, nowIso);
+        const { status, memoryWritten } = await routeToWaitingForBureau(
+            clientName, routeCrcId, nowIso, capture?.nextFreeReportAvailableAt ?? null
+        );
 
         return {
             ...base, ok: status.statusUpdated,
@@ -367,7 +475,9 @@ export async function runProductionClient(data = {}) {
             };
         }
 
-        const { status, memoryWritten } = await routeToWaitingForBureau(clientName, crcClientId, nowIso);
+        const { status, memoryWritten } = await routeToWaitingForBureau(
+            clientName, crcClientId, nowIso, successCapture?.nextFreeReportAvailableAt ?? null
+        );
 
         return {
             ...base, ok: status.statusUpdated,
@@ -420,6 +530,20 @@ export async function runProductionClient(data = {}) {
     const withheldCount = Array.isArray(m7.withheld) ? m7.withheld.length : 0;
 
     if (letterCount === 0 && withheldCount === 0) {
+        // ---- APPROVED COMPLETION ROUTE 1: nothing left to dispute ---------
+        //
+        // Gated on operationalRoutingApproved exactly like every other CRC
+        // write in this module. Unapproved runs report the proposed action and
+        // change nothing.
+        let completion = null;
+
+        if (routingApproved) {
+            completion = await routeToComplete(
+                clientName, crcClientId, "no_disputable_items",
+                { negativeItemsRemaining: 0 }
+            );
+        }
+
         return {
             ...base,
             ok: true,
@@ -428,6 +552,11 @@ export async function runProductionClient(data = {}) {
             blockedReason: null,
             failureReason: null,
             crcClientId,
+            proposedAction: routingApproved ? null : "SET_COMPLETE",
+            completionReason: "no_disputable_items",
+            completion,
+            statusUpdated: completion?.status?.statusUpdated === true,
+            processComplete: completion?.memory?.ok === true,
             m7Summary: {
                 success: m7.success !== false,
                 lettersOk: m7LettersOk,
@@ -481,12 +610,79 @@ export async function runProductionClient(data = {}) {
         }).catch(() => {});
     }
 
+    // ---- ROUND ADVANCEMENT / COMPLETION ----------------------------------
+    //
+    // FIRES ONLY ON A CONFIRMED SUCCESSFUL DELIVERY. The condition below is the
+    // full delivery proof, not a summary of it:
+    //
+    //   submitApproved              — a dry run never advances anything
+    //   messageSuccessConfirmed     — CRC confirmed the secure message was sent
+    //   deliveryMarkerPersisted     — the durable marker survived the write
+    //   statusUpdateResult.ok       — the CRC status change was confirmed
+    //   !duplicatePrevented         — a blocked resend is not a delivery
+    //
+    // Diagnostic runs cannot reach here at all: the queue calls runMilestone7
+    // directly for those and never invokes this module.
+    //
+    // A SECOND, INDEPENDENT GUARD LIVES IN THE DATABASE. Both writers are
+    // compare-and-swap against current_round AND processing_state === 'waiting',
+    // a state only markDeliveryCompleted() produces. So even if this condition
+    // were wrong, a failed, blocked, interrupted or withheld run still cannot
+    // advance a round — the row does not match.
+    const deliveryConfirmed =
+        submitApproved &&
+        duplicatePrevented !== true &&
+        m8?.messageSuccessConfirmed === true &&
+        m8?.deliveryMarkerPersisted === true &&
+        m8?.statusUpdateResult?.ok === true;
+
+    let roundOutcome = null;
+    const deliveredRound = Number(m8?.round);
+
+    if (deliveryConfirmed && Number.isInteger(deliveredRound) && deliveredRound >= 1) {
+        if (deliveredRound >= FINAL_ROUND) {
+            // ---- APPROVED COMPLETION ROUTE 2: final round delivered -------
+            const completion = routingApproved
+                ? await routeToComplete(clientName, crcClientId, "final_round_delivered", {
+                    expectedRound: deliveredRound,
+                })
+                : null;
+
+            roundOutcome = {
+                action: "completed_final_round",
+                deliveredRound,
+                completionReason: "final_round_delivered",
+                completion,
+                processComplete: completion?.memory?.ok === true,
+                crcStatusWritten: completion?.status?.statusWritten ?? null,
+                proposedAction: routingApproved ? null : "SET_COMPLETE",
+            };
+        } else {
+            // Rounds 1-5: advance and enter the waiting lifecycle. The writer
+            // sets next_eligible_date 31 days out, which is what the daily
+            // preflight reads to avoid re-disputing off the same report
+            // tomorrow.
+            const advanced = await advanceRoundAfterDelivery(crcClientId, deliveredRound)
+                .catch((error) => ({ ok: false, reason: "round_advance_failed", detail: error.message }));
+
+            roundOutcome = {
+                action: "advanced_round",
+                deliveredRound,
+                newRound: advanced?.newRound ?? null,
+                roundAdvanced: advanced?.ok === true,
+                advanceResult: advanced,
+            };
+        }
+    }
+
     return {
         ...base,
         crcClientId,
         ok,
         stage: "complete",
         duplicatePrevented,
+        deliveryConfirmed,
+        roundOutcome,
         m7Summary: {
             success: m7.success !== false,
             lettersOk: m7LettersOk,

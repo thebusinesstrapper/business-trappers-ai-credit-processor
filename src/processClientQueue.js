@@ -28,13 +28,34 @@ const SYSTEM_FAILURE_CODES = new Set([
 ]);
 const MAX_RETAINED_RESULTS = 500;
 
-const DEFAULT_ELIGIBLE_STATUSES = Object.freeze([
-    "Client",
-    "Ready for Processing",
-    // Inactive clients are RECHECKED daily, not excluded. This is a monitored
-    // waiting state, not a terminal one — the whole point is to notice when
-    // monitoring comes back.
-    "Credit Monitoring Inactive",
+/**
+ * ===========================================================================
+ * ELIGIBILITY IS A DENYLIST, NOT AN ALLOWLIST.
+ *
+ * This was previously an allowlist of three statuses, which silently excluded
+ * "Waiting For Bureau", "Manual Review Required", "AI Processing" and anything
+ * else from daily evaluation. A client parked in Manual Review Required was
+ * never looked at again by the processor.
+ *
+ * APPROVED RULE: every active client is evaluated every day. Exactly two
+ * statuses are terminal or paused, and only those two are excluded:
+ *
+ *   Complete   — terminal. The dispute lifecycle finished.
+ *   Suspended  — a REVERSIBLE manual pause. Excluded from processing, but its
+ *                round, dates, memory and history are left completely intact
+ *                and it is never converted to Complete.
+ *
+ * Both labels are exact, confirmed against the live CRC Status dropdown.
+ *
+ * Everything else — including Waiting For Bureau — stays eligible. Waiting For
+ * Bureau clients are cheap to evaluate because processProductionClient's daily
+ * preflight reads next_eligible_date from Supabase and short-circuits BEFORE
+ * launching a browser when a verified future date has not arrived.
+ * ===========================================================================
+ */
+const DEFAULT_EXCLUDED_STATUSES = Object.freeze([
+    "Complete",
+    "Suspended",
 ]);
 
 const KNOWN_STATUSES = Object.freeze([
@@ -69,7 +90,7 @@ function publicJob(job) {
         diagnosticOnly: job.diagnosticOnly === true,
         inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
         operationalRoutingApproved: job.operationalRoutingApproved === true,
-        eligibleStatuses: job.eligibleStatuses,
+        excludedStatuses: job.excludedStatuses,
         maxClients: job.maxClients,
         delayMs: job.delayMs,
         suppliedClientCount: job.clientNames.length,
@@ -229,7 +250,7 @@ async function nextPageButton(page) {
     return null;
 }
 
-async function readEligibleQueue(eligibleStatuses) {
+async function readEligibleQueue(excludedStatuses) {
     const { browser, page } = await launchBrowser();
 
     try {
@@ -264,9 +285,12 @@ async function readEligibleQueue(eligibleStatuses) {
             await page.waitForTimeout(1500);
         }
 
-        const eligibleSet = new Set(eligibleStatuses.map(normalizedKey));
+        // DENYLIST. A row is eligible unless its status is explicitly excluded.
+        // A row whose status could not be read is NOT eligible — we do not
+        // process a client whose CRC status we could not positively observe.
+        const excludedSet = new Set(excludedStatuses.map(normalizedKey));
         const eligible = allRows.filter(
-            (row) => row.status && eligibleSet.has(normalizedKey(row.status))
+            (row) => row.status && !excludedSet.has(normalizedKey(row.status))
         );
 
         // Duplicate names cannot be safely processed by name search. Withhold all
@@ -291,6 +315,8 @@ async function readEligibleQueue(eligibleStatuses) {
                 queue.push({
                     clientName: row.clientName,
                     status: row.status,
+                    // Carried so processProductionClient can run its Supabase
+                    // preflight BEFORE launching a browser.
                     crcClientId: row.crcClientId ?? null,
                 });
             }
@@ -722,10 +748,28 @@ function classifyResult(result) {
     // nothing about the notice.
     if (
         result?.ok === true &&
-        result?.stage === "credit_hero_inactive" &&
+        // BOTH stages route through runInactiveWorkflow() and both set CRC to
+        // "Credit Monitoring Inactive". Matching only "credit_hero_inactive"
+        // meant every PAYMENT_REQUIRED client — Brittney Jones among them — was
+        // counted as generic manual review despite its CRC status having been
+        // confirmed written. The stage string differed; the outcome did not.
+        (result?.stage === "credit_hero_inactive" || result?.stage === "payment_required") &&
         result?.inactive?.statusUpdated === true
     ) {
         return "creditMonitoringInactive";
+    }
+
+    // Preflight short-circuit: a verified future eligibility date had not
+    // arrived, so no browser was opened. A successful waiting outcome, not a
+    // manual-review condition.
+    if (result?.ok === true && result?.stage === "waiting_not_yet_eligible") {
+        return "routedWaiting";
+    }
+
+    // Terminal. Reported so a Complete client appearing in a supplied-name run
+    // is visibly skipped rather than silently counted as manual review.
+    if (result?.ok === true && result?.stage === "complete_terminal") {
+        return "alreadyComplete";
     }
 
     const systemFailureCodes = SYSTEM_FAILURE_CODES;
@@ -843,7 +887,7 @@ async function runJob(job) {
             job.summary.eligibleRows = job.clientNames.length;
             job.queue = uniqueQueue.slice(0, job.maxClients);
         } else {
-            const scan = await readEligibleQueue(job.eligibleStatuses);
+            const scan = await readEligibleQueue(job.excludedStatuses);
 
             job.summary.scannedRows = scan.scannedRows;
             job.summary.eligibleRows = scan.eligibleRows;
@@ -923,6 +967,10 @@ async function runJob(job) {
                 } else {
                     result = await runProductionClient({
                         clientName: item.clientName,
+                        // Enables the Supabase preflight to run BEFORE a browser
+                        // is launched. Null on a supplied-name run, where the
+                        // preflight simply does not apply.
+                        crcClientId: item.crcClientId ?? null,
                         processingApproved: true,
                         submitApproved: job.submitApproved,
                         inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
@@ -950,6 +998,7 @@ async function runJob(job) {
             if (classification === "fatal") job.summary.failed += 1;
             if (classification === "diagnosticReady") job.summary.diagnosticReady += 1;
             if (classification === "diagnosticBlocked") job.summary.diagnosticBlocked += 1;
+            if (classification === "alreadyComplete") job.summary.alreadyComplete += 1;
 
             // Aggregate by the values the engines ACTUALLY returned. No category
             // is invented: whatever code/stage arrives becomes the key, and
@@ -1073,7 +1122,58 @@ async function runJob(job) {
     }
 }
 
+/**
+ * Statuses a job holds while it is still doing work. A job in any of these has
+ * a live browser session, or is about to open one.
+ */
+const ACTIVE_JOB_STATUSES = Object.freeze([
+    "queued",
+    "scanning_crc",
+    "loading_supplied_queue",
+    "processing",
+]);
+
+/** The currently running job, if any. */
+function findActiveJob() {
+    for (const job of jobs.values()) {
+        if (ACTIVE_JOB_STATUSES.includes(job.status)) return job;
+    }
+
+    return null;
+}
+
 export function startClientQueue(data = {}) {
+    // ---- OVERLAPPING-RUN PROTECTION --------------------------------------
+    //
+    // Every call previously created a new background job unconditionally. Two
+    // concurrent runs — an n8n retry, a double-fired schedule, a manual kick
+    // during the daily window — would process the same 160 clients twice at the
+    // same time.
+    //
+    // The delivery lock would still prevent duplicate LETTERS, and that
+    // protection is untouched. But it does not prevent two sessions racing to
+    // write the same CRC status, two inactive notices reaching one client, or
+    // two acquisition attempts against one entitlement. Concurrency has to be
+    // stopped here, not absorbed downstream.
+    //
+    // CHECKED FIRST, before approval or any other validation, so the answer is
+    // the same regardless of what else the request contains.
+    const active = findActiveJob();
+
+    if (active) {
+        return {
+            ok: false,
+            blockedReason: "queue_already_running",
+            activeJobId: active.jobId,
+            activeStatus: active.status,
+            activeStartedAt: active.startedAt ?? active.createdAt,
+            statusPath: `/process-client-queue/${active.jobId}`,
+            note:
+                "A queue run is already in progress. Poll statusPath for it rather than " +
+                "starting a second run. Nothing was started.",
+        };
+    }
+
     if (data.processingApproved !== true) {
         return {
             ok: false,
@@ -1103,9 +1203,15 @@ export function startClientQueue(data = {}) {
         };
     }
 
-    const eligibleStatuses = Array.isArray(data.eligibleStatuses)
-        ? data.eligibleStatuses.map(normalize).filter(Boolean)
-        : [...DEFAULT_ELIGIBLE_STATUSES];
+    // Denylist. A caller may extend it; the two defaults are always applied so
+    // a malformed request can never make Complete or Suspended eligible.
+    const suppliedExclusions = Array.isArray(data.excludedStatuses)
+        ? data.excludedStatuses.map(normalize).filter(Boolean)
+        : [];
+
+    const excludedStatuses = [
+        ...new Set([...DEFAULT_EXCLUDED_STATUSES, ...suppliedExclusions]),
+    ];
 
     const maxClients =
         Number.isInteger(Number(data.maxClients)) && Number(data.maxClients) > 0
@@ -1157,7 +1263,7 @@ export function startClientQueue(data = {}) {
         // inactive workflow nor operational routing can be armed inside one.
         inactiveWorkflowApproved: diagnosticOnly ? false : data.inactiveWorkflowApproved === true,
         operationalRoutingApproved: diagnosticOnly ? false : data.operationalRoutingApproved === true,
-        eligibleStatuses,
+        excludedStatuses,
         maxClients,
         delayMs,
         clientNames,
@@ -1177,6 +1283,7 @@ export function startClientQueue(data = {}) {
             failed: 0,
             diagnosticReady: 0,
             diagnosticBlocked: 0,
+            alreadyComplete: 0,
             diagnosticGroups: {},
             diagnosticTopLevelGroups: {},
             diagnosticAttemptReasons: {},
