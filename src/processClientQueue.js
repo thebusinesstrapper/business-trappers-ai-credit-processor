@@ -567,6 +567,20 @@ function classifyResult(result) {
         return "routedWaiting";
     }
 
+    // Successful NO_ACTIONABLE_DISPUTE_ITEMS outcome: M7 succeeded but found
+    // nothing currently within processing scope to dispute (letterCount:0,
+    // withheldCount:0 — e.g. no negative accounts, or the only negative item
+    // present is intentionally out of scope such as a bankruptcy). No CRC
+    // status change occurs on this path, and m8 stays null by construction —
+    // see processProductionClient.js, which never calls runMilestone8() for
+    // stage "no_actionable_dispute_items". This is a genuine successful
+    // outcome, not a manual-review condition, and must not fall into the
+    // generic manualReview bucket below — mirrors the routedWaiting
+    // classification immediately above.
+    if (result?.ok === true && result?.stage === "no_actionable_dispute_items" && result?.m8 == null) {
+        return "noActionableItems";
+    }
+
     const systemFailureCodes = SYSTEM_FAILURE_CODES;
 
     const code =
