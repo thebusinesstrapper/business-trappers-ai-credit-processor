@@ -50,6 +50,12 @@ function findCrcClientId(value, seen = new Set()) {
  * Never touches M8, current_round, or letters. Persists crc_client_status
  * only when statusOnlyUpdate() reports both statusUpdated === true AND a
  * non-blank statusWritten — never the requested targetStatus as a substitute.
+ *
+ * @returns {Promise<{status: object, memoryWritten: boolean}>}
+ *   status         — the unmodified report returned by statusOnlyUpdate()
+ *   memoryWritten  — true ONLY when the crc_client_status Supabase write
+ *                     itself reported success (recordCreditHeroState().ok
+ *                     === true). Not merely whether a write was attempted.
  */
 async function routeToWaitingForBureau(clientName, crcClientId, nowIso) {
     const status = await statusOnlyUpdate({
@@ -58,6 +64,8 @@ async function routeToWaitingForBureau(clientName, crcClientId, nowIso) {
         blockReason: "WAITING_FOR_FREE_REPORT",
     });
 
+    let memoryWritten = false;
+
     if (status.statusUpdated) {
         await recordCreditHeroState(String(crcClientId), {
             block_reason: "WAITING_FOR_FREE_REPORT",
@@ -65,13 +73,15 @@ async function routeToWaitingForBureau(clientName, crcClientId, nowIso) {
         }).catch(() => {});
 
         if (status?.statusUpdated === true && status?.statusWritten) {
-            await recordCreditHeroState(String(crcClientId), {
+            const write = await recordCreditHeroState(String(crcClientId), {
                 crc_client_status: status.statusWritten,
-            }).catch(() => {});
+            }).catch(() => null);
+
+            memoryWritten = write?.ok === true;
         }
     }
 
-    return status;
+    return { status, memoryWritten };
 }
 
 export async function runProductionClient(data = {}) {
@@ -272,13 +282,14 @@ export async function runProductionClient(data = {}) {
             };
         }
 
-        const status = await routeToWaitingForBureau(clientName, routeCrcId, nowIso);
+        const { status, memoryWritten } = await routeToWaitingForBureau(clientName, routeCrcId, nowIso);
 
         return {
             ...base, ok: status.statusUpdated,
             stage: "waiting_for_free_report",
             blockedReason: "waiting_for_free_report",
             classification, crcClientId: routeCrcId,
+            memoryWritten,
             status, m7,
         };
     }
@@ -356,7 +367,7 @@ export async function runProductionClient(data = {}) {
             };
         }
 
-        const status = await routeToWaitingForBureau(clientName, crcClientId, nowIso);
+        const { status, memoryWritten } = await routeToWaitingForBureau(clientName, crcClientId, nowIso);
 
         return {
             ...base, ok: status.statusUpdated,
@@ -366,6 +377,7 @@ export async function runProductionClient(data = {}) {
             eligibilityHint,
             lastReportDate: successCapture?.lastReportDate ?? null,
             crcClientId,
+            memoryWritten,
             status, m7,
         };
     }

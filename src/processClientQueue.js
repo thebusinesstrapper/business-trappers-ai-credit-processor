@@ -554,6 +554,19 @@ function classifyResult(result) {
         return "sent";
     }
 
+    // Successful WAITING_FOR_FREE_REPORT routing: CRC was set to "Waiting For
+    // Bureau" via the existing status-only helper, and no delivery was
+    // attempted (m8 stays null on this path by construction — see
+    // processProductionClient.js, which never calls runMilestone8() for
+    // stage "waiting_for_free_report"). This is a genuine successful
+    // operational-routing outcome, not a manual-review condition, and it must
+    // not fall into the generic manualReview bucket below. It is also not
+    // "sent" (no message was submitted) and not "fatal" (no system failure
+    // occurred), so it needs its own classification.
+    if (result?.ok === true && result?.stage === "waiting_for_free_report" && result?.m8 == null) {
+        return "routedWaiting";
+    }
+
     const systemFailureCodes = SYSTEM_FAILURE_CODES;
 
     const code =
