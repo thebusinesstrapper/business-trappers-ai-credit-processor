@@ -42,6 +42,28 @@ export function isFreeRowText(text) {
     return FREE_BUREAU_RE.test(t) && FREE_WORD_RE.test(t) && !PRICE_RE.test(t);
 }
 
+/**
+ * THE TWO PURCHASE OPTION IDS, OBSERVED LIVE (Discovery Spike, 2026-07-12).
+ *
+ * These were ALREADY IMPORTED by acquisitionDecision.js and were never exported
+ * here, which made that module impossible to load at all:
+ *
+ *   SyntaxError: The requested module './orderPageReader.js' does not provide
+ *                an export named 'FREE_OPTION_ID'
+ *
+ * The module was dormant (nothing imported it), so the fault was invisible until
+ * the acquisition path was wired up. Defining them here — beside the reader that
+ * observes them — keeps ONE source of truth for the option identity.
+ *
+ * NOTE WHAT THESE ARE NOT. They are not sufficient on their own to identify the
+ * free option. readOrderPageOptions() below requires the id AND the row's own
+ * FREE/3-bureau text AND the absence of a price before it will report cost 0.
+ * An id that drifts therefore causes a REFUSAL (via unaccounted_option_ids ->
+ * manual review), never a wrong click.
+ */
+export const FREE_OPTION_ID = "productBuyNew_01";
+export const PAID_OPTION_ID = "productBuyNew_03";
+
 // Availability date, e.g. "Available 8/2/2026" -> "2026-08-02".
 const AVAILABLE_DATE_RE = /Available\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/i;
 
@@ -243,4 +265,131 @@ export async function readOrderPage(page) {
         result.eligibilityHint === "ELIGIBLE_EXISTING_REPORT" && !result.freeReportEnabled;
 
     return result;
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * OrderPageState ADAPTER — for the Report Acquisition Decision Engine.
+ *
+ * WHY THIS IS SEPARATE FROM readOrderPage().
+ *
+ * readOrderPage() answers a CLASSIFICATION question ("is this client waiting, or
+ * is a free report available?") and its output shape is consumed by milestone6's
+ * existing WAITING_FOR_FREE_REPORT / FREE_REPORT_AVAILABLE branches. It is
+ * untouched, because changing it would change those proven branches.
+ *
+ * decideAcquisition() asks a completely different question — "may we spend this
+ * client's entitlement?" — and requires a per-option structure that
+ * readOrderPage() does not produce and never did: it locates the free row by
+ * TEXT and never reads an option id at all.
+ *
+ * So this is a second reader over the same page, emitting the shape the decision
+ * engine's preconditions are written against. Two readers, same page, different
+ * questions.
+ *
+ * READ-ONLY, exactly like readOrderPage(): locator, count, getAttribute,
+ * textContent, innerText, isDisabled, isVisible. No click, check, selectOption,
+ * fill, press, or goto appears anywhere in this function.
+ *
+ * COST IS AFFIRMATIVE OR NULL. A row is priced 0 ONLY when it positively reads
+ * as the free 3-bureau row AND carries no dollar amount. A row with a dollar
+ * amount is priced at that amount. Anything else is null — "we could not tell" —
+ * which decideAcquisition() treats as unpriced and routes to manual review.
+ * Absence of evidence of cost is never evidence of no cost.
+ * ---------------------------------------------------------------------------
+ *
+ * @param {import('playwright').Page} page  a page already on the order page
+ * @returns {Promise<{page_read: boolean, options: object[],
+ *   unaccounted_option_ids: string[], evidence: string[]}>}
+ */
+export async function readOrderPageOptions(page) {
+    const state = {
+        page_read: false,
+        options: [],
+        unaccounted_option_ids: [],
+        evidence: [],
+    };
+
+    const known = new Set([FREE_OPTION_ID, PAID_OPTION_ID]);
+
+    for (const frame of page.frames()) {
+        const radios = frame.locator('input[type="radio"]');
+        const count = await radios.count().catch(() => 0);
+
+        if (count === 0) continue;
+
+        for (let i = 0; i < count; i += 1) {
+            const radio = radios.nth(i);
+
+            // Identity: prefer the id attribute, fall back to value. Either may
+            // be null on a control we do not recognise — which is itself the
+            // finding, not an error.
+            const id =
+                (await radio.getAttribute("id").catch(() => null)) ??
+                (await radio.getAttribute("value").catch(() => null));
+
+            // The row that owns this radio, for text/price/availability.
+            const row = radio
+                .locator("xpath=ancestor-or-self::*[contains(@class,'order-item')][1]")
+                .first();
+
+            const hasRow = (await row.count().catch(() => 0)) > 0;
+            const node = hasRow ? row : radio;
+            const rowText =
+                (await node.textContent({ timeout: READ_TIMEOUT }).catch(() => "")) || "";
+
+            // ---- Disabled: ANY signal counts. Enabled must be positive. ----
+            const disabledAttr = await radio.getAttribute("disabled").catch(() => null);
+            const isDisabled = await radio.isDisabled().catch(() => true);
+            const containerClass = (await node.getAttribute("class").catch(() => "")) || "";
+            const disabled =
+                disabledAttr !== null || isDisabled === true || /\bdisabled\b/.test(containerClass);
+
+            const visible = await radio.isVisible().catch(() => false);
+
+            // ---- Cost: affirmative, or null. -------------------------------
+            const price = parsePrice(rowText);
+            let cost = null;
+            let costEvidence = null;
+
+            if (price !== null) {
+                cost = price;
+                costEvidence = `dollar amount ${price} read from the option row`;
+            } else if (isFreeRowText(rowText)) {
+                cost = 0;
+                costEvidence =
+                    "row positively reads as the 3-bureau FREE option and carries no dollar amount";
+            } else {
+                costEvidence = "no dollar amount and no positive FREE identification";
+            }
+
+            state.options.push({
+                id: id ?? null,
+                cost,
+                cost_evidence: costEvidence,
+                disabled,
+                visible,
+                available_from: parseAvailableDate(rowText),
+            });
+
+            if (!id || !known.has(id)) {
+                state.unaccounted_option_ids.push(id ?? "(no id attribute)");
+            }
+        }
+
+        // Radios found in this frame: this is the order form. Stop here rather
+        // than merging controls across frames into one option set.
+        if (state.options.length > 0) {
+            state.page_read = true;
+            state.evidence.push(`options_read:${state.options.length}`);
+            break;
+        }
+    }
+
+    if (!state.page_read) state.evidence.push("no_radio_options_found");
+    if (state.unaccounted_option_ids.length > 0) {
+        state.evidence.push(`unaccounted:${state.unaccounted_option_ids.length}`);
+    }
+
+    return state;
 }

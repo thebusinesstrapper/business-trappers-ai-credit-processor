@@ -125,6 +125,83 @@ async function clickAndFollow(page, context) {
     return { page, openedInNewTab: false };
 }
 
+/**
+ * ---------------------------------------------------------------------------
+ * IS THIS CONTROL ACTUALLY ACTIONABLE?
+ *
+ * THE PROBLEM THIS SOLVES. A client who never enrolled can be shown a GREY,
+ * LOCKED "View CreditHeroScore Account" link: the element exists, the text
+ * matches, it is visible, and it has no usable href. Playwright's isEnabled()
+ * reports it as ENABLED — that method reasons about form-control disabled state
+ * and knows nothing about an anchor with nowhere to go. So the click fires,
+ * nothing navigates, three attempts produce three identical failures, and the
+ * client is reported as CREDIT_HERO_UNAVAILABLE: a technical fault requiring
+ * manual review. The truth is simpler and not a fault at all — there is no
+ * account.
+ *
+ * WHY "NO HREF" IS NOT ON ITS OWN PROOF, AND MUST NOT BE TREATED AS PROOF.
+ *
+ * This codebase already documents (see getCreditHeroLink above, and
+ * openClient.js) that CRC renders HREF-LESS ANCHORS THAT WORK — they carry a
+ * JavaScript click handler instead. Treating "no href" alone as "disabled"
+ * would therefore declare working, paying clients inactive and message them
+ * about lapsed monitoring. That is the single most damaging error available
+ * here, and it is worse than the bug being fixed.
+ *
+ * So the signals are graded:
+ *
+ *   DEFINITIVE (any one is sufficient, and we do not even click):
+ *     aria-disabled="true"   — the page positively asserts it is disabled
+ *     disabled attribute     — likewise
+ *     pointer-events: none   — the page has made it structurally unclickable
+ *
+ *   CORROBORATING (never sufficient alone):
+ *     an <a> with no usable href — only meaningful once a click has ALSO been
+ *     shown not to navigate, on every attempt. That pairing is exactly what
+ *     separates a dead link from a working href-less one.
+ *
+ * Fails OPEN: an unreadable probe returns nothing definitive, and the ordinary
+ * click path proceeds unchanged.
+ * ---------------------------------------------------------------------------
+ */
+async function probeActionability(link) {
+    return link
+        .evaluate((el) => {
+            const style = window.getComputedStyle(el);
+            const href = el.getAttribute("href");
+            const trimmedHref = typeof href === "string" ? href.trim() : "";
+
+            return {
+                tag: el.tagName.toLowerCase(),
+                // "#" and "javascript:void(0)" are placeholders, not destinations.
+                hasUsableHref:
+                    trimmedHref !== "" &&
+                    trimmedHref !== "#" &&
+                    !/^javascript:\s*void/i.test(trimmedHref),
+                ariaDisabled: el.getAttribute("aria-disabled") === "true",
+                hasDisabledAttribute: el.hasAttribute("disabled"),
+                pointerEventsNone: style.pointerEvents === "none",
+            };
+        })
+        .catch(() => null);
+}
+
+/** A signal the page itself asserts. Sufficient on its own. */
+function definitivelyDisabled(probe) {
+    if (!probe) return null;
+
+    if (probe.ariaDisabled) return 'aria-disabled="true"';
+    if (probe.hasDisabledAttribute) return "disabled attribute";
+    if (probe.pointerEventsNone) return "computed pointer-events: none";
+
+    return null;
+}
+
+/** An anchor with nowhere to go. Corroborating only — never sufficient alone. */
+function anchorWithoutDestination(probe) {
+    return Boolean(probe && probe.tag === "a" && !probe.hasUsableHref);
+}
+
 const MAX_OPEN_ATTEMPTS = 3;
 
 // How long to wait for the dashboard to still be there, and for the control to
@@ -194,6 +271,30 @@ async function attemptOpen(page, context, attempt) {
         return { ok: false, reason: `The "${CREDIT_HERO_LABEL}" control is visible but not enabled.` };
     }
 
+    // ---- 4b. IS IT ACTUALLY ACTIONABLE? -----------------------------------
+    //
+    // isEnabled() has just returned true for a control that may have nowhere to
+    // go. Probe the DOM properties it does not consider.
+    const probe = await probeActionability(link);
+    const definitive = definitivelyDisabled(probe);
+
+    if (definitive) {
+        // The page ASSERTS this control is disabled. Do not click it — clicking
+        // a control the page has positively disabled tells us nothing we do not
+        // already know, and three of them look like an outage.
+        return {
+            ok: false,
+            nonActionable: true,
+            definitive: true,
+            probe,
+            reason:
+                `The "${CREDIT_HERO_LABEL}" control is present but positively disabled ` +
+                `(${definitive}). Not clicking it.`,
+        };
+    }
+
+    const noDestination = anchorWithoutDestination(probe);
+
     // ---- 5. CLICK AND FOLLOW ----------------------------------------------
     let landed;
 
@@ -219,9 +320,19 @@ async function attemptOpen(page, context, attempt) {
     // Still on CRC means the click did nothing. This is the silent no-op above,
     // and it is the failure mode a naive "did we click?" check cannot see.
     if (!landed.openedInNewTab && /app\.creditrepaircloud\.com/i.test(url)) {
+        // THE CORROBORATION PAIRS HERE, and only here. An anchor with no
+        // destination that ALSO did not navigate is a dead control. An anchor
+        // with no destination that DID navigate is CRC's ordinary href-less
+        // link working exactly as designed, and never reaches this branch.
         return {
             ok: false,
-            reason: `The click did not navigate — still on CRC (${url}). The control was likely not yet wired up.`,
+            nonActionable: noDestination,
+            definitive: false,
+            probe,
+            reason: noDestination
+                ? `The "${CREDIT_HERO_LABEL}" control has no usable href and the click did not ` +
+                  `navigate — still on CRC (${url}). The control is present but dead.`
+                : `The click did not navigate — still on CRC (${url}). The control was likely not yet wired up.`,
         };
     }
 
@@ -297,7 +408,12 @@ export async function openCreditHero(page, context) {
             };
         }
 
-        attempts.push({ attempt, reason: result.reason });
+        attempts.push({
+            attempt,
+            reason: result.reason,
+            nonActionable: result.nonActionable === true,
+            definitive: result.definitive === true,
+        });
 
         console.error(`Attempt ${attempt} failed: ${result.reason}`);
 
@@ -308,8 +424,43 @@ export async function openCreditHero(page, context) {
         }
     }
 
+    // ---- WAS THIS A DEAD CONTROL, OR A GENUINE FAILURE? --------------------
+    //
+    // EVERY attempt must agree. One attempt finding a dead control while another
+    // found a slow page is not agreement — it is an unstable dashboard, and that
+    // is a technical failure, not a business state.
+    //
+    // A single DEFINITIVE attempt is enough on its own: attemptOpen() returns
+    // immediately without clicking when the page asserts the control is
+    // disabled, so there is nothing further to corroborate.
+    const nonActionable =
+        attempts.length > 0 &&
+        (attempts.some((a) => a.definitive) || attempts.every((a) => a.nonActionable));
+
+    if (nonActionable) {
+        return {
+            ok: false,
+            // A BUSINESS STATE, NOT A FAULT. The caller maps this onto the
+            // existing CHS_NOT_ACTIVATED path — the same one the dashboard
+            // invite banner already produces — so a client whose control is
+            // dead is handled exactly like a client who never enrolled.
+            nonActionable: true,
+            error_code: "CHS_CONTROL_NOT_ACTIONABLE",
+            error:
+                `The "${CREDIT_HERO_LABEL}" control is present on the dashboard but is not ` +
+                `actionable: every attempt found it either positively disabled, or without a ` +
+                `usable destination and unable to navigate. This is an inactive CreditHeroScore ` +
+                `account, not a technical failure.`,
+            attempts: attempts.length,
+            attemptLog: attempts,
+            requiresHumanReview: false,
+            page: null,
+        };
+    }
+
     return {
         ok: false,
+        nonActionable: false,
         error_code: "CREDIT_HERO_UNAVAILABLE",
         error:
             `CreditHeroScore could not be opened after ${MAX_OPEN_ATTEMPTS} attempts. Each attempt ` +

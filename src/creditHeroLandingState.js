@@ -45,6 +45,33 @@ const PAYMENT_MARKERS = [
     /your last payment didn.?t go through/i,
     /please update your payment details/i,
     /payment_update\.asp/i,
+    // OBSERVED LIVE (Brittney Jones, production pilot): CreditHero also states
+    // the failure as a transaction line rather than a sentence —
+    //   "Payment of $24.99 failed on 6/14/2026"
+    // The amount and date vary, so both are matched as patterns rather than
+    // literals. This wording shares NO phrase with the sentence form above,
+    // which is why the previous single-phrase gate could not see it.
+    /payment of \$\s*[\d,]+(?:\.\d{2})?\s+failed\s+on\b/i,
+];
+
+/**
+ * THE DECISIVE PHRASES — either one is enough to be considered, neither is
+ * enough to CONCLUDE.
+ *
+ * A page is only classified PAYMENT_REQUIRED when one of these appears AND a
+ * second, independent signal corroborates it (another marker, or the
+ * payment_update form). That two-signal rule is unchanged; all that has widened
+ * is what counts as decisive, because CreditHero states the same fact two
+ * different ways.
+ *
+ * Order still matters overall: CREDENTIALS_OR_AUTH_FAILED is evaluated BEFORE
+ * this block, because its page also mentions payment ("payment information has
+ * already been updated") and a payment-first check would misfile it. Neither
+ * pattern below matches that sentence.
+ */
+const DECISIVE_PAYMENT_MARKERS = [
+    /your last payment didn.?t go through/i,
+    /payment of \$\s*[\d,]+(?:\.\d{2})?\s+failed\s+on\b/i,
 ];
 
 // A healthy member dashboard is recognized positively too, rather than assumed
@@ -134,12 +161,11 @@ export async function recognizeCreditHeroLanding(page) {
     const pay = countMatches(PAYMENT_MARKERS, text);
     const payForm = await hasLinkTo(page, "payment_update.asp").catch(() => false);
 
-    // Require the "didn't go through / update your payment" language plus a
-    // corroborating signal (button label or the payment_update form).
-    if (
-        /your last payment didn.?t go through/i.test(text) &&
-        (pay.n >= 2 || payForm)
-    ) {
+    // Require one DECISIVE failed-payment statement (either observed wording)
+    // plus a corroborating signal (another marker, or the payment_update form).
+    const decisive = DECISIVE_PAYMENT_MARKERS.some((re) => re.test(text));
+
+    if (decisive && (pay.n >= 2 || payForm)) {
         return {
             state: CH_LANDING_STATE.PAYMENT_REQUIRED,
             reason: "CreditHero reports the last payment failed and requires a payment update.",

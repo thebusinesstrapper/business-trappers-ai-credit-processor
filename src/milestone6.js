@@ -51,11 +51,21 @@ import { verifyIdentity } from "./clientIdentity.js";
 import { openCreditHero } from "./openCreditHero.js";
 import { recognizeDashboardBlocker } from "./importAuditState.js";
 import { recognizeCreditHeroLanding, CH_LANDING_STATE } from "./creditHeroLandingState.js";
-import { readOrderPage, ORDER_STATE, computeEligibilityHint } from "./orderPageReader.js";
+import {
+    readOrderPage, readOrderPageOptions, ORDER_STATE, computeEligibilityHint,
+} from "./orderPageReader.js";
+import { decideAcquisition, DECISIONS } from "./acquisitionDecision.js";
+import { navigateToOrderPage, selectAndSubmitFreeReport, isSubmissionEnabled } from "./orderFreeReport.js";
+import {
+    readOpenIntent, createIntent, markSubmissionStarted, markSubmitted,
+    resolveIntent, decideIntentRecovery, INTENT_STATUS, RECOVERY,
+} from "./acquisitionIntent.js";
+import { readClientState } from "./clientMemory.js";
+import { randomUUID } from "node:crypto";
 import { openCreditReport } from "./openCreditReport.js";
 import { normalizeReport } from "./reportNormalize.js";
 import { readReportSelector, selectReport, verifyActiveReport } from "./reportSelector.js";
-import { decideFreshness, ACTION } from "./reportFreshness.js";
+import { decideFreshness, hasNewerReport, ACTION } from "./reportFreshness.js";
 import { analyzeReportShape, buildSkeleton } from "./spikeReportJson.js";
 
 export async function runMilestone6(data = {}) {
@@ -129,6 +139,32 @@ export async function runMilestone6(data = {}) {
 
         console.log(`Identity verified and FROZEN: ${identity.name} (CRC ${client.crcClientId})`);
 
+        // ---- AI MEMORY: READ ONCE, HERE ------------------------------------
+        //
+        // The earliest point at which crcClientId is authoritative, and the last
+        // point before any decision needs memory. Every earlier failure path
+        // (client not opened, profile unreadable, identity unverified) returns
+        // above this line, so those runs pay nothing for it.
+        //
+        // ONE READ PER RUN. The row is threaded through the rest of this
+        // function as a local. Nothing below re-reads it — a second read could
+        // disagree with the first, and we would not know which one governed the
+        // decision that spent a client's entitlement.
+        //
+        // Failure is non-fatal: memory informs freshness, it does not gate
+        // capture. A null row simply means "no prior processing recorded."
+        const clientState = await readClientState(client.crcClientId).catch((error) => {
+            console.warn(`client_state read failed (continuing without memory): ${error.message}`);
+            return null;
+        });
+
+        // ONE run id for this entire M6 execution, reused across every
+        // acquisition-intent row it writes. Generated here so that a run which
+        // never acquires anything still has one, and so no code path can invent
+        // a second one mid-run.
+        const processingRunId = randomUUID();
+        const browserbaseSessionId = session.session?.id ?? null;
+
         // ---- 2. ATTACH THE PASSIVE LISTENER *BEFORE* NAVIGATING ------------
         //
         // This is a response listener. It catches what the page fetches AS the
@@ -196,6 +232,47 @@ export async function runMilestone6(data = {}) {
 
         // ---- 3. CREDIT HERO ------------------------------------------------
         const creditHero = await openCreditHero(page, context);
+
+        // ---- THE CONTROL WAS PRESENT BUT DEAD ------------------------------
+        //
+        // openCreditHero() distinguishes "this control is positively disabled /
+        // has no destination and never navigated, on every attempt" from "we
+        // could not open CreditHero." The first is a BUSINESS STATE — there is
+        // no monitoring account — and is identical in meaning to the dashboard
+        // invite banner handled above.
+        //
+        // It therefore returns the SAME CHS_NOT_ACTIVATED shape, field for
+        // field, so the existing inactive workflow picks it up unchanged. No new
+        // downstream branch is introduced, and requiresInactiveWorkflow is what
+        // processProductionClient.js already keys on.
+        if (!creditHero.ok && creditHero.nonActionable === true) {
+            console.log(
+                "The CreditHeroScore control is present but not actionable. " +
+                "Treating as an inactive account, not a technical failure."
+            );
+
+            return errorResponse(
+                "CHS_NOT_ACTIVATED",
+                "The \"View CreditHeroScore Account\" control is present on the client dashboard " +
+                    "but is not actionable, so there is no monitoring account to import from.",
+                {
+                    milestone: "M6_CAPTURE",
+                    stage: "credit_hero",
+                    crcClientId: client.crcClientId,
+                    creditHeroAccessState: "CHS_NOT_ACTIVATED",
+                    importAuditState: blocker.state,
+                    observed: blocker.observed,
+                    requiresInactiveWorkflow: true,
+                    openCreditHeroAttempted: true,
+                    // How we concluded it, so the classification can be audited
+                    // rather than trusted.
+                    controlNotActionable: true,
+                    attempts: creditHero.attempts ?? null,
+                    attemptLog: creditHero.attemptLog ?? null,
+                    requiresHumanReview: false,
+                }
+            );
+        }
 
         if (!creditHero.ok) {
             return errorResponse(creditHero.error_code ?? "CREDIT_HERO_UNAVAILABLE",
@@ -389,7 +466,10 @@ export async function runMilestone6(data = {}) {
                 });
         }
 
-        const parsed = selector.selector; // { reports, rejected, newest, count }
+        // `let`, not `const`: a confirmed free-report acquisition below re-reads
+        // the selector, and everything after this point must then operate on the
+        // NEW report rather than the pre-acquisition snapshot.
+        let parsed = selector.selector; // { reports, rejected, newest, count }
 
         console.log(`Report selector: ${parsed.count} report(s) positively identified.`);
         parsed.reports.forEach((r) => console.log(`  - ${r.text} -> ${r.reportDate}`));
@@ -399,11 +479,95 @@ export async function runMilestone6(data = {}) {
             parsed.rejected.forEach((r) => console.log(`    - "${r.text}" (${r.reason})`));
         }
 
+        // ---- THE ROLLOUT CUTOFF GATE, EVALUATED BEFORE ANYTHING IS READ ----
+        //
+        // WHY IT LIVES HERE. This rule was previously computed only on the
+        // SUCCESS response, far below — after the report had already been
+        // selected, captured and normalized. By then it can gate nothing. A
+        // client whose newest report predates the cutoff was processed anyway,
+        // and the hint was reported as a diagnostic on work already done.
+        //
+        // The selector is authoritative for what EXISTS (Report Selector
+        // Authority §1.2), so its newest date is what the cutoff is applied to.
+        // computeEligibilityHint() is reused rather than reimplemented — the
+        // order-page reader applies the identical rule, and two copies of a date
+        // cutoff is how they drift apart.
+        const baselineReportDate = parsed.newest?.reportDate ?? null;
+        const eligibilityHint = computeEligibilityHint(baselineReportDate, null);
+
+        // ---- INTENT RECOVERY, BEFORE ANY ACQUISITION DECISION --------------
+        //
+        // Runs on EVERY path, eligible or not: an intent left open by a previous
+        // run must be reconciled against what the selector now shows before this
+        // run decides anything. Recovery is confirmation of EFFECT — it never
+        // resubmits.
+        const openIntent = await readOpenIntent(client.crcClientId).catch((error) => {
+            console.warn(`Acquisition-intent read failed: ${error.message}`);
+            return null;
+        });
+
+        let recovery = decideIntentRecovery(openIntent, baselineReportDate);
+
+        if (recovery.action === RECOVERY.RESOLVE_REPORT_AVAILABLE) {
+            console.log(`Recovering open acquisition intent: ${recovery.reason}`);
+
+            await resolveIntent(openIntent.id, INTENT_STATUS.REPORT_AVAILABLE, {
+                reportDateAfter: recovery.reportDateAfter,
+            }).catch((error) => {
+                console.warn(`Intent resolution failed: ${error.message}`);
+            });
+        }
+
+        if (eligibilityHint !== "ELIGIBLE_EXISTING_REPORT") {
+            const acquisition = await runAcquisitionPath({
+                chPage,
+                crcClientId: client.crcClientId,
+                processingRunId,
+                browserbaseSessionId,
+                baselineReportDate,
+                eligibilityHint,
+                reportPageUrl: reportPage.reportUrl,
+                openIntent,
+                recovery,
+                replayUrl,
+            });
+
+            if (!acquisition.proceedWithCapture) return acquisition.response;
+
+            // A strictly newer report was confirmed. Re-read the selector so
+            // every step below sees the NEW report. We do not reuse the
+            // pre-acquisition snapshot — that is precisely how a stale report
+            // gets analyzed while we believe it is the fresh one.
+            const refreshed = await readReportSelector(chPage);
+
+            if (!refreshed.ok) {
+                return errorResponse("REPORT_SELECTOR_UNREADABLE",
+                    `A new report was acquired but the selector could not be re-read: ` +
+                        `${refreshed.error}`,
+                    {
+                        milestone: "M6_CAPTURE",
+                        stage: "post_acquisition",
+                        crcClientId: client.crcClientId,
+                        requiresHumanReview: true,
+                    });
+            }
+
+            parsed = refreshed.selector;
+        }
+
         // decideFreshness takes TWO positional arguments: (selector, memory).
         // Passing a single object leaves `newest` and `count` undefined, which
         // resolves to MANUAL_REVIEW — a fail-closed default that would halt every
         // run on every client while looking like a legitimate refusal.
-        const freshness = decideFreshness(parsed, data.memory ?? {});
+        // REAL MEMORY, not `{}`. last_report_date_used is what lets
+        // decideFreshness recognize a report it has already analyzed; passing an
+        // empty object made NO_ACTION_REQUIRED and ACQUISITION_REQUIRED
+        // unreachable in production. An explicit data.memory still wins, so
+        // existing callers and tests are unaffected.
+        const freshness = decideFreshness(parsed, data.memory ?? {
+            last_report_date_used: clientState?.last_report_date_used ?? null,
+            newer_report_required: false,
+        });
 
         console.log(`Freshness decision: ${freshness.action} — ${freshness.reason}`);
 
@@ -737,4 +901,349 @@ function looksLikeCreditReport(body) {
 
     // Two or more independent markers. One could be incidental.
     return hits >= 2;
+}
+
+/**
+ * ===========================================================================
+ * THE REPORT ACQUISITION PATH.
+ *
+ * Reached only when the selector's newest report predates the rollout cutoff,
+ * i.e. a newer report is REQUIRED. Everything here is about one question: may
+ * we spend this client's free-report entitlement, and has a previous run
+ * already spent it?
+ *
+ * WHAT IT NEVER DOES:
+ *   - select or submit a PAID option, under any circumstance;
+ *   - submit anything at all unless ENABLE_FREE_REPORT_SUBMISSION === "true";
+ *   - resubmit an unresolved intent, on any branch, for any reason;
+ *   - fall back to analyzing the stale report it was sent here to replace.
+ *
+ * IT RETURNS A ROUTING SIGNAL, NOT A REPORT.
+ *   { proceedWithCapture: false, response }  -> M6 returns `response` verbatim
+ *   { proceedWithCapture: true }             -> a strictly newer report is
+ *                                               confirmed; M6 re-reads the
+ *                                               selector and captures it
+ * ===========================================================================
+ */
+
+/** How long to wait for a newly ordered report to appear before deferring. */
+const ACQUISITION_POLL_MS = 180000;
+const ACQUISITION_POLL_INTERVAL_MS = 15000;
+
+async function runAcquisitionPath(ctx) {
+    const {
+        chPage, crcClientId, processingRunId, browserbaseSessionId,
+        baselineReportDate, eligibilityHint, reportPageUrl,
+        openIntent, recovery, replayUrl,
+    } = ctx;
+
+    const base = {
+        milestone: "M6_CAPTURE",
+        stage: "report_acquisition",
+        crcClientId,
+        processingRunId,
+        lastReportDate: baselineReportDate,
+        eligibilityHint,
+        replayUrl,
+    };
+
+    // ---- 1. AN UNRESOLVED INTENT STOPS EVERYTHING ------------------------
+    //
+    // Recovery already had its chance to confirm the effect against the
+    // selector. If it could not, a previous run may or may not have ordered,
+    // and we do not find out by trying again.
+    if (recovery.action === RECOVERY.WAIT_WITHIN_GRACE) {
+        return {
+            proceedWithCapture: false,
+            response: successResponse({
+                ...base,
+                // Routes to "Waiting For Bureau" through the existing branch:
+                // an order may be in flight and we are waiting on its report.
+                result: "WAITING_FOR_FREE_REPORT",
+                classification: "WAITING_FOR_FREE_REPORT",
+                acquisitionIntentOpen: true,
+                acquisitionRecovery: recovery.action,
+                acquisitionRecoveryReason: recovery.reason,
+                freeReportEnabled: null,
+                nextFreeReportAvailableAt: null,
+                paidReportPresent: null,
+                paidReportPrice: null,
+                temporaryOverrideApplied: false,
+                diagnosticOnly: true,
+            }),
+        };
+    }
+
+    if (recovery.action === RECOVERY.MANUAL_REVIEW) {
+        return {
+            proceedWithCapture: false,
+            response: errorResponse(
+                "ACQUISITION_INTENT_UNRESOLVED",
+                recovery.reason,
+                {
+                    ...base,
+                    acquisitionIntentOpen: true,
+                    acquisitionRecovery: recovery.action,
+                    requiresHumanReview: true,
+                }
+            ),
+        };
+    }
+
+    // ---- 2. READ THE ORDER PAGE (read-only) ------------------------------
+    const navigated = await navigateToOrderPage(chPage);
+
+    if (!navigated.ok) {
+        return {
+            proceedWithCapture: false,
+            response: errorResponse(
+                navigated.error_code ?? "ORDER_PAGE_UNREACHABLE",
+                navigated.error ?? "Could not reach the Credit Hero order page.",
+                { ...base, requiresHumanReview: true }
+            ),
+        };
+    }
+
+    const orderState = await readOrderPageOptions(chPage).catch(() => null);
+
+    if (!orderState || !orderState.page_read) {
+        return {
+            proceedWithCapture: false,
+            response: errorResponse(
+                "ORDER_PAGE_UNREADABLE",
+                "The order page was reached but its purchase options could not be read. " +
+                    "A page we cannot fully account for is a page we do not act on.",
+                { ...base, requiresHumanReview: true }
+            ),
+        };
+    }
+
+    // ---- 3. THE DECISION ENGINE DECIDES. THIS FUNCTION DOES NOT. ---------
+    const decision = decideAcquisition(orderState, {
+        newer_report_required: true,
+        open_acquisition_intent: openIntent ?? null,
+    });
+
+    console.log(`Acquisition decision: ${decision.decision} — ${decision.reason}`);
+
+    // A sanitized record of what was seen and chosen. Option ids, costs and
+    // enabled-state only: no tokens, no client data.
+    const decisionRecord = {
+        decision: decision.decision,
+        reason: decision.reason,
+        freeAvailable: decision.free_available,
+        paidAvailable: decision.paid_available,
+        selectedOption: decision.selected_option ?? null,
+        excludedPaidOption: decision.excluded_paid_option ?? null,
+        optionsObserved: orderState.options.map((o) => ({
+            id: o.id,
+            cost: o.cost,
+            disabled: o.disabled,
+            visible: o.visible,
+            available_from: o.available_from,
+        })),
+        unaccountedOptionIds: orderState.unaccounted_option_ids,
+    };
+
+    // ---- 4. ANTHONY: the free report is not due yet ----------------------
+    if (decision.decision === DECISIONS.FREE_REPORT_NOT_YET_AVAILABLE) {
+        return {
+            proceedWithCapture: false,
+            response: successResponse({
+                ...base,
+                // The existing WAITING_FOR_FREE_REPORT shape, so
+                // processProductionClient.js routes this to "Waiting For Bureau"
+                // through the branch it already has. No new routing is added.
+                result: "WAITING_FOR_FREE_REPORT",
+                classification: "WAITING_FOR_FREE_REPORT",
+                freeReportEnabled: false,
+                nextFreeReportAvailableAt: decision.available_from ?? null,
+                paidReportPresent: decision.paid_available === true,
+                paidReportPrice:
+                    decisionRecord.optionsObserved.find((o) => o.cost > 0)?.cost ?? null,
+                temporaryOverrideApplied: false,
+                acquisitionDecision: decisionRecord,
+                diagnosticOnly: true,
+            }),
+        };
+    }
+
+    if (decision.decision === DECISIONS.MANUAL_REVIEW) {
+        return {
+            proceedWithCapture: false,
+            response: errorResponse(
+                "ACQUISITION_MANUAL_REVIEW",
+                decision.reason,
+                { ...base, acquisitionDecision: decisionRecord, requiresHumanReview: true }
+            ),
+        };
+    }
+
+    if (decision.decision !== DECISIONS.SUBMIT_FREE_REPORT) {
+        // NO_ACTION_REQUIRED cannot occur here (newer_report_required is true),
+        // but an unrecognized decision is never treated as permission.
+        return {
+            proceedWithCapture: false,
+            response: errorResponse(
+                "ACQUISITION_DECISION_UNEXPECTED",
+                `The decision engine returned "${decision.decision}", which is not a basis for ` +
+                    `acquiring or for proceeding. Nothing was submitted.`,
+                { ...base, acquisitionDecision: decisionRecord, requiresHumanReview: true }
+            ),
+        };
+    }
+
+    // ---- 5. MARCOS: a free report IS available ---------------------------
+    //
+    // OBSERVE-ONLY IS THE DEFAULT. We report exactly what we would have done,
+    // and create NO intent — an observation is not an intention, and a row in
+    // report_acquisition_intents means "we may have ordered", which would be
+    // false and would block the next real run through the partial unique index.
+    if (!isSubmissionEnabled()) {
+        console.log(
+            "OBSERVE-ONLY: a free report is available and verified at cost 0. " +
+            "ENABLE_FREE_REPORT_SUBMISSION is not \"true\", so nothing was selected or submitted."
+        );
+
+        return {
+            proceedWithCapture: false,
+            response: successResponse({
+                ...base,
+                result: "FREE_REPORT_OBSERVATION_ONLY",
+                classification: "FREE_REPORT_AVAILABLE",
+                submissionEnabled: false,
+                wouldSubmit: true,
+                acquisitionDecision: decisionRecord,
+                freeReportEnabled: true,
+                intentCreated: false,
+                reportOrdered: false,
+                diagnosticOnly: true,
+                message:
+                    "Observation only. The free option was positively identified at cost 0 and the " +
+                    "paid option positively excluded. No radio was selected, no Submit was clicked, " +
+                    "and no acquisition intent was created.",
+            }),
+        };
+    }
+
+    // ---- 6. LIVE SUBMISSION ----------------------------------------------
+    //
+    // THE INTENT IS WRITTEN FIRST AND MUST COMMIT BEFORE ANYTHING IS CLICKED.
+    // A 23505 unique violation here is the guard doing its job.
+    const intent = await createIntent({
+        crcClientId,
+        processingRunId,
+        decision: decision.decision,
+        creditHeroOptionId: decision.selected_option?.id ?? null,
+        observedCost: decision.selected_option?.cost ?? null,
+        reportDateBefore: baselineReportDate,
+        browserbaseSessionId,
+        metadata: { cost_evidence: decision.selected_option?.cost_evidence ?? null },
+    });
+
+    if (!intent.ok) {
+        return {
+            proceedWithCapture: false,
+            response: errorResponse(
+                "ACQUISITION_INTENT_NOT_CREATED",
+                intent.detail ?? intent.reason,
+                {
+                    ...base,
+                    acquisitionDecision: decisionRecord,
+                    intentBlockedReason: intent.reason,
+                    requiresHumanReview: true,
+                }
+            ),
+        };
+    }
+
+    const submission = await selectAndSubmitFreeReport(chPage, {
+        optionId: decision.selected_option.id,
+        observedCost: decision.selected_option.cost,
+        onSubmissionStarted: () => markSubmissionStarted(intent.intent.id),
+    });
+
+    if (!submission.submitClicked) {
+        // Nothing was submitted. Whether the intent is safely cancellable
+        // depends on how far we got: if the submission was never STARTED it can
+        // be cancelled cleanly; once started, the outcome is unknown and the
+        // intent must stay unresolved for recovery to reconcile.
+        if (!submission.optionSelected) {
+            await resolveIntent(intent.intent.id, INTENT_STATUS.CANCELLED, {
+                failureReason: submission.failureReason ?? submission.error_code ?? "not_submitted",
+            }).catch(() => {});
+        }
+
+        return {
+            proceedWithCapture: false,
+            response: errorResponse(
+                submission.error_code ?? "FREE_REPORT_NOT_SUBMITTED",
+                submission.failureReason ?? "The free report was not submitted.",
+                {
+                    ...base,
+                    acquisitionDecision: decisionRecord,
+                    submission,
+                    requiresHumanReview: true,
+                }
+            ),
+        };
+    }
+
+    await markSubmitted(intent.intent.id).catch(() => {});
+
+    // ---- 7. WAIT FOR THE EFFECT, THEN PROVE IT ---------------------------
+    //
+    // hasNewerReport() requires STRICTLY newer than the baseline. Not
+    // "different", not "the count changed" — only a date greater than the
+    // baseline proves the report we ordered actually landed.
+    const deadline = Date.now() + ACQUISITION_POLL_MS;
+
+    while (Date.now() < deadline) {
+        await chPage.waitForTimeout(ACQUISITION_POLL_INTERVAL_MS);
+
+        await chPage.goto(reportPageUrl, { waitUntil: "load" }).catch(() => {});
+
+        const fresh = await readReportSelector(chPage);
+
+        if (!fresh.ok) continue;
+
+        const newer = hasNewerReport(fresh.selector, baselineReportDate);
+
+        if (newer.appeared) {
+            console.log(`New report confirmed: ${newer.reportDate} (baseline ${baselineReportDate}).`);
+
+            await resolveIntent(intent.intent.id, INTENT_STATUS.REPORT_AVAILABLE, {
+                reportDateAfter: newer.reportDate,
+            }).catch(() => {});
+
+            return { proceedWithCapture: true };
+        }
+    }
+
+    // TIMED OUT. The intent stays UNRESOLVED on purpose: the order was
+    // submitted, so the entitlement may well be spent, and the next daily run's
+    // recovery will confirm the report once it appears. We do NOT fall back to
+    // the stale report — that is the one thing reportFreshness.js exists to
+    // prevent.
+    return {
+        proceedWithCapture: false,
+        response: successResponse({
+            ...base,
+            result: "WAITING_FOR_FREE_REPORT",
+            classification: "WAITING_FOR_FREE_REPORT",
+            reportOrdered: true,
+            acquisitionIntentOpen: true,
+            acquisitionDecision: decisionRecord,
+            analyzedOlderReport: false,
+            freeReportEnabled: false,
+            nextFreeReportAvailableAt: null,
+            paidReportPresent: null,
+            paidReportPrice: null,
+            temporaryOverrideApplied: false,
+            message:
+                "The free report was submitted but no strictly newer report had appeared within " +
+                "the wait window. The acquisition intent remains unresolved and will be " +
+                "reconciled on a later run. The older report was NOT analyzed.",
+        }),
+    };
 }

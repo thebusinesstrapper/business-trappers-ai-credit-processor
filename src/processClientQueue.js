@@ -414,6 +414,124 @@ function safeIsoDate(value) {
 }
 
 /**
+ * Sanitize extraction text (an error or a warning) from the normalizer.
+ *
+ * WHY safeMessage() IS NOT ENOUGH HERE. It redacts runs of 9+ digits, which is
+ * right for account numbers but blind to what these strings actually carry:
+ * reportNormalize.js warns with `... masked account "****1234" ...`, and a
+ * four-digit last-4 sails straight through a nine-digit rule.
+ *
+ * So the masked-account clause is redacted by NAME first, then any run of 4+
+ * digits. Counts are not lost by this — they are reported separately as real
+ * numbers in `counts` below.
+ */
+function safeExtractionText(value) {
+    if (typeof value !== "string") return null;
+
+    const cleaned = value
+        .replace(/masked account\s*"[^"]*"/gi, 'masked account "[redacted]"')
+        .replace(/\d{4,}/g, "[redacted]")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    return cleaned ? cleaned.slice(0, 240) : null;
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * EXTRACTION DIAGNOSTICS — the fields that identify WHICH normalization failure
+ * occurred, sanitized for a job result.
+ *
+ * THE PROBLEM THIS SOLVES. milestone6.js already returns extraction_errors,
+ * counts, completeness and key_resolution on its EXTRACTION_FAILED response.
+ * buildM7Diagnostic()'s whitelist did not project any of them, so every
+ * normalization failure arrived in the queue result as one indistinguishable
+ * sentence: "The report was captured but could not be normalized with
+ * confidence."
+ *
+ * There are FOUR distinct ways reportNormalize.js can set extraction_ok false,
+ * and they need opposite fixes:
+ *
+ *   1. fail("NO_CREDIT_RESPONSE")  -> counts === null
+ *   2. fail("NO_LIABILITIES")      -> counts === null
+ *   3. (account,bureau) identity conflict -> counts set, tradelinesAmbiguous > 0
+ *   4. required field never found  -> counts set, ambiguous 0, "REQUIRED FIELD"
+ *
+ * `countsPresent` alone separates {1,2} from {3,4}; the ambiguity counts
+ * separate 3 from 4. That is the whole purpose of this projection.
+ *
+ * WHAT IS DELIBERATELY EXCLUDED. `payload` — the entire raw credit report — is
+ * present on the M6 failure response by design (Extraction §8 requires the raw
+ * capture to survive a failure) and is NEVER projected here. Neither are the
+ * ambiguity entries' existing_identity / conflicting_identity objects, which
+ * carry masked_account and furnisher. Only the bureau NAME leaves.
+ * ---------------------------------------------------------------------------
+ */
+function buildExtractionDiagnostic(capture) {
+    if (!capture || typeof capture !== "object") return null;
+
+    const errors = Array.isArray(capture.extraction_errors) ? capture.extraction_errors : [];
+    const counts = capture.counts ?? null;
+    const keyResolution = capture.key_resolution ?? null;
+    const completeness = capture.completeness ?? null;
+
+    // Nothing extraction-related on this result: stay null rather than emit an
+    // empty shell on every non-extraction failure.
+    if (errors.length === 0 && !counts && !keyResolution && !completeness) return null;
+
+    const ambiguousTradelines = Array.isArray(keyResolution?.tradelines?.ambiguous)
+        ? keyResolution.tradelines.ambiguous
+        : [];
+    const ambiguousAccounts = Array.isArray(keyResolution?.accounts?.ambiguous)
+        ? keyResolution.accounts.ambiguous
+        : [];
+    const warnings = Array.isArray(completeness?.warnings) ? completeness.warnings : [];
+
+    return {
+        // THE DISCRIMINATOR between the fail() paths and the late paths.
+        countsPresent: counts !== null && counts !== undefined,
+
+        counts: counts
+            ? {
+                raw_liability_rows: safeNumber(counts.raw_liability_rows),
+                unique_accounts: safeNumber(counts.unique_accounts),
+                account_bureau_tradelines: safeNumber(counts.account_bureau_tradelines),
+                inquiries: safeNumber(counts.inquiries),
+            }
+            : null,
+
+        keyResolution: keyResolution
+            ? {
+                accountsMatched: safeNumber(keyResolution.accounts?.matched),
+                accountsMinted: safeNumber(keyResolution.accounts?.minted),
+                accountsAmbiguous: ambiguousAccounts.length,
+                tradelinesMatched: safeNumber(keyResolution.tradelines?.matched),
+                tradelinesMinted: safeNumber(keyResolution.tradelines?.minted),
+                tradelinesAmbiguous: ambiguousTradelines.length,
+                // Bureau NAMES only. Never the identity objects beside them.
+                ambiguityBureaus: [
+                    ...new Set(ambiguousTradelines.map((a) => safeCode(a?.bureau)).filter(Boolean)),
+                ].slice(0, 6),
+            }
+            : null,
+
+        // Field NAMES — schema, not data.
+        fieldsNeverFound: Array.isArray(completeness?.fields_never_found)
+            ? completeness.fields_never_found.map(safeCode).filter(Boolean).slice(0, 20)
+            : [],
+        fieldsPresentButNull: Array.isArray(completeness?.fields_present_but_null)
+            ? completeness.fields_present_but_null.map(safeCode).filter(Boolean).slice(0, 20)
+            : [],
+
+        errorCount: errors.length,
+        errors: errors.map(safeExtractionText).filter(Boolean).slice(0, 8),
+
+        warningCount: warnings.length,
+        warnings: warnings.map(safeExtractionText).filter(Boolean).slice(0, 8),
+    };
+}
+
+/**
  * SAFE DIAGNOSTIC PROJECTION of an M7 result.
  *
  * WHITELIST ONLY. Every field is named explicitly; nothing is spread, and the
@@ -507,6 +625,9 @@ function buildM7Diagnostic(m7, clientName = null) {
         // without opening every result.
         attemptReasons,
 
+        // WHICH normalization failure occurred. Sanitized; never the payload.
+        extraction: buildExtractionDiagnostic(capture),
+
         // ---- STAGE 1 (READ-ONLY): TEMPORARY ROLLOUT ELIGIBILITY METADATA -----
         //
         // Set by milestone6 on the order-page path AND the successful-M7 path
@@ -579,6 +700,32 @@ function classifyResult(result) {
     // classification immediately above.
     if (result?.ok === true && result?.stage === "no_actionable_dispute_items" && result?.m8 == null) {
         return "noActionableItems";
+    }
+
+    // Successful CHS_NOT_ACTIVATED inactive-routing outcome: CRC was CONFIRMED
+    // updated to "Credit Monitoring Inactive" by runInactiveWorkflow(). This is
+    // a successful operational-routing outcome, not a manual-review condition,
+    // and must not fall into the generic manualReview bucket below — mirroring
+    // routedWaiting / noActionableItems above.
+    //
+    // Deliberately gated on result.inactive.statusUpdated, NOT on result.ok
+    // alone: processProductionClient.js sets
+    //   ok = inactive.noticeSent || inactive.reminderSent || inactive.statusUpdated
+    // so `ok` can be true from a notice alone even when the CRC status write
+    // failed. Requiring statusUpdated === true reserves this classification for
+    // a CONFIRMED CRC status change specifically.
+    //
+    // A FAILED NOTICE DOES NOT HIDE HERE. recipient_prefill_mismatch /
+    // NOTICE_SEND_FAILED live on result.inactive (noticeSent, error_code,
+    // failureReason) and are still returned in full on every job.results entry
+    // below — this classification describes the CRC status change, and erases
+    // nothing about the notice.
+    if (
+        result?.ok === true &&
+        result?.stage === "credit_hero_inactive" &&
+        result?.inactive?.statusUpdated === true
+    ) {
+        return "creditMonitoringInactive";
     }
 
     const systemFailureCodes = SYSTEM_FAILURE_CODES;
