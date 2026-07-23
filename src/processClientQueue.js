@@ -538,6 +538,53 @@ function buildExtractionDiagnostic(capture) {
                 ambiguityBureaus: [
                     ...new Set(ambiguousTradelines.map((a) => safeCode(a?.bureau)).filter(Boolean)),
                 ].slice(0, 6),
+
+                // ---- THE SHAPE OF EACH IDENTITY CONFLICT, WITHOUT ITS CONTENT --
+                //
+                // A tradeline identity conflict is a legitimate manual-review
+                // outcome, but "1 conflict on experian" does not tell an operator
+                // WHICH kind it is, and the fields that would — masked_account and
+                // furnisher — are exactly the ones this projection must not emit.
+                //
+                // So the SHAPE is derived and the VALUES are dropped. Whether the
+                // last-4 was readable, whether the masked accounts differ, whether
+                // the furnishers differ: all booleans. None of them is PII, and
+                // together they classify the conflict:
+                //
+                //   last4Readable [false,false] + furnisherDiffers false
+                //       -> same furnisher, unreadable account numbers, differing
+                //          masks. Almost certainly one tradeline described twice.
+                //   last4Readable [false,false] + furnisherDiffers true
+                //       -> two different furnishers on one Array account id.
+                //          Either genuinely separate tradelines, or upstream
+                //          account grouping is wrong.
+                //
+                // Either way a human decides. This only removes the need to open
+                // the raw report to find out which question they are answering.
+                conflicts: ambiguousTradelines.slice(0, 5).map((entry) => {
+                    const existing = entry?.existing_identity ?? {};
+                    const conflicting = entry?.conflicting_identity ?? {};
+
+                    // Same canonicalisation reportNormalize uses, applied only to
+                    // COMPARE. Neither canonical form is returned.
+                    const canon = (v) =>
+                        typeof v === "string" ? v.toUpperCase().replace(/[^A-Z0-9]/g, "") : null;
+
+                    return {
+                        rows: Array.isArray(entry?.rows) ? entry.rows.slice(0, 2) : null,
+                        bureau: safeCode(existing.bureau) ?? safeCode(conflicting.bureau),
+                        // Was a trailing 4 digits readable on each masked account?
+                        last4Readable: [existing.last4 != null, conflicting.last4 != null],
+                        maskedAccountPresent: [
+                            existing.masked_account != null,
+                            conflicting.masked_account != null,
+                        ],
+                        maskedAccountDiffers:
+                            canon(existing.masked_account) !== canon(conflicting.masked_account),
+                        furnisherDiffers:
+                            (existing.furnisher_norm ?? null) !== (conflicting.furnisher_norm ?? null),
+                    };
+                }),
             }
             : null,
 
