@@ -925,6 +925,22 @@ async function syncObservations(observations) {
  *
  * @returns {"flagged"|"cleared"|"skipped"|"failed"}
  */
+/** Keep a capped, sanitized record of why a manual-review write failed. */
+function recordSyncFailureDetail(job, crcClientId, item, reason, detail) {
+    if (!Array.isArray(job.summary.manualReviewSyncFailureDetails)) {
+        job.summary.manualReviewSyncFailureDetails = [];
+    }
+
+    if (job.summary.manualReviewSyncFailureDetails.length >= 20) return;
+
+    job.summary.manualReviewSyncFailureDetails.push({
+        crcClientId: crcClientId ? String(crcClientId) : null,
+        clientName: item?.clientName ?? null,
+        reason: safeCode(reason),
+        detail: safeMessage(detail)
+    });
+}
+
 async function syncManualReview(job, item, result, classification) {
     if (!manualReviewWritesAllowed(job)) return "skipped";
 
@@ -943,6 +959,12 @@ async function syncManualReview(job, item, result, classification) {
                 `Manual review REQUIRED for "${item?.clientName ?? "unknown client"}" ` +
                 `but no authoritative CRC client id was resolved. Nothing was written. ` +
                 `Counted as a manual-review sync failure.`
+            );
+
+            recordSyncFailureDetail(
+                job, null, item, "crc_client_id_unresolved",
+                "The client requires manual review but no authoritative CRC client id " +
+                "was resolved, so no row could be keyed."
             );
 
             return "failed";
@@ -974,13 +996,34 @@ async function syncManualReview(job, item, result, classification) {
                 item?.clientName
             ) ?? "Unclassified fail-closed state requiring human action.";
 
-        const flagged = await recordManualReview(String(crcClientId), { stage, reason });
+        const flagged = await recordManualReview(String(crcClientId), {
+            stage,
+            reason,
+            // The name discovered during processing. Used ONLY as the display
+            // label on a row that has to be created; the row is keyed on
+            // crc_client_id alone.
+            clientDisplayName: result?.clientName ?? item?.clientName ?? null
+        });
 
-        return flagged.ok ? "flagged" : "failed";
+        if (flagged.ok) return "flagged";
+
+        console.error(
+            `Manual review write failed for CRC ${crcClientId} ` +
+            `(${flagged.reason}): ${flagged.detail ?? "no detail returned"}`
+        );
+
+        recordSyncFailureDetail(job, crcClientId, item, flagged.reason, flagged.detail);
+
+        return "failed";
     } catch (error) {
         console.error(
             `Manual-review sync failed for CRC ${crcClientId}: ${error.message}`
         );
+
+        recordSyncFailureDetail(
+            job, crcClientId, item, "manual_review_sync_exception", error.message
+        );
+
         return "failed";
     }
 }
@@ -1107,6 +1150,10 @@ async function runJob(job) {
                 } else {
                     result = await runProductionClient({
                         clientName: item.clientName,
+                        // The CRC status positively observed on the DataGrid.
+                        // "supplied" is a queue marker, not a CRC status, so the
+                        // supplied-name path deliberately sends nothing.
+                        crcClientStatus: item.status === "supplied" ? null : (item.status ?? null),
                         // Enables the Supabase preflight to run BEFORE a browser
                         // is launched. Null on a supplied-name run, where the
                         // preflight simply does not apply.
@@ -1437,6 +1484,7 @@ export function startClientQueue(data = {}) {
             manualReviewFlagged: 0,
             manualReviewCleared: 0,
             manualReviewSyncFailures: 0,
+            manualReviewSyncFailureDetails: [],
             diagnosticGroups: {},
             diagnosticTopLevelGroups: {},
             diagnosticAttemptReasons: {},

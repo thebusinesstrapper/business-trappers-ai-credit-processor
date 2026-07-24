@@ -60,7 +60,7 @@ import {
     readOpenIntent, createIntent, markSubmissionStarted, markSubmitted,
     resolveIntent, decideIntentRecovery, INTENT_STATUS, RECOVERY,
 } from "./acquisitionIntent.js";
-import { readClientState } from "./clientMemory.js";
+import { readClientState, ensureClientStateExists } from "./clientMemory.js";
 import { randomUUID } from "node:crypto";
 import { openCreditReport } from "./openCreditReport.js";
 import { normalizeReport } from "./reportNormalize.js";
@@ -151,6 +151,52 @@ async function captureAndNormalize(data = {}, identityState = {}) {
         // that branch remembers to include it or not. Read from CRC, never
         // derived from the supplied name.
         identityState.crcClientId = client.crcClientId ?? null;
+
+        // ---- CLIENT STATE INITIALIZATION -----------------------------------
+        //
+        // THE SINGLE POINT EVERY CLIENT PASSES THROUGH. Supplied-name runs and
+        // scanned queue rows both reach CRC through this same function, so
+        // initializing here means neither path can proceed without memory.
+        //
+        // It runs BEFORE capture, routing, notices, status writes and the
+        // manual-review flag — all of which are UPDATEs that silently match
+        // nothing when the row is absent.
+        //
+        // FAILS THE CLIENT, NOT THE QUEUE. If the row cannot be established we
+        // stop THIS client here and say why. Continuing would mean performing
+        // CRC actions whose outcome could not be recorded — the exact state that
+        // leaves a client changed in CRC and invisible in memory.
+        const initialized = await ensureClientStateExists(client.crcClientId, {
+            clientDisplayName: clientName,
+            // Only a POSITIVELY OBSERVED CRC status. The supplied-name path has
+            // none and passes null rather than inventing one.
+            crcClientStatus: data.crcClientStatus ?? null,
+        }).catch((error) => ({
+            ok: false,
+            reason: "client_state_init_exception",
+            detail: error.message,
+        }));
+
+        if (!initialized.ok) {
+            return errorResponse(
+                "CLIENT_STATE_INIT_FAILED",
+                "The client was identified in CRC but its client_state row could not be " +
+                    "established, so no downstream action could be recorded. Processing " +
+                    "stopped before anything was changed.",
+                {
+                    milestone: "M6_CAPTURE",
+                    stage: "client_state_initialization",
+                    crcClientId: client.crcClientId,
+                    persistenceReason: initialized.reason ?? null,
+                    persistenceError: initialized.detail ?? null,
+                    requiresHumanReview: true,
+                }
+            );
+        }
+
+        if (initialized.created) {
+            console.log(`Initialized client_state for CRC client ${client.crcClientId}.`);
+        }
 
         const profile = await readClientProfile(page, client.crcClientId);
 

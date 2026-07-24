@@ -784,6 +784,151 @@ export function decideDailyPreflight(state, todayIso) {
  */
 
 /**
+ * Sanitize a Postgres/PostgREST error before it travels into a job result.
+ *
+ * Database errors quote offending VALUES ("duplicate key value violates ...
+ * Key (crc_client_id)=(154)"), so they are treated as untrusted text: long
+ * digit runs redacted, whitespace collapsed, length capped. The error is
+ * SURFACED rather than swallowed — a silent failure to record a manual review
+ * is the outcome this whole path exists to prevent — but it is surfaced clean.
+ */
+function sanitizeDbError(message) {
+    if (typeof message !== "string") return null;
+
+    const cleaned = message
+        .replace(/\d{9,}/g, "[redacted]")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    return cleaned ? cleaned.slice(0, 300) : null;
+}
+
+/**
+ * ===========================================================================
+ * CLIENT STATE INITIALIZATION — the single entry point.
+ *
+ * Called the moment CRC confirms an authoritative crc_client_id, BEFORE any
+ * downstream routing, notice, status write or manual-review flag. Every one of
+ * those is an UPDATE, and an UPDATE against a row that does not exist matches
+ * nothing and reports success-shaped emptiness.
+ *
+ * WHY IT LIVES HERE RATHER THAN INSIDE EACH WRITER. Only two paths ever created
+ * a row — acquireDeliveryLock() and runInactiveWorkflow() — so a client that
+ * failed at capture reached neither and had no memory at all. Fixing that inside
+ * recordManualReview() would have fixed exactly one symptom and left the
+ * inactive path, the Waiting For Bureau path and successful processing each
+ * relying on a row nobody had guaranteed. One initialization point, used by all
+ * of them, is the difference between a fix and a patch.
+ *
+ * TWO STATEMENTS, AND THE SPLIT IS THE SAFETY PROPERTY.
+ *
+ *   CREATE  — upsert with ignoreDuplicates, i.e. ON CONFLICT DO NOTHING. A
+ *             plain upsert would overwrite an existing row's current_round,
+ *             processing_state, dates and history with Version 1 defaults,
+ *             resetting a round 4 client to round 1. DO NOTHING is the
+ *             difference between "create if missing" and "reset".
+ *
+ *   REFRESH — a fixed, tiny field set: the display label, the observed CRC
+ *             status, and updated_at. Nothing else is assignable through it.
+ *             current_round, processing_state, process_complete, every
+ *             lifecycle date, the inactive timestamps and the manual-review
+ *             fields are not guarded against — they are ABSENT.
+ *
+ * KEYED ON crc_client_id ALONE, always. The display name is a label written
+ * INTO the row, never any part of how the row is found.
+ * ===========================================================================
+ *
+ * @param {string|number} crcClientId  authoritative, confirmed by CRC
+ * @param {object} [options]
+ * @param {string} [options.clientDisplayName]
+ * @param {string} [options.crcClientStatus]  only when positively observed
+ * @returns {Promise<{ok: boolean, created?: boolean, reason?: string, detail?: string}>}
+ */
+export async function ensureClientStateExists(crcClientId, options = {}) {
+    const id = String(crcClientId);
+
+    if (!/^\d+$/.test(id)) {
+        throw new Error(`ensureClientStateExists: invalid crcClientId "${crcClientId}".`);
+    }
+
+    /*
+     * client_display_name is NOT NULL. The caller supplies the name CRC matched;
+     * a genuinely blank one falls back to a label derived from the authoritative
+     * id, which cannot be mistaken for a real person and keeps the row keyable.
+     */
+    const displayName =
+        typeof options.clientDisplayName === "string" && options.clientDisplayName.trim()
+            ? options.clientDisplayName.trim()
+            : "CRC Client " + id;
+
+    const observedStatus =
+        typeof options.crcClientStatus === "string" && options.crcClientStatus.trim()
+            ? options.crcClientStatus.trim()
+            : null;
+
+    const supabase = getSupabase();
+
+    // ---- CREATE IF MISSING ------------------------------------------------
+    //
+    // buildInitialClientState() is reused verbatim: the same governed Version 1
+    // defaults loadOrCreateClientMemory() has always used. Every NOT NULL column
+    // gets a real value or an honest "we have not checked", and
+    // credit_hero_access_state gets "unknown" — a value this exact function has
+    // been inserting successfully in production.
+    const insert = await supabase
+        .from(CLIENT_STATE_TABLE)
+        .upsert(buildInitialClientState(id, displayName), {
+            onConflict: "crc_client_id",
+            ignoreDuplicates: true
+        })
+        .select("crc_client_id");
+
+    if (insert.error) {
+        return {
+            ok: false,
+            reason: "client_state_create_failed",
+            detail: sanitizeDbError(insert.error.message)
+        };
+    }
+
+    const created = Array.isArray(insert.data) && insert.data.length > 0;
+
+    // ---- REFRESH ONLY THE SAFE IDENTITY FIELDS ---------------------------
+    const refresh = { updated_at: new Date().toISOString() };
+
+    refresh.client_display_name = displayName;
+
+    if (observedStatus) {
+        refresh.crc_client_status = observedStatus;
+    }
+
+    const update = await supabase
+        .from(CLIENT_STATE_TABLE)
+        .update(refresh)
+        .eq("crc_client_id", id)
+        .select("crc_client_id, client_display_name, crc_client_status")
+        .maybeSingle();
+
+    if (update.error) {
+        return {
+            ok: false,
+            reason: "client_state_refresh_failed",
+            detail: sanitizeDbError(update.error.message)
+        };
+    }
+
+    if (!update.data) {
+        return {
+            ok: false,
+            reason: "client_state_row_missing_after_create",
+            detail: "The row was neither created nor found immediately afterwards."
+        };
+    }
+
+    return { ok: true, created, refreshed: Object.keys(refresh) };
+}
+
+/**
  * Flag a client as requiring manual review.
  *
  * DATE FLAGGED IS SET ONCE, ON ENTRY. A client that fails the same way for five
@@ -812,6 +957,19 @@ export async function recordManualReview(crcClientId, fields = {}) {
         ? fields.reason.trim().slice(0, 500)
         : null;
 
+    // 0. THE ROW MUST EXIST BEFORE AN UPDATE CAN MATCH IT.
+    //
+    // A newly discovered client that failed before delivery has no client_state
+    // row, and both statements below are UPDATEs. Creating it here is what makes
+    // the flag possible at all; an existing row is left completely untouched.
+    const ensured = await ensureClientStateExists(id, {
+        clientDisplayName: fields.clientDisplayName
+    });
+
+    if (!ensured.ok) {
+        return ensured;
+    }
+
     const supabase = getSupabase();
 
     // 1. ENTERING manual review: set the flag date. Matches only a row that is
@@ -830,7 +988,11 @@ export async function recordManualReview(crcClientId, fields = {}) {
         .maybeSingle();
 
     if (entering.error) {
-        throw new Error(`Failed to flag manual review: ${entering.error.message}`);
+        return {
+            ok: false,
+            reason: "manual_review_flag_failed",
+            detail: sanitizeDbError(entering.error.message)
+        };
     }
 
     if (entering.data) {
@@ -847,7 +1009,11 @@ export async function recordManualReview(crcClientId, fields = {}) {
         .maybeSingle();
 
     if (refreshing.error) {
-        throw new Error(`Failed to refresh manual review: ${refreshing.error.message}`);
+        return {
+            ok: false,
+            reason: "manual_review_refresh_failed",
+            detail: sanitizeDbError(refreshing.error.message)
+        };
     }
 
     if (!refreshing.data) {

@@ -224,7 +224,12 @@ export async function runProductionClient(data = {}) {
         }
     }
 
-    const m7 = await runMilestone7({ clientName });
+    const m7 = await runMilestone7({
+        clientName,
+        // Passed through to M6's client_state initialization. Null unless a live
+        // scan positively observed it.
+        crcClientStatus: data.crcClientStatus ?? null,
+    });
     const m7LettersOk = m7?.lettersOk === true || m7?.letters_ok === true;
 
     // ---- CREDIT HERO INACTIVE BRANCH ---------------------------------------
