@@ -17,7 +17,10 @@ import { runProductionClient } from "./processProductionClient.js";
 // M7 succeeds, so routing diagnostics through it would deliver letters to any
 // client whose CreditHero access has since been restored.
 import { runMilestone7 } from "./milestone7.js";
-import { recordCreditHeroState } from "./clientMemory.js";
+import {
+    recordCreditHeroState, recordManualReview, clearManualReview,
+    requiresManualReview, manualReviewWritesAllowed,
+} from "./clientMemory.js";
 
 const jobs = new Map();
 
@@ -565,10 +568,18 @@ function buildExtractionDiagnostic(capture) {
                     const existing = entry?.existing_identity ?? {};
                     const conflicting = entry?.conflicting_identity ?? {};
 
-                    // Same canonicalisation reportNormalize uses, applied only to
-                    // COMPARE. Neither canonical form is returned.
+                    // The SAME formatting-only canonicalisation the normalizer
+                    // now uses (itemKey.canonicalAccountNumber): strip
+                    // whitespace and hyphens, fold case, PRESERVE every masking
+                    // character. Applied only to COMPARE — neither canonical
+                    // form is returned. Kept identical on purpose: a diagnostic
+                    // that normalized differently from the fold decision would
+                    // report "same" for two accounts the normalizer had just
+                    // ruled different.
                     const canon = (v) =>
-                        typeof v === "string" ? v.toUpperCase().replace(/[^A-Z0-9]/g, "") : null;
+                        typeof v === "string"
+                            ? (v.toUpperCase().replace(/\s/g, "").replace(/-/g, "") || null)
+                            : null;
 
                     return {
                         rows: Array.isArray(entry?.rows) ? entry.rows.slice(0, 2) : null,
@@ -897,6 +908,63 @@ async function syncObservations(observations) {
     return result;
 }
 
+/**
+ * Persist (or clear) the manual-review flag for ONE processed client.
+ *
+ * GATED, and the gate is the whole point. A diagnostic run, a run with
+ * submitApproved false, or a run without operational routing approval must
+ * never create a Manual Review record — those runs stopped because we told them
+ * to, which is not evidence that a human is needed.
+ *
+ * SYMMETRIC. A client that fails is flagged; a client that succeeds is CLEARED.
+ * Without the clear half, the queue would only ever grow and a fixed client
+ * would sit in it until someone noticed by hand.
+ *
+ * Own try/catch, exactly like the observation sync: a Supabase problem must not
+ * stop the queue from processing the remaining clients.
+ *
+ * @returns {"flagged"|"cleared"|"skipped"|"failed"}
+ */
+async function syncManualReview(job, item, result, classification) {
+    if (!manualReviewWritesAllowed(job)) return "skipped";
+
+    const crcClientId = result?.crcClientId ?? item?.crcClientId ?? null;
+
+    if (!crcClientId || !/^\d+$/.test(String(crcClientId))) return "skipped";
+
+    try {
+        if (!requiresManualReview(classification)) {
+            const cleared = await clearManualReview(String(crcClientId));
+            return cleared.transition === "cleared" ? "cleared" : "skipped";
+        }
+
+        // SANITIZED BEFORE IT LEAVES. safeCode/safeMessage already redact long
+        // digit runs, and redactClientName removes the consumer's own name from
+        // engine text. No report contents and no account numbers reach Supabase.
+        const stage = safeCode(result?.stage) ?? classification;
+
+        const reason =
+            redactClientName(
+                safeMessage(result?.failureReason) ??
+                safeMessage(result?.blockedReason) ??
+                safeMessage(result?.m8?.failureReason) ??
+                safeMessage(result?.m8?.blockedReason) ??
+                safeMessage(result?.m7?.error_code) ??
+                safeMessage(result?.error),
+                item?.clientName
+            ) ?? "Unclassified fail-closed state requiring human action.";
+
+        const flagged = await recordManualReview(String(crcClientId), { stage, reason });
+
+        return flagged.ok ? "flagged" : "failed";
+    } catch (error) {
+        console.error(
+            `Manual-review sync failed for CRC ${crcClientId}: ${error.message}`
+        );
+        return "failed";
+    }
+}
+
 async function runJob(job) {
     job.status = "scanning_crc";
     job.startedAt = new Date().toISOString();
@@ -1039,6 +1107,14 @@ async function runJob(job) {
 
             job.summary.processed += 1;
 
+            // Flag or clear manual review for this client. Gated; never counted
+            // as a delivered client; never blocks the rest of the queue.
+            const manualReviewSync = await syncManualReview(job, item, result, classification);
+
+            if (manualReviewSync === "flagged") job.summary.manualReviewFlagged += 1;
+            if (manualReviewSync === "cleared") job.summary.manualReviewCleared += 1;
+            if (manualReviewSync === "failed") job.summary.manualReviewSyncFailures += 1;
+
             if (classification === "sent") job.summary.sent += 1;
             if (classification === "duplicatePrevented") job.summary.duplicatePrevented += 1;
             if (classification === "manualReview") job.summary.manualReview += 1;
@@ -1123,6 +1199,7 @@ async function runJob(job) {
                     result?.inactive?.memoryWritten ??
                     false,
                 operationalRoutingApproved: job.operationalRoutingApproved === true,
+                manualReviewSync,
                 m8: result?.m8
                     ? {
                         finalStatus: result.m8.finalStatus ?? null,
@@ -1331,6 +1408,10 @@ export function startClientQueue(data = {}) {
             diagnosticReady: 0,
             diagnosticBlocked: 0,
             alreadyComplete: 0,
+            // Manual-review bookkeeping. Reported, never counted as delivered.
+            manualReviewFlagged: 0,
+            manualReviewCleared: 0,
+            manualReviewSyncFailures: 0,
             diagnosticGroups: {},
             diagnosticTopLevelGroups: {},
             diagnosticAttemptReasons: {},

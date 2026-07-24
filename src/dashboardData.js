@@ -61,6 +61,14 @@ const DASHBOARD_FIELDS = [
     // Written only via clientMemory.recordCreditHeroState()'s guarded
     // crc_client_status field — this endpoint remains select-only.
     "crc_client_status",
+    // Manual review. Written only by clientMemory.recordManualReview() /
+    // clearManualReview(), and only on an approved, non-diagnostic run.
+    // manual_review_reason is sanitized at the call site before it is stored,
+    // so no report contents or account numbers pass through here.
+    "manual_review_active",
+    "manual_review_stage",
+    "manual_review_reason",
+    "manual_review_flagged_at",
 ];
 
 const SELECT_COLUMNS = DASHBOARD_FIELDS.join(", ");

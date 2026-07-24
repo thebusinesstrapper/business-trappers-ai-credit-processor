@@ -631,7 +631,11 @@ export async function markProcessComplete(crcClientId, reason, opts = {}) {
         update.last_dispute_date = isoDate(now);
     }
 
-    if (Number.isInteger(opts.negativeItemsRemaining)) {
+    // Guarded against the confirmed non-negative CHECK on this column. Integer
+    // alone was not enough: a negative value would reach Postgres and throw,
+    // turning a completion into an exception. Today's only caller passes 0, so
+    // this protects a future one rather than a present bug.
+    if (Number.isInteger(opts.negativeItemsRemaining) && opts.negativeItemsRemaining >= 0) {
         update.negative_items_remaining = opts.negativeItemsRemaining;
     }
 
@@ -760,4 +764,169 @@ export function decideDailyPreflight(state, todayIso) {
             : "No reliable future eligibility date stored. Verifying live state.",
         nextEligibleDate: next,
     };
+}
+
+
+/**
+ * ===========================================================================
+ * MANUAL REVIEW WRITERS.
+ *
+ * A THIRD narrow pair, for the same reason the lifecycle writers are separate:
+ * recordCreditHeroState()'s whitelist is a safety boundary and these fields do
+ * not belong inside it. Fixed field set, no caller-supplied whitelist.
+ *
+ * WHY NOT block_reason. That column is already occupied by NON-manual-review
+ * markers — processProductionClient writes WAITING_FOR_FREE_REPORT and
+ * CREDENTIALS_OR_AUTH_FAILED into it. Reusing it here would make "waiting on a
+ * bureau" and "broken, needs a human" indistinguishable in one column, which is
+ * precisely the distinction this feature exists to draw.
+ * ===========================================================================
+ */
+
+/**
+ * Flag a client as requiring manual review.
+ *
+ * DATE FLAGGED IS SET ONCE, ON ENTRY. A client that fails the same way for five
+ * consecutive days should show how long it has been stuck, not today's date
+ * five times. So the timestamp is written only on the false -> true transition;
+ * a client already flagged has its stage and reason refreshed and its
+ * flagged_at left alone.
+ *
+ * @param {string|number} crcClientId
+ * @param {object} fields
+ * @param {string|null} fields.stage    the blocked/failure stage
+ * @param {string|null} fields.reason   ALREADY SANITIZED by the caller
+ */
+export async function recordManualReview(crcClientId, fields = {}) {
+    const id = String(crcClientId);
+
+    if (!/^\d+$/.test(id)) {
+        throw new Error(`recordManualReview: invalid crcClientId "${crcClientId}".`);
+    }
+
+    const stage = typeof fields.stage === "string" && fields.stage.trim()
+        ? fields.stage.trim().slice(0, 120)
+        : null;
+
+    const reason = typeof fields.reason === "string" && fields.reason.trim()
+        ? fields.reason.trim().slice(0, 500)
+        : null;
+
+    const supabase = getSupabase();
+
+    // 1. ENTERING manual review: set the flag date. Matches only a row that is
+    //    not already flagged, so it cannot overwrite an earlier entry date.
+    const entering = await supabase
+        .from(CLIENT_STATE_TABLE)
+        .update({
+            manual_review_active: true,
+            manual_review_stage: stage,
+            manual_review_reason: reason,
+            manual_review_flagged_at: new Date().toISOString(),
+        })
+        .eq("crc_client_id", id)
+        .eq("manual_review_active", false)
+        .select("crc_client_id, manual_review_active, manual_review_flagged_at")
+        .maybeSingle();
+
+    if (entering.error) {
+        throw new Error(`Failed to flag manual review: ${entering.error.message}`);
+    }
+
+    if (entering.data) {
+        return { ok: true, transition: "entered", state: entering.data };
+    }
+
+    // 2. ALREADY flagged: refresh what is wrong, preserve when it started.
+    const refreshing = await supabase
+        .from(CLIENT_STATE_TABLE)
+        .update({ manual_review_stage: stage, manual_review_reason: reason })
+        .eq("crc_client_id", id)
+        .eq("manual_review_active", true)
+        .select("crc_client_id, manual_review_active, manual_review_flagged_at")
+        .maybeSingle();
+
+    if (refreshing.error) {
+        throw new Error(`Failed to refresh manual review: ${refreshing.error.message}`);
+    }
+
+    if (!refreshing.data) {
+        return { ok: false, reason: "client_state_row_not_found" };
+    }
+
+    return { ok: true, transition: "refreshed", state: refreshing.data };
+}
+
+/**
+ * Clear the manual-review flag after a run that did NOT require a human.
+ *
+ * Matches only a row that is currently flagged, so a healthy client costs one
+ * no-op statement rather than a pointless write on every daily run.
+ *
+ * All four fields are cleared together. A stale "Failure Reason" sitting beside
+ * a client that processed cleanly is worse than no reason at all; the human
+ * record of what happened lives in the sheet's Resolution Notes, which this
+ * never touches.
+ */
+export async function clearManualReview(crcClientId) {
+    const id = String(crcClientId);
+
+    if (!/^\d+$/.test(id)) {
+        throw new Error(`clearManualReview: invalid crcClientId "${crcClientId}".`);
+    }
+
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+        .from(CLIENT_STATE_TABLE)
+        .update({
+            manual_review_active: false,
+            manual_review_stage: null,
+            manual_review_reason: null,
+            manual_review_flagged_at: null,
+        })
+        .eq("crc_client_id", id)
+        .eq("manual_review_active", true)
+        .select("crc_client_id, manual_review_active")
+        .maybeSingle();
+
+    if (error) {
+        throw new Error(`Failed to clear manual review: ${error.message}`);
+    }
+
+    return data
+        ? { ok: true, transition: "cleared" }
+        : { ok: true, transition: "was_not_flagged" };
+}
+
+/**
+ * PURE. Does this run's outcome require a human?
+ *
+ * The classification vocabulary already answers this. manualReview and fatal are
+ * the two outcomes that mean "the processor could not finish and nobody has
+ * looked yet". Every excluded state — routedWaiting, creditMonitoringInactive,
+ * alreadyComplete, duplicatePrevented, noActionableItems, sent — is a
+ * DIFFERENT classification, so nothing needs special-casing.
+ */
+export const MANUAL_REVIEW_CLASSIFICATIONS = Object.freeze(["manualReview", "fatal"]);
+
+export function requiresManualReview(classification) {
+    return MANUAL_REVIEW_CLASSIFICATIONS.includes(classification);
+}
+
+/**
+ * PURE. May this run write manual-review state at all?
+ *
+ * A controlled test must never create a Manual Review record. A diagnostic run
+ * does not deliver; a run with submitApproved false stops before delivery on
+ * purpose; a run without operational routing approval writes nothing anywhere.
+ * None of those is evidence that a human is needed — they are evidence that we
+ * told the processor to stop.
+ */
+export function manualReviewWritesAllowed(job = {}) {
+    return (
+        job.diagnosticOnly !== true &&
+        job.submitApproved === true &&
+        job.operationalRoutingApproved === true
+    );
 }
