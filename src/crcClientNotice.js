@@ -81,7 +81,22 @@ async function openComposeForm(page, crcClientId) {
     await secureBtn.click({ timeout: FIELD_TIMEOUT }).catch(() => {});
 
     const readState = async () => {
-        const client = page.locator('input[name="client_id"]').first();
+        // NOT .first(). MUI can render a hidden input sharing this name ahead of
+        // the visible one; .first() would then test the hidden element, find it
+        // invisible, and block the composer from ever confirming. Requirement is
+        // that ANY visible one counts.
+        const clientInputs = page.locator('input[name="client_id"]');
+        const clientCount = await clientInputs.count().catch(() => 0);
+
+        let hasClient = false;
+
+        for (let index = 0; index < clientCount; index += 1) {
+            if (await clientInputs.nth(index).isVisible().catch(() => false)) {
+                hasClient = true;
+                break;
+            }
+        }
+
         const subject = page.locator('input[name="subject"]').first();
         const body = page
             .locator('div.fr-element.fr-view[contenteditable="true"]')
@@ -89,7 +104,6 @@ async function openComposeForm(page, crcClientId) {
             .first();
         const submit = page.getByRole("button", { name: "Submit", exact: true }).first();
 
-        const hasClient = (await client.count()) > 0 && await client.isVisible().catch(() => false);
         const hasSubject = (await subject.count()) > 0 && await subject.isVisible().catch(() => false);
         const hasBody = (await body.count()) > 0 && await body.isVisible().catch(() => false);
         const hasSubmit = (await submit.count()) > 0 && await submit.isVisible().catch(() => false);
@@ -130,41 +144,143 @@ function normalizeName(value) {
     return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+/** The one field that carries the recipient's display name. */
+const RECIPIENT_SELECTOR = 'input[name="client_id"]';
+
+/** How long the prefill may take to arrive before we give up. */
+const RECIPIENT_VALUE_TIMEOUT_MS = 10000;
+const RECIPIENT_POLL_MS = 200;
+
+/**
+ * Sanitize an observed recipient value for a diagnostic. Whitespace collapsed,
+ * long digit runs redacted, length capped. Enough to see WHAT was in the field
+ * without pushing an account-number-shaped string into a job result.
+ */
+function sanitizeObserved(value) {
+    if (typeof value !== "string") return null;
+
+    return value
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/\d{4,}/g, "[redacted]")
+        .slice(0, 120);
+}
+
+/**
+ * Read EVERY input[name="client_id"] on the page with its state.
+ *
+ * Not .first(). MUI renders a visible text input alongside hidden inputs that
+ * can share a name, and a hidden one may hold a numeric id rather than the
+ * display name. Scanning them all and requiring visible AND enabled means a
+ * stale or hidden duplicate cannot be mistaken for the real field.
+ */
+async function readRecipientCandidates(page) {
+    const inputs = page.locator(RECIPIENT_SELECTOR);
+    const count = await inputs.count().catch(() => 0);
+    const candidates = [];
+
+    for (let index = 0; index < count; index += 1) {
+        const input = inputs.nth(index);
+
+        candidates.push({
+            index,
+            visible: await input.isVisible().catch(() => false),
+            enabled: await input.isEnabled().catch(() => false),
+            value: (await input.inputValue().catch(() => "")) || "",
+        });
+    }
+
+    return { count, candidates };
+}
+
 /**
  * Verify the prefilled recipient by NORMALIZED EXACT EQUALITY.
  *
- * The live compose DOM proved input[name="client_id"].value holds the visible
- * display name (e.g. "Debra Brown"), not a numeric id — so that IS the correct
- * name-bearing field to read.
+ * ---------------------------------------------------------------------------
+ * THE DEFECT THIS FIXES: TIMING, NOT MATCHING.
  *
- * FAIL-CLOSED AND EXACT. The normalized recipient must EQUAL the normalized
- * expected full name. No includes(), no startsWith(), no first-name match. A
- * partial or extra-token name ("Debra Ann Brown", "Debra Brown Jr") does not
- * verify, so a message can never go to the wrong or an ambiguous recipient.
+ * This function read the field exactly once, with no wait. openComposeForm()
+ * returns as soon as the input is VISIBLE — and visible is not populated. CRC
+ * fills the recipient asynchronously after the client record loads, so the
+ * field is on screen with value "" for a moment. We read that empty string,
+ * compared it to "denyel davis", and reported recipient_prefill_mismatch on a
+ * form that was about to be perfectly correct.
+ *
+ * The old failure path returned observedLength, which would have shown 0 and
+ * named the cause immediately — but it was the only thing returned, so a
+ * mismatch could not be distinguished from a genuinely wrong recipient.
+ *
+ * THE COMPARISON ITSELF WAS NEVER WRONG. normalizeName() already trims,
+ * collapses internal whitespace and lower-cases, so "Denyel Davis" verifies
+ * against "Denyel Davis" the moment the value actually exists. That logic is
+ * unchanged.
+ *
+ * FAIL-CLOSED AND EXACT, EXACTLY AS BEFORE. The normalized recipient must EQUAL
+ * the normalized expected full name. No includes(), no startsWith(), no
+ * first-name match. "Debra Ann Brown" and "Debra Brown Jr" still do not verify.
+ *
+ * FAILS FAST ON A REAL MISMATCH. A nonblank value seen twice in a row is
+ * settled; if it is settled and wrong we stop immediately rather than waiting
+ * out the timeout. Only a still-blank or still-changing field uses the full
+ * window.
+ * ---------------------------------------------------------------------------
  */
 async function verifyRecipient(page, clientName) {
-    const combo = page.locator('input[name="client_id"]').first();
+    const expected = normalizeName(clientName);
+    const deadline = Date.now() + RECIPIENT_VALUE_TIMEOUT_MS;
 
-    if (!(await combo.count())) {
-        return { ok: false, reason: "client_field_not_found" };
+    let latest = { count: 0, candidates: [] };
+    let previousSettledValue = null;
+
+    while (Date.now() < deadline) {
+        latest = await readRecipientCandidates(page);
+
+        // Only a visible, enabled field can be the one the user would see.
+        const usable = latest.candidates.filter((c) => c.visible && c.enabled);
+
+        const matched = usable.find((c) => normalizeName(c.value) === expected);
+
+        if (matched) {
+            return {
+                ok: true,
+                recipient: clientName,
+                viaPrefill: true,
+                selector: RECIPIENT_SELECTOR,
+                matchingElementCount: latest.count,
+                matchedIndex: matched.index,
+            };
+        }
+
+        // A nonblank value observed twice in a row has settled. If it settled on
+        // something other than the expected name, waiting longer cannot help.
+        const nonblank = usable.find((c) => c.value.trim() !== "");
+
+        if (nonblank && previousSettledValue === nonblank.value) break;
+
+        previousSettledValue = nonblank ? nonblank.value : null;
+
+        await page.waitForTimeout(RECIPIENT_POLL_MS);
     }
 
-    const prefilled =
-        (await combo.inputValue().catch(() => "")) ||
-        (await page
-            .evaluate(() => {
-                const el = document.querySelector('input[name="client_id"]');
-                return el ? el.value || "" : "";
-            })
-            .catch(() => "")) ||
-        "";
+    // ---- FAILED. REPORT WHAT WAS ACTUALLY THERE. --------------------------
+    const usable = latest.candidates.filter((c) => c.visible && c.enabled);
+    const observed =
+        usable.find((c) => c.value.trim() !== "") ??
+        usable[0] ??
+        latest.candidates[0] ??
+        null;
 
-    if (normalizeName(prefilled) === normalizeName(clientName)) {
-        return { ok: true, recipient: clientName, viaPrefill: true };
-    }
-
-    // observedLength only — never the raw recipient text, which is client PII.
-    return { ok: false, reason: "recipient_prefill_mismatch", observedLength: prefilled.length };
+    return {
+        ok: false,
+        reason: latest.count === 0 ? "client_field_not_found" : "recipient_prefill_mismatch",
+        selector: RECIPIENT_SELECTOR,
+        matchingElementCount: latest.count,
+        fieldVisible: observed ? observed.visible : false,
+        fieldEnabled: observed ? observed.enabled : false,
+        expectedClientName: sanitizeObserved(clientName),
+        observedRecipient: observed ? sanitizeObserved(observed.value) : null,
+        observedLength: observed ? observed.value.length : 0,
+    };
 }
 
 async function fillSubject(page, subject) {
@@ -261,6 +377,18 @@ export async function sendClientNotice(page, opts = {}) {
         report.failureReason =
             `The prefilled recipient did not verify as ${clientName} (${recipient.reason}). ` +
             `Nothing was sent.`;
+        // Sanitized evidence, so a repeat failure is diagnosable from the job
+        // result instead of requiring another live run.
+        report.recipientDiagnostic = {
+            reason: recipient.reason,
+            selector: recipient.selector ?? null,
+            matchingElementCount: recipient.matchingElementCount ?? null,
+            fieldVisible: recipient.fieldVisible ?? null,
+            fieldEnabled: recipient.fieldEnabled ?? null,
+            expectedClientName: recipient.expectedClientName ?? null,
+            observedRecipient: recipient.observedRecipient ?? null,
+            observedLength: recipient.observedLength ?? null,
+        };
         return report;
     }
 
