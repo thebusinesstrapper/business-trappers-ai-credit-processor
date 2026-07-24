@@ -44,6 +44,9 @@ const ORDER_PAGE = "mcc_order_select_v2.asp";
 const LINK_TIMEOUT = 20000;
 /** Budget for ONE selection interaction. Bounded so a hidden control fails fast. */
 const SELECT_TIMEOUT = 15000;
+/** How long to watch for the page reacting to Submit. Observation only. */
+const POST_SUBMIT_STATE_TIMEOUT_MS = 15000;
+const POST_SUBMIT_POLL_MS = 500;
 const NAV_TIMEOUT = 60000;
 const READ_TIMEOUT = 8000;
 
@@ -82,7 +85,64 @@ function labelSelector(optionId) {
  * action. Unset means observe.
  */
 export function isSubmissionEnabled() {
-    return String(process.env.ENABLE_FREE_REPORT_SUBMISSION ?? "").trim() === "true";
+    return describeSubmissionFlag().enabled;
+}
+
+/**
+ * Read ENABLE_FREE_REPORT_SUBMISSION and explain what was found.
+ *
+ * WHY THIS RETURNS A DESCRIPTION RATHER THAN A BOOLEAN. When Marcos Lopez ran
+ * with every approval true and the flag set, the result said only
+ * "submissionEnabled: false" — which is the symptom, not the cause. There was no
+ * way to tell an unset variable from one set to something the parser rejected,
+ * so the run had to be repeated to learn anything.
+ *
+ * WRAPPING QUOTES ARE STRIPPED, and that is not speculative tolerance: this
+ * project's own supabase.js already documents it — "Railway values are
+ * sometimes pasted with wrapping quotes. Those quotes become part of the
+ * hostname/key unless removed." A value pasted as "true" WITH the quotes reads
+ * as `"true"` including them, which is not equal to true, and the flag silently
+ * stays off. That is the single most likely reason a correctly-set variable did
+ * not activate submission.
+ *
+ * EVERYTHING ELSE STAYS STRICT. After trimming and unwrapping, only the exact
+ * lowercase string "true" enables submission. "TRUE", "1", "yes" and "on" are
+ * all rejected — an ambiguous value must never arm an irreversible action — but
+ * they are now reported as REJECTED rather than treated as absent.
+ */
+export function describeSubmissionFlag() {
+    const raw = process.env.ENABLE_FREE_REPORT_SUBMISSION;
+
+    if (raw === undefined || raw === null) {
+        return { enabled: false, present: false, reason: "env_var_not_set", normalized: null };
+    }
+
+    let value = String(raw).trim();
+
+    const wasQuoted =
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"));
+
+    if (wasQuoted && value.length >= 2) {
+        value = value.slice(1, -1).trim();
+    }
+
+    if (value === "true") {
+        return { enabled: true, present: true, reason: "enabled", normalized: value, wasQuoted };
+    }
+
+    return {
+        enabled: false,
+        present: true,
+        // The VALUE is not echoed. It is an operator-supplied string and this
+        // object travels into a job result; the shape is enough to fix it.
+        reason: value === ""
+            ? "env_var_present_but_empty"
+            : "env_var_present_but_not_exactly_true",
+        normalizedLength: value.length,
+        wasQuoted,
+        normalized: null
+    };
 }
 
 /**
@@ -520,6 +580,100 @@ async function selectVerifiedFreeOption(frame, optionId) {
 }
 
 /**
+ * CANDIDATE SUBMIT CONTROLS, most specific first.
+ *
+ * THE DEFECT THIS FIXES. The lookup was
+ * `input[type="submit"], button[type="submit"]`, and CreditHero's order page
+ * uses NEITHER. The live control is an anchor:
+ *
+ *   <a class="btn btn-large btn-primary" onclick="orderSelect();">Submit</a>
+ *
+ * so the free option was correctly selected and the flow then stopped at
+ * SUBMIT_CONTROL_NOT_FOUND with nothing clicked. Fail-closed worked; the
+ * selector was simply blind to the element that exists.
+ *
+ * WHY NOT `.btn-primary`. That class is on Cancel, Back, payment and navigation
+ * controls all over this site, and this is the one page where clicking the
+ * wrong primary button spends a client's entitlement. Each entry below is
+ * anchored on something that identifies THE SUBMIT ACTION — the orderSelect
+ * handler, or a real submit input/button — never on styling alone.
+ *
+ * A CSS selector list matches each element ONCE even when several entries
+ * would match it, so the exact-class entry and the handler-only entry cannot
+ * make one control look like two.
+ */
+const SUBMIT_CONTROL_SELECTOR = [
+    'a.btn.btn-large.btn-primary[onclick*="orderSelect"]',
+    'a[onclick*="orderSelect"]',
+    'input[type="submit"]',
+    'button[type="submit"]',
+].join(", ");
+
+/** The only accepted label, after trim / whitespace collapse / lower-casing. */
+const SUBMIT_LABEL = "submit";
+
+/** Cap a UI label before it travels into a job result. */
+function safeLabel(value) {
+    if (typeof value !== "string") return null;
+    const cleaned = value.replace(/\s+/g, " ").trim();
+    return cleaned ? cleaned.slice(0, 60) : "";
+}
+
+/**
+ * Find the ONE actionable control whose visible label is exactly "Submit".
+ *
+ * Three independent conditions, all required:
+ *   1. it matches a selector that identifies the submit ACTION, not a style;
+ *   2. its visible label normalizes exactly to "Submit" — so a Cancel, Back or
+ *      payment control carrying the same classes is rejected on its text;
+ *   3. it is visible AND enabled.
+ *
+ * AMBIGUITY IS REFUSED. Two qualifying controls means we cannot say which one
+ * submits the order, and this is not a page on which to find out by clicking.
+ */
+async function findSubmitControl(frame) {
+    const controls = frame.locator(SUBMIT_CONTROL_SELECTOR);
+    const matchCount = await controls.count().catch(() => 0);
+
+    const qualifying = [];
+    const rejected = [];
+
+    for (let index = 0; index < matchCount; index += 1) {
+        const control = controls.nth(index);
+
+        // input[type=submit] carries its label in `value`; anchors and buttons
+        // carry it as text.
+        const rawLabel = await control
+            .evaluate((node) => node.value || node.innerText || node.textContent || "")
+            .catch(() => "");
+
+        const label = safeLabel(rawLabel);
+        const normalized = (label ?? "").toLowerCase();
+
+        if (normalized !== SUBMIT_LABEL) {
+            rejected.push({ index, reason: "label_not_submit", label });
+            continue;
+        }
+
+        const visible = await control.isVisible().catch(() => false);
+        const enabled = await control.isEnabled().catch(() => false);
+
+        if (!visible || !enabled) {
+            rejected.push({
+                index,
+                reason: !visible ? "not_visible" : "not_enabled",
+                label,
+            });
+            continue;
+        }
+
+        qualifying.push({ index, control, label });
+    }
+
+    return { matchCount, qualifying, rejected };
+}
+
+/**
  * Select and submit the FREE report.
  *
  * @param {import('playwright').Page} page   a page already on the order page
@@ -532,9 +686,12 @@ async function selectVerifiedFreeOption(frame, optionId) {
 export async function selectAndSubmitFreeReport(page, opts = {}) {
     const { optionId, observedCost, onSubmissionStarted } = opts;
 
+    const flag = describeSubmissionFlag();
+
     const report = {
         tool: ORDER_FREE_REPORT_VERSION,
-        submissionEnabled: isSubmissionEnabled(),
+        submissionEnabled: flag.enabled,
+        submissionFlagReason: flag.reason,
         optionId: optionId ?? null,
         observedCost: observedCost ?? null,
         liveVerification: null,
@@ -546,20 +703,40 @@ export async function selectAndSubmitFreeReport(page, opts = {}) {
         selectionVerification: null,
         preSubmitReconfirmed: false,
         submitClicked: false,
+        submitControlDiagnostic: null,
+        postSubmitStateChanged: null,
         error_code: null,
         failureReason: null,
     };
 
-    // ---- GATE 0: THE FEATURE FLAG ----------------------------------------
+    // ---- GATE 0: THE FLAG *AND* THE RUN APPROVALS ------------------------
     //
     // First statement in the only function that can click. Nothing below runs
-    // in observe mode, so the Submit control is never located and no handle to
-    // it exists.
-    if (!report.submissionEnabled) {
+    // unless every gate holds, so in observe mode the Submit control is never
+    // located and no handle to it exists.
+    //
+    // THE APPROVALS ARE CHECKED HERE TOO, not only by the caller. This function
+    // is the last thing standing between a decision and a spent entitlement, so
+    // it re-proves the conditions rather than trusting that someone upstream
+    // did. A caller that forgets to pass them gets a refusal, not a submission.
+    const approvals = opts.approvals ?? {};
+
+    report.gateState = {
+        environmentFlag: flag.enabled,
+        submitApproved: approvals.submitApproved === true,
+        operationalRoutingApproved: approvals.operationalRoutingApproved === true
+    };
+
+    report.blockedGates = Object.keys(report.gateState).filter(function(gate) {
+        return report.gateState[gate] !== true;
+    });
+
+    if (report.blockedGates.length > 0) {
         report.error_code = "SUBMISSION_DISABLED";
         report.failureReason =
-            "ENABLE_FREE_REPORT_SUBMISSION is not \"true\". Observation only — nothing was " +
-            "selected and nothing was submitted.";
+            "Observation only — nothing was selected and nothing was submitted. " +
+            `Blocking gate(s): ${report.blockedGates.join(", ")}. ` +
+            `Environment flag: ${flag.reason}.`;
         return report;
     }
 
@@ -687,20 +864,68 @@ export async function selectAndSubmitFreeReport(page, opts = {}) {
     report.preSubmitReconfirmed = true;
 
     // ---- SUBMIT -----------------------------------------------------------
-    const submit = targetFrame
-        .locator('input[type="submit"], button[type="submit"]')
-        .first();
+    const found = await findSubmitControl(targetFrame);
 
-    if (!(await submit.count().catch(() => 0))) {
+    report.submitControlDiagnostic = {
+        selector: SUBMIT_CONTROL_SELECTOR,
+        matchCount: found.matchCount,
+        qualifyingCount: found.qualifying.length,
+        rejected: found.rejected.slice(0, 6),
+    };
+
+    if (found.qualifying.length === 0) {
         report.error_code = "SUBMIT_CONTROL_NOT_FOUND";
         report.failureReason =
-            "The free option was selected but no submit control was found. Nothing was clicked. " +
-            "The intent remains unresolved and will be recovered on a later run.";
+            "The free option was selected but no actionable control labelled \"Submit\" was " +
+            "found. Nothing was clicked. The intent remains unresolved and will be recovered " +
+            "on a later run.";
         return report;
     }
 
-    await submit.click({ timeout: LINK_TIMEOUT });
+    if (found.qualifying.length > 1) {
+        // We cannot say which one submits the order, and this is not a page on
+        // which to find out by clicking.
+        report.error_code = "SUBMIT_CONTROL_AMBIGUOUS";
+        report.failureReason =
+            `${found.qualifying.length} controls labelled "Submit" are actionable on this page. ` +
+            "Refusing to choose between them. Nothing was clicked.";
+        return report;
+    }
+
+    await found.qualifying[0].control.click({ timeout: LINK_TIMEOUT });
     report.submitClicked = true;
+
+    // ---- DID THE PAGE ACTUALLY MOVE? --------------------------------------
+    //
+    // A click landing is not an order being placed. The AUTHORITATIVE proof is
+    // a strictly newer report appearing, which milestone6 polls for afterwards;
+    // this is the cheap, immediate signal that the page reacted at all.
+    //
+    // IT NEVER UNDOES submitClicked. The click happened, so the intent stays
+    // unresolved and nothing is ever resubmitted on its account — an observation
+    // that the page did not visibly change is recorded, not acted upon.
+    const stateDeadline = Date.now() + POST_SUBMIT_STATE_TIMEOUT_MS;
+    let stateChanged = false;
+
+    while (!stateChanged && Date.now() < stateDeadline) {
+        const leftOrderPage = !page.url().toLowerCase().includes(ORDER_PAGE.toLowerCase());
+
+        const controlGone =
+            (await targetFrame.locator(SUBMIT_CONTROL_SELECTOR).count().catch(() => 0)) === 0;
+
+        stateChanged = leftOrderPage || controlGone;
+
+        if (!stateChanged) await page.waitForTimeout(POST_SUBMIT_POLL_MS);
+    }
+
+    report.postSubmitStateChanged = stateChanged;
+
+    if (!stateChanged) {
+        report.postSubmitObservation =
+            "Submit was clicked but the order page did not visibly change within the wait " +
+            "window. The order may still have been placed; the acquisition intent stays " +
+            "unresolved and is reconciled by report appearance, never by resubmitting.";
+    }
 
     console.log("Free report submitted. Effect is NOT yet confirmed.");
 
