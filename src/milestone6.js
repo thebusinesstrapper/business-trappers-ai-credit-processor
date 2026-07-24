@@ -68,7 +68,56 @@ import { readReportSelector, selectReport, verifyActiveReport } from "./reportSe
 import { decideFreshness, hasNewerReport, ACTION } from "./reportFreshness.js";
 import { analyzeReportShape, buildSkeleton } from "./spikeReportJson.js";
 
+/**
+ * ===========================================================================
+ * CRC CLIENT ID PRESERVATION.
+ *
+ * THE REGRESSION THIS FIXES. crc_client_id is the primary key of client_state
+ * and the authoritative identity for every downstream write. It is discovered
+ * the moment openClient() succeeds — but 12 of this module's failure branches
+ * returned without it, EXTRACTION_FAILED among them.
+ *
+ * The consequence stayed invisible until Manual Review needed it: a
+ * supplied-name run opened the client successfully, failed at normalization,
+ * and returned crcClientId: null. processProductionClient's findCrcClientId()
+ * then had nothing to find, and the Manual Review sync silently skipped a
+ * client that genuinely needed a human.
+ *
+ * FIXED AT ONE POINT, NOT TWELVE. The implementation records the id into a
+ * shared object as soon as the client is open; this wrapper attaches it to any
+ * FAILURE response that came back without one. Branches that already set it are
+ * untouched, and success responses are not modified at all.
+ *
+ * WHY A WRAPPER RATHER THAN 12 EDITS. Editing every branch leaves the next
+ * branch someone adds free to make the same mistake. Here a new failure path
+ * inherits the identity automatically.
+ *
+ * CLIENT_NOT_OPENED IS DELIBERATELY UNAFFECTED. If the client was never opened
+ * there is no authoritative id, and deriving one from a name is exactly the
+ * name-keyed record this architecture forbids. That branch returns before the
+ * id is recorded, so the wrapper has nothing to attach — which is correct.
+ * ===========================================================================
+ */
 export async function runMilestone6(data = {}) {
+    const identityState = { crcClientId: null };
+
+    const result = await captureAndNormalize(data, identityState);
+
+    const resolvedId = identityState.crcClientId;
+
+    if (
+        result &&
+        result.success === false &&
+        resolvedId != null &&
+        (result.crcClientId === undefined || result.crcClientId === null)
+    ) {
+        result.crcClientId = String(resolvedId);
+    }
+
+    return result;
+}
+
+async function captureAndNormalize(data = {}, identityState = {}) {
     let browser;
 
     try {
@@ -96,6 +145,12 @@ export async function runMilestone6(data = {}) {
         if (!client.clientFound || !client.clientOpened) {
             return errorResponse("CLIENT_NOT_OPENED", `Could not open client "${clientName}".`, { milestone: "M6_CAPTURE" });
         }
+
+        // THE CLIENT IS OPEN, SO THE AUTHORITATIVE ID EXISTS. Recorded here, at
+        // the first moment it is real, so every failure below carries it whether
+        // that branch remembers to include it or not. Read from CRC, never
+        // derived from the supplied name.
+        identityState.crcClientId = client.crcClientId ?? null;
 
         const profile = await readClientProfile(page, client.crcClientId);
 

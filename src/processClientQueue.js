@@ -930,7 +930,27 @@ async function syncManualReview(job, item, result, classification) {
 
     const crcClientId = result?.crcClientId ?? item?.crcClientId ?? null;
 
-    if (!crcClientId || !/^\d+$/.test(String(crcClientId))) return "skipped";
+    if (!crcClientId || !/^\d+$/.test(String(crcClientId))) {
+        // A client that NEEDS a human but whose authoritative id could not be
+        // resolved is a FAILURE TO RECORD, not a no-op. Silently skipping it
+        // drops it out of the Manual Review Queue entirely and nobody finds out.
+        //
+        // Nothing is written either way: a name is not an identity, and a
+        // name-keyed Supabase record is exactly what the crc_client_id primary
+        // key exists to prevent. The run is surfaced instead of hidden.
+        if (requiresManualReview(classification)) {
+            console.error(
+                `Manual review REQUIRED for "${item?.clientName ?? "unknown client"}" ` +
+                `but no authoritative CRC client id was resolved. Nothing was written. ` +
+                `Counted as a manual-review sync failure.`
+            );
+
+            return "failed";
+        }
+
+        // Nothing to clear for a healthy client we cannot key. Genuinely a no-op.
+        return "skipped";
+    }
 
     try {
         if (!requiresManualReview(classification)) {
@@ -994,7 +1014,12 @@ async function runJob(job) {
                     job.summary.manualReview += 1;
                     job.summary.ambiguousNames += 1;
                 } else {
-                    uniqueQueue.push({ clientName, status: "supplied" });
+                    // crcClientId is UNKNOWN here by definition — the caller
+                    // supplied names, not ids. Stated explicitly rather than
+                    // omitted so this row has the same shape as a scanned row,
+                    // and is populated from result.crcClientId once CRC has been
+                    // opened and the real id is known.
+                    uniqueQueue.push({ clientName, status: "supplied", crcClientId: null });
                 }
             }
 
