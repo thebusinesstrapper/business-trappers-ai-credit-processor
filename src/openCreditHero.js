@@ -68,6 +68,8 @@ const CRC_HOST_PATTERN = /app\.creditrepaircloud\.com/i;
  * invented:
  *   - mcc_creditreports_v2.asp  openCreditReport.js REPORT_PAGE (the report page)
  *   - mcc_order_select_v2.asp   openCreditReport.js FORBIDDEN_PAGES (the order page)
+ *   - mcc_creditscores.asp      the CreditHero dashboard landing page openCreditHero
+ *                               lands on (milestone6.js / orderFreeReport.js)
  *   - customer_login.asp        creditHeroLandingState.js AUTH link
  *   - payment_update.asp        creditHeroLandingState.js PAYMENT form
  *   - mcc_home.asp              the CreditHero member dashboard landing
@@ -76,7 +78,7 @@ const CRC_HOST_PATTERN = /app\.creditrepaircloud\.com/i;
  * CreditHero page. This is ONE of two accepted positive signals — see below.
  */
 const CH_URL_PATH_PATTERN =
-    /(mcc_creditreports_v2|mcc_order_select_v2|mcc_home|customer_login|payment_update)\.asp/i;
+    /(mcc_creditreports_v2|mcc_order_select_v2|mcc_creditscores|mcc_home|customer_login|payment_update)\.asp/i;
 
 /**
  * URLs that are never a confirmed page, whatever else is true: blank tabs, empty
