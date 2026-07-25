@@ -1464,6 +1464,42 @@ async function runAcquisitionPath(ctx) {
         };
     }
 
+    // POSITIVE-CONFIRMATION GATE. submitClicked alone is not proof the order was
+    // placed — the page may not have reacted. Only mark the intent `submitted`
+    // when the submitter POSITIVELY confirmed a post-click state change
+    // (submissionConfirmed). When the click happened but nothing changed, the
+    // outcome is UNKNOWN: leave the intent unresolved (submission_started) so
+    // report-appearance recovery reconciles it, and fail closed to a waiting
+    // state — never assert `submitted`, and never resubmit.
+    if (submission.submissionConfirmed !== true) {
+        return {
+            proceedWithCapture: false,
+            response: successResponse({
+                ...base,
+                result: "WAITING_FOR_FREE_REPORT",
+                classification: "WAITING_FOR_FREE_REPORT",
+                reportOrdered: false,
+                submissionAttempted: true,
+                submissionConfirmed: false,
+                acquisitionIntentOpen: true,
+                acquisitionDecision: decisionRecord,
+                gateState,
+                freeReportEnabled: null,
+                nextFreeReportAvailableAt: null,
+                paidReportPresent: null,
+                paidReportPrice: null,
+                temporaryOverrideApplied: false,
+                submission,
+                message:
+                    "The Submit control was clicked but the order page did not positively change, " +
+                    "so submission is NOT confirmed. The intent is left unresolved (not marked " +
+                    "submitted) and will be reconciled by report appearance; nothing is resubmitted.",
+                diagnosticOnly: true,
+            }),
+        };
+    }
+
+    // Submission is POSITIVELY confirmed — only now is the intent `submitted`.
     await markSubmitted(intent.intent.id).catch(() => {});
 
     // ---- 7. WAIT FOR THE EFFECT, THEN PROVE IT ---------------------------

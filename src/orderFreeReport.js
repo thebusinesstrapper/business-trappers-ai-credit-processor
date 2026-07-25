@@ -920,6 +920,18 @@ export async function selectAndSubmitFreeReport(page, opts = {}) {
 
     report.postSubmitStateChanged = stateChanged;
 
+    // ---- SUBMISSION CONFIRMED vs SUBMIT CLICKED ---------------------------
+    //
+    // submitClicked means only that .click() returned — the page may not have
+    // reacted at all (a swallowed click, the wrong element, a still-rendered
+    // button). submissionConfirmed is the POSITIVE, irreversible evidence: the
+    // click happened AND the order page visibly changed (we left it, or the
+    // Submit control disappeared). Only submissionConfirmed may drive the intent
+    // to `submitted`. When the click happened but nothing changed, the outcome is
+    // genuinely UNKNOWN — the intent must stay unresolved for report-appearance
+    // recovery, never be asserted as submitted.
+    report.submissionConfirmed = report.submitClicked === true && stateChanged === true;
+
     if (!stateChanged) {
         report.postSubmitObservation =
             "Submit was clicked but the order page did not visibly change within the wait " +
@@ -927,7 +939,11 @@ export async function selectAndSubmitFreeReport(page, opts = {}) {
             "unresolved and is reconciled by report appearance, never by resubmitting.";
     }
 
-    console.log("Free report submitted. Effect is NOT yet confirmed.");
+    console.log(
+        report.submissionConfirmed
+            ? "Free report submitted and the order page positively changed. Effect (new report) not yet confirmed."
+            : "Free report submit was clicked but the page did not visibly change — submission NOT confirmed."
+    );
 
     return report;
 }
