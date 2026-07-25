@@ -132,6 +132,28 @@ async function routeToComplete(clientName, crcClientId, reason, opts = {}) {
     return { status, memory };
 }
 
+/** Append one approval-stage record to a shared bounded trace array. */
+function traceApproval(data, stage, values) {
+    const trace = data?.approvalTrace;
+    if (!Array.isArray(trace)) return;
+
+    const limit = Number.isInteger(data.approvalTraceLimit) ? data.approvalTraceLimit : 200;
+    if (trace.length >= limit) return;
+
+    trace.push({
+        jobId: values.jobId ?? null,
+        clientName: values.clientName ?? null,
+        processingApproved: values.processingApproved ?? null,
+        diagnosticOnly: values.diagnosticOnly ?? null,
+        submitApproved: values.submitApproved ?? null,
+        operationalRoutingApproved: values.operationalRoutingApproved ?? null,
+        inactiveWorkflowApproved: values.inactiveWorkflowApproved ?? null,
+        executionMode: values.executionMode ?? null,
+        stage,
+        timestamp: new Date().toISOString(),
+    });
+}
+
 export async function runProductionClient(data = {}) {
     const clientName =
         typeof data.clientName === "string"
@@ -139,6 +161,17 @@ export async function runProductionClient(data = {}) {
             : "";
     const processingApproved = data.processingApproved === true;
     const submitApproved = data.submitApproved === true;
+
+    // PATCH 2 — stage 4: processProductionClient. The values THIS function will
+    // actually act on, so a mismatch with the worker record would localise a
+    // drop to this hop.
+    traceApproval(data, "process_production_client", {
+        clientName: data.clientName ?? null,
+        processingApproved,
+        submitApproved,
+        operationalRoutingApproved: data.operationalRoutingApproved === true,
+        inactiveWorkflowApproved: data.inactiveWorkflowApproved === true,
+    });
 
     const base = {
         milestone: "PRODUCTION_CLIENT_M7_TO_M8",
@@ -229,6 +262,19 @@ export async function runProductionClient(data = {}) {
         // Passed through to M6's client_state initialization. Null unless a live
         // scan positively observed it.
         crcClientStatus: data.crcClientStatus ?? null,
+        // THE MISSING LINK. Neither flag reached M6 before, so the free-report
+        // submission branch was gated on the environment variable ALONE and the
+        // run's own approvals had no effect on it.
+        //
+        // Read from `data` directly rather than the `routingApproved` const,
+        // which is declared BELOW this call — referencing it here is a temporal
+        // dead zone ReferenceError that would crash every client on the first
+        // M7 call, and one that `node --check` cannot see.
+        submitApproved,
+        operationalRoutingApproved: data.operationalRoutingApproved === true,
+        // PATCH 2: same bounded trace array, threaded on so M7/M6/gate append.
+        approvalTrace: data.approvalTrace,
+        approvalTraceLimit: data.approvalTraceLimit,
     });
     const m7LettersOk = m7?.lettersOk === true || m7?.letters_ok === true;
 
@@ -408,11 +454,57 @@ export async function runProductionClient(data = {}) {
     }
 
     if (!m7 || m7.success === false || !m7LettersOk) {
+        // ---- REASON PRESERVATION --------------------------------------------
+        //
+        // This branch used to flatten EVERY M7/capture failure into the single
+        // string "fresh_m7_not_client_ready", which is how 37 clients whose real
+        // outcomes were SUBMISSION_DISABLED, CREDIT_REPORT_PAGE_UNAVAILABLE,
+        // EXTRACTION_FAILED and five others all showed up on the dashboard as one
+        // undifferentiated "not client ready".
+        //
+        // PRECEDENCE, using ONLY property paths that exist in this repo:
+        //
+        //   1. m7.capture_result.error_code
+        //        M7 wraps a failed/observe-only M6 as { capture_result: m6 }.
+        //        errorResponse() (response.js) and the observe-only successes set
+        //        the field `error_code` — NOT `code`, which does not exist. This
+        //        is the MOST specific: SUBMISSION_DISABLED, CREDIT_HERO_UNAVAILABLE,
+        //        EXTRACTION_FAILED, CLIENT_NOT_OPENED, REQUIRED_IDENTITY_FIELDS_MISSING,
+        //        PROFILE_LINK_NOT_FOUND, CREDIT_REPORT_PAGE_UNAVAILABLE, MILESTONE_6_ERROR.
+        //
+        //   2. m7.error_code
+        //        M7's own code when it failed at its own layer
+        //        (PIPELINE_HALTED_AT_CAPTURE, NO_REPORT_MODEL, IDENTITY_NOT_VERIFIED,
+        //        MILESTONE_7_ERROR). PIPELINE_HALTED_AT_CAPTURE is deliberately
+        //        LOWER precedence than capture_result.error_code, so the generic
+        //        wrapper never hides the specific reason underneath it.
+        //
+        //   3. "m7_failed"
+        //        Only when neither exists (e.g. m7 is null/undefined).
+        //
+        // A missing btCreditReportModel on an otherwise-successful M7 (letters not
+        // ready) has no capture error_code and falls to m7.error_code or the
+        // fallback, which is correct — that is an M7-layer state, not a capture one.
+        const specificCode =
+            m7?.capture_result?.error_code ??
+            m7?.error_code ??
+            "m7_failed";
+
         return {
             ...base,
             ok: false,
             stage: "m7",
-            blockedReason: "fresh_m7_not_client_ready",
+            // The specific capture/M7 code, lower-cased for the queue + dashboard.
+            blockedReason: String(specificCode).toLowerCase(),
+            // Human-readable message, preferring the capture layer's own text.
+            failureReason:
+                m7?.capture_result?.error_message ??
+                m7?.error_message ??
+                null,
+            // Carried through where the underlying response set it.
+            requiresHumanReview:
+                m7?.capture_result?.requiresHumanReview === true ||
+                m7?.requiresHumanReview === true,
             crcClientId: findCrcClientId(m7),
             m7,
         };

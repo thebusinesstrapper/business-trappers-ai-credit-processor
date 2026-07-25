@@ -37,6 +37,25 @@ export async function runMilestone7(data = {}) {
         // We do NOT re-implement capture. M6 owns login, client open, identity,
         // Credit Hero navigation, report selection, capture, and normalization,
         // and it already fails closed on every one of those. We consume its result.
+        // PATCH 2 — stage 5: M7. Confirms the flags survived the PP -> M7 hop.
+        if (Array.isArray(data.approvalTrace)) {
+            const limit = Number.isInteger(data.approvalTraceLimit) ? data.approvalTraceLimit : 200;
+            if (data.approvalTrace.length < limit) {
+                data.approvalTrace.push({
+                    jobId: null,
+                    clientName: data.clientName ?? null,
+                    processingApproved: null,
+                    diagnosticOnly: null,
+                    submitApproved: data.submitApproved === true,
+                    operationalRoutingApproved: data.operationalRoutingApproved === true,
+                    inactiveWorkflowApproved: null,
+                    executionMode: null,
+                    stage: "milestone7",
+                    timestamp: new Date().toISOString(),
+                });
+            }
+        }
+
         const m6 = await runMilestone6(data);
 
         // M6 failed closed somewhere (extraction, capture, navigation, identity).

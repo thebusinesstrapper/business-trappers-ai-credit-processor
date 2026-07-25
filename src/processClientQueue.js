@@ -1148,8 +1148,23 @@ async function runJob(job) {
                         m7,
                     };
                 } else {
+                    pushApprovalTrace(job, {
+                        clientName: item.clientName,
+                        processingApproved: true,
+                        diagnosticOnly: job.diagnosticOnly,
+                        submitApproved: job.submitApproved,
+                        operationalRoutingApproved: job.operationalRoutingApproved,
+                        inactiveWorkflowApproved: job.inactiveWorkflowApproved,
+                        executionMode: job.executionMode,
+                        stage: "queue_worker",
+                    });
+
                     result = await runProductionClient({
                         clientName: item.clientName,
+                        // PATCH 2: worker hands its trace array to the client so
+                        // the PP/M7/M6/gate stages append to the SAME bounded log.
+                        approvalTrace: job.approvalTrace,
+                        approvalTraceLimit: APPROVAL_TRACE_LIMIT,
                         // The CRC status positively observed on the DataGrid.
                         // "supplied" is a queue marker, not a CRC status, so the
                         // supplied-name path deliberately sends nothing.
@@ -1338,6 +1353,35 @@ function findActiveJob() {
     return null;
 }
 
+/** Max approvalTrace entries retained on a job, so a full queue stays bounded. */
+const APPROVAL_TRACE_LIMIT = 200;
+
+/**
+ * Append one approval-stage record. BOOLEANS + identifiers only.
+ *
+ * Never records the request body, tokens, report data or identity. Silently
+ * stops appending past APPROVAL_TRACE_LIMIT so a 160-client run cannot grow the
+ * job result without bound; the earliest (request/job-creation) records — the
+ * ones that explain a misconfigured run — are the ones kept.
+ */
+function pushApprovalTrace(job, record) {
+    if (!Array.isArray(job.approvalTrace)) job.approvalTrace = [];
+    if (job.approvalTrace.length >= APPROVAL_TRACE_LIMIT) return;
+
+    job.approvalTrace.push({
+        jobId: job.jobId ?? null,
+        clientName: record.clientName ?? null,
+        processingApproved: record.processingApproved ?? null,
+        diagnosticOnly: record.diagnosticOnly ?? null,
+        submitApproved: record.submitApproved ?? null,
+        operationalRoutingApproved: record.operationalRoutingApproved ?? null,
+        inactiveWorkflowApproved: record.inactiveWorkflowApproved ?? null,
+        executionMode: record.executionMode ?? null,
+        stage: record.stage ?? null,
+        timestamp: new Date().toISOString(),
+    });
+}
+
 export function startClientQueue(data = {}) {
     // ---- OVERLAPPING-RUN PROTECTION --------------------------------------
     //
@@ -1399,6 +1443,27 @@ export function startClientQueue(data = {}) {
         };
     }
 
+    // Same explicit-decision standard for operationalRoutingApproved. It gates
+    // whether the run may WRITE anything (CRC status, observations, inactive
+    // actions), so an omitted routing decision is exactly as unsafe as an
+    // omitted submit decision. Strict boolean required; omission, null, strings
+    // and other values reject BEFORE any browser launch.
+    //
+    // NOTE the asymmetry this repairs: submitApproved defaults true-unless-false
+    // for backwards compatibility, but operationalRoutingApproved has always
+    // required === true, so an omitted value silently ran the queue with routing
+    // OFF. It now rejects loudly instead of running in a surprising half-state.
+    const routingDecisionSupplied =
+        data.operationalRoutingApproved === true ||
+        data.operationalRoutingApproved === false;
+
+    if (!diagnosticOnly && !routingDecisionSupplied) {
+        return {
+            ok: false,
+            blockedReason: "operational_routing_approval_required_for_production_queue",
+        };
+    }
+
     // Denylist. A caller may extend it; the two defaults are always applied so
     // a malformed request can never make Complete or Suspended eligible.
     const suppliedExclusions = Array.isArray(data.excludedStatuses)
@@ -1436,6 +1501,19 @@ export function startClientQueue(data = {}) {
     }
 
     const jobId = crypto.randomUUID();
+
+    // PATCH 2 — stage 1: request normalization. The NORMALIZED booleans, not the
+    // raw body. Recorded before the job starts so a misconfigured run is visible
+    // even if it later fails.
+    const normalizedTrace = {
+        processingApproved: data.processingApproved === true,
+        diagnosticOnly: diagnosticOnly,
+        submitApproved: diagnosticOnly ? false : data.submitApproved !== false,
+        operationalRoutingApproved: diagnosticOnly ? false : data.operationalRoutingApproved === true,
+        inactiveWorkflowApproved: diagnosticOnly ? false : data.inactiveWorkflowApproved === true,
+        executionMode:
+            Array.isArray(clientNames) && clientNames.length > 0 ? "supplied_names" : "full_scan",
+    };
     const job = {
         jobId,
         status: "queued",
@@ -1455,6 +1533,10 @@ export function startClientQueue(data = {}) {
         // null, undefined, or any other value keeps the production default.
         submitApproved: diagnosticOnly ? false : data.submitApproved !== false,
         diagnosticOnly,
+        // PATCH 2: bounded approval trace. Approval BOOLEANS only, never the raw
+        // request body, credentials, report contents or identity. Capped so a
+        // full-queue run cannot grow it without limit (see pushApprovalTrace).
+        approvalTrace: [],
         // A diagnostic run is read-only without exception, so neither the
         // inactive workflow nor operational routing can be armed inside one.
         inactiveWorkflowApproved: diagnosticOnly ? false : data.inactiveWorkflowApproved === true,
@@ -1463,6 +1545,12 @@ export function startClientQueue(data = {}) {
         maxClients,
         delayMs,
         clientNames,
+        // supplied-name vs full-scan, recorded so the trace shows both modes
+        // carried identical approvals.
+        executionMode:
+            Array.isArray(clientNames) && clientNames.length > 0
+                ? "supplied_names"
+                : "full_scan",
         queue: [],
         currentClient: null,
         results: [],
@@ -1494,6 +1582,18 @@ export function startClientQueue(data = {}) {
             observationSync: null,
         },
     };
+
+    // PATCH 2 — stages 1 & 2: request normalization + job creation.
+    pushApprovalTrace(job, { ...normalizedTrace, stage: "request_normalization" });
+    pushApprovalTrace(job, {
+        processingApproved: true,
+        diagnosticOnly: job.diagnosticOnly,
+        submitApproved: job.submitApproved,
+        operationalRoutingApproved: job.operationalRoutingApproved,
+        inactiveWorkflowApproved: job.inactiveWorkflowApproved,
+        executionMode: job.executionMode,
+        stage: "job_creation",
+    });
 
     jobs.set(jobId, job);
     void runJob(job);

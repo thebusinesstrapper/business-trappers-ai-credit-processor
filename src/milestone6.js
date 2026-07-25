@@ -55,7 +55,9 @@ import {
     readOrderPage, readOrderPageOptions, ORDER_STATE, computeEligibilityHint,
 } from "./orderPageReader.js";
 import { decideAcquisition, DECISIONS } from "./acquisitionDecision.js";
-import { navigateToOrderPage, selectAndSubmitFreeReport, isSubmissionEnabled } from "./orderFreeReport.js";
+import {
+    navigateToOrderPage, selectAndSubmitFreeReport, describeSubmissionFlag,
+} from "./orderFreeReport.js";
 import {
     readOpenIntent, createIntent, markSubmissionStarted, markSubmitted,
     resolveIntent, decideIntentRecovery, INTENT_STATUS, RECOVERY,
@@ -151,6 +153,25 @@ async function captureAndNormalize(data = {}, identityState = {}) {
         // that branch remembers to include it or not. Read from CRC, never
         // derived from the supplied name.
         identityState.crcClientId = client.crcClientId ?? null;
+
+        // PATCH 2 — stage 6: M6, at the point identity is authoritative.
+        if (Array.isArray(data.approvalTrace)) {
+            const limit = Number.isInteger(data.approvalTraceLimit) ? data.approvalTraceLimit : 200;
+            if (data.approvalTrace.length < limit) {
+                data.approvalTrace.push({
+                    jobId: null,
+                    clientName: data.clientName ?? null,
+                    processingApproved: null,
+                    diagnosticOnly: null,
+                    submitApproved: data.submitApproved === true,
+                    operationalRoutingApproved: data.operationalRoutingApproved === true,
+                    inactiveWorkflowApproved: null,
+                    executionMode: null,
+                    stage: "milestone6_identity",
+                    timestamp: new Date().toISOString(),
+                });
+            }
+        }
 
         // ---- CLIENT STATE INITIALIZATION -----------------------------------
         //
@@ -639,6 +660,11 @@ async function captureAndNormalize(data = {}, identityState = {}) {
                 openIntent,
                 recovery,
                 replayUrl,
+                // A live submission requires the run's own approvals, not just
+                // the environment flag. Passed explicitly so the acquisition
+                // path can state WHICH gate blocked it.
+                submitApproved: data.submitApproved === true,
+                operationalRoutingApproved: data.operationalRoutingApproved === true,
             });
 
             if (!acquisition.proceedWithCapture) return acquisition.response;
@@ -1044,6 +1070,7 @@ async function runAcquisitionPath(ctx) {
         chPage, crcClientId, processingRunId, browserbaseSessionId,
         baselineReportDate, eligibilityHint, reportPageUrl, memberDashboardUrl,
         openIntent, recovery, replayUrl,
+        submitApproved, operationalRoutingApproved,
     } = ctx;
 
     const base = {
@@ -1219,10 +1246,55 @@ async function runAcquisitionPath(ctx) {
     // and create NO intent — an observation is not an intention, and a row in
     // report_acquisition_intents means "we may have ordered", which would be
     // false and would block the next real run through the partial unique index.
-    if (!isSubmissionEnabled()) {
+    // EVERY GATE, EVALUATED TOGETHER AND REPORTED INDIVIDUALLY.
+    //
+    // Previously only the environment flag was consulted here, and the response
+    // said just "submissionEnabled: false" — the symptom, not the cause. Marcos
+    // Lopez ran with every approval true and the variable set, and the result
+    // could not distinguish an unset variable from a rejected value from a
+    // missing approval. It had to be re-run to learn anything.
+    //
+    // NOTE ALSO that submitApproved and operationalRoutingApproved were never
+    // reaching this module at all: processProductionClient called
+    // runMilestone7({ clientName }) and neither flag was threaded through. The
+    // environment flag was therefore the ONLY gate, which is both why the run
+    // behaved as it did and why the approvals are now passed explicitly.
+    const submissionFlag = describeSubmissionFlag();
+
+    const gateState = {
+        environmentFlag: submissionFlag.enabled,
+        submitApproved: submitApproved === true,
+        operationalRoutingApproved: operationalRoutingApproved === true,
+    };
+
+    const blockedGates = Object.keys(gateState).filter((gate) => gateState[gate] !== true);
+
+    // PATCH 2 — stage 7: the acquisition gate. The DECISIVE record — these are
+    // the exact booleans GATE 0 evaluates, so a run that reaches here with a
+    // false shows precisely where the authorization was lost.
+    if (Array.isArray(data.approvalTrace)) {
+        const limit = Number.isInteger(data.approvalTraceLimit) ? data.approvalTraceLimit : 200;
+        if (data.approvalTrace.length < limit) {
+            data.approvalTrace.push({
+                jobId: null,
+                clientName: data.clientName ?? null,
+                processingApproved: null,
+                diagnosticOnly: null,
+                submitApproved: gateState.submitApproved,
+                operationalRoutingApproved: gateState.operationalRoutingApproved,
+                inactiveWorkflowApproved: null,
+                executionMode: null,
+                stage: "acquisition_gate",
+                timestamp: new Date().toISOString(),
+            });
+        }
+    }
+
+    if (blockedGates.length > 0) {
         console.log(
-            "OBSERVE-ONLY: a free report is available and verified at cost 0. " +
-            "ENABLE_FREE_REPORT_SUBMISSION is not \"true\", so nothing was selected or submitted."
+            `OBSERVE-ONLY: a free report is available and verified at cost 0, but ` +
+            `submission is blocked by: ${blockedGates.join(", ")}. ` +
+            `Environment flag: ${submissionFlag.reason}.`
         );
 
         return {
@@ -1231,17 +1303,30 @@ async function runAcquisitionPath(ctx) {
                 ...base,
                 result: "FREE_REPORT_OBSERVATION_ONLY",
                 classification: "FREE_REPORT_AVAILABLE",
-                submissionEnabled: false,
+                submissionEnabled: submissionFlag.enabled,
+                // THE EXACT REASON, not just the outcome.
+                blockedGates,
+                gateState,
+                submissionFlagReason: submissionFlag.reason,
+                submissionFlagWasQuoted: submissionFlag.wasQuoted ?? null,
                 wouldSubmit: true,
                 acquisitionDecision: decisionRecord,
+                // Page state, NOT the environment flag. These two were easy to
+                // confuse: freeReportEnabled means the free radio is usable on
+                // the order page; submissionEnabled means we are permitted to
+                // click it.
                 freeReportEnabled: true,
                 intentCreated: false,
                 reportOrdered: false,
+                submissionAttempted: false,
+                submissionConfirmed: false,
+                safelyBlocked: true,
+                waitingForReportReadiness: false,
                 diagnosticOnly: true,
                 message:
                     "Observation only. The free option was positively identified at cost 0 and the " +
                     "paid option positively excluded. No radio was selected, no Submit was clicked, " +
-                    "and no acquisition intent was created.",
+                    `and no acquisition intent was created. Blocked by: ${blockedGates.join(", ")}.`,
             }),
         };
     }
@@ -1280,6 +1365,11 @@ async function runAcquisitionPath(ctx) {
     const submission = await selectAndSubmitFreeReport(chPage, {
         optionId: decision.selected_option.id,
         observedCost: decision.selected_option.cost,
+        // Re-proved inside the submitter rather than assumed from up here.
+        approvals: {
+            submitApproved: gateState.submitApproved,
+            operationalRoutingApproved: gateState.operationalRoutingApproved,
+        },
         onSubmissionStarted: () => markSubmissionStarted(intent.intent.id),
     });
 
@@ -1336,7 +1426,19 @@ async function runAcquisitionPath(ctx) {
                 reportDateAfter: newer.reportDate,
             }).catch(() => {});
 
-            return { proceedWithCapture: true };
+            // CONFIRMED. Only now may capture continue: the report we ordered
+            // has positively appeared, so M7 will analyze the NEW report rather
+            // than the stale one we were sent here to replace.
+            return {
+                proceedWithCapture: true,
+                acquisitionOutcome: {
+                    submissionAttempted: true,
+                    submissionConfirmed: true,
+                    safelyBlocked: false,
+                    waitingForReportReadiness: false,
+                    reportDateAfter: newer.reportDate,
+                },
+            };
         }
     }
 
@@ -1355,6 +1457,11 @@ async function runAcquisitionPath(ctx) {
             acquisitionIntentOpen: true,
             acquisitionDecision: decisionRecord,
             analyzedOlderReport: false,
+            submissionAttempted: true,
+            submissionConfirmed: false,
+            safelyBlocked: false,
+            waitingForReportReadiness: true,
+            gateState,
             freeReportEnabled: false,
             nextFreeReportAvailableAt: null,
             paidReportPresent: null,
