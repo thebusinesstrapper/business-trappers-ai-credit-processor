@@ -128,6 +128,34 @@ function getCreditHeroLink(page) {
 }
 
 /**
+ * DIAGNOSTIC ONLY. Which of getCreditHeroLink's three strategies actually
+ * matched, reported without changing how the click target is resolved. Counts
+ * are read independently; the click still uses getCreditHeroLink().first()
+ * exactly as before.
+ */
+async function whichLocatorMatched(page) {
+    const byRole = await page
+        .getByRole("link", { name: CREDIT_HERO_PATTERN })
+        .count()
+        .catch(() => 0);
+    if (byRole > 0) return "role_link";
+
+    const byAnchorText = await page
+        .locator("a", { hasText: CREDIT_HERO_PATTERN })
+        .count()
+        .catch(() => 0);
+    if (byAnchorText > 0) return "anchor_text";
+
+    const byText = await page
+        .getByText(CREDIT_HERO_LABEL, { exact: true })
+        .count()
+        .catch(() => 0);
+    if (byText > 0) return "text_fallback";
+
+    return "none";
+}
+
+/**
  * Click the CreditHeroScore link and return the page it actually landed on.
  *
  * CRC is expected to open CreditHeroScore in a NEW TAB, but the inactive /
@@ -221,6 +249,17 @@ async function probeActionability(link) {
                 ariaDisabled: el.getAttribute("aria-disabled") === "true",
                 hasDisabledAttribute: el.hasAttribute("disabled"),
                 pointerEventsNone: style.pointerEvents === "none",
+
+                // ---- DIAGNOSTIC-ONLY FIELDS (not consulted by any decision) ---
+                // Raw values are captured here and SANITIZED in JS below; the raw
+                // href/onclick never leave the page unredacted.
+                rawHref: typeof href === "string" ? href : null,
+                target: el.getAttribute("target"),
+                role: el.getAttribute("role"),
+                hasOnclick:
+                    el.hasAttribute("onclick") ||
+                    typeof el.onclick === "function",
+                visibleText: (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80),
             };
         })
         .catch(() => null);
@@ -243,6 +282,37 @@ function anchorWithoutDestination(probe) {
 }
 
 const MAX_OPEN_ATTEMPTS = 3;
+
+/**
+ * Strip a URL down to scheme + host + path for diagnostics. Query string (which
+ * carries tGUID and other tokens) and hash are dropped. Non-URL strings like
+ * "about:blank" and "chrome-error://…" pass through unchanged but truncated.
+ */
+function sanitizeUrl(value) {
+    if (typeof value !== "string" || value === "") return null;
+
+    // Non-http(s) schemes (about:, chrome-error:, data:, edge-error:) parse in a
+    // way that loses their meaning (URL("about:blank").pathname === "blank"), so
+    // keep them as-is with the query dropped — that is exactly the diagnostic
+    // signal we need for a blank/error tab.
+    if (!/^https?:/i.test(value)) {
+        return value.split("?")[0].slice(0, 120);
+    }
+
+    try {
+        const u = new URL(value);
+        // origin + pathname only — never search or hash.
+        return `${u.origin}${u.pathname}`;
+    } catch {
+        return value.split("?")[0].slice(0, 120);
+    }
+}
+
+/** Drop the query string / GUID from an href attribute for diagnostics. */
+function sanitizeHref(rawHref) {
+    if (typeof rawHref !== "string" || rawHref.trim() === "") return null;
+    return rawHref.split("?")[0].split("#")[0].slice(0, 120);
+}
 
 // How long to wait for the dashboard to still be there, and for the control to
 // become visible and enabled. Both are waits on REAL STATE, not sleeps.
@@ -338,11 +408,63 @@ async function attemptOpen(page, context, attempt) {
     // ---- 5. CLICK AND FOLLOW ----------------------------------------------
     let landed;
 
+    // DIAGNOSTIC ONLY — captured before the click so the control's own shape is
+    // recorded even if the click then navigates. Failure here never affects the
+    // attempt; diagnostics default to null.
+    const locatorStrategy = await whichLocatorMatched(page).catch(() => null);
+    const originUrlBeforeClick = sanitizeUrl(page.url());
+
     try {
         landed = await clickAndFollow(page, context);
     } catch (error) {
-        return { ok: false, reason: `Click failed: ${error.message}` };
+        return {
+            ok: false,
+            reason: `Click failed: ${error.message}`,
+            diagnostics: {
+                locatorStrategy,
+                originUrlBeforeClick,
+                newPageEventFired: null,
+                returnedPageClosed: null,
+                finalUrl: null,
+                originUrlAfterClick: sanitizeUrl(page.url()),
+                controlTag: probe?.tag ?? null,
+                controlHref: sanitizeHref(probe?.rawHref),
+                controlTarget: probe?.target ?? null,
+                controlRole: probe?.role ?? null,
+                controlHasOnclick: probe?.hasOnclick ?? null,
+                controlVisibleText: probe?.visibleText ?? null,
+            },
+        };
     }
+
+    // A "page" event firing == CreditHero attempted a new tab. clickAndFollow
+    // reports this via openedInNewTab. Reading the returned page's URL and
+    // closed-state is diagnostic and must never throw.
+    const returnedPageClosed = landed?.page ? landed.page.isClosed() : null;
+    const finalUrl = landed?.page && !returnedPageClosed
+        ? sanitizeUrl(landed.page.url())
+        : null;
+
+    const diagnostics = {
+        // Q1: did a new page (tab/popup) event fire on this click?
+        newPageEventFired: landed?.openedInNewTab ?? null,
+        // Q2/Q3: the URL of the page we followed to, sanitized.
+        finalUrl,
+        // The ORIGINAL page's URL after the click (did IT navigate / stay on CRC?)
+        originUrlAfterClick: sanitizeUrl(page.url()),
+        originUrlBeforeClick,
+        // Q3: was the followed page already closed?
+        returnedPageClosed,
+        // Q4/Q10: the control's own shape.
+        controlTag: probe?.tag ?? null,
+        controlHref: sanitizeHref(probe?.rawHref),
+        controlTarget: probe?.target ?? null,
+        controlRole: probe?.role ?? null,
+        controlHasOnclick: probe?.hasOnclick ?? null,
+        controlVisibleText: probe?.visibleText ?? null,
+        // Which strategy matched the control.
+        locatorStrategy,
+    };
 
     // ---- 6. VERIFY CREDITHERO ACTUALLY OPENED -----------------------------
     //
@@ -352,7 +474,11 @@ async function attemptOpen(page, context, attempt) {
     try {
         await landed.page.waitForLoadState("load", { timeout: PAGE_LOAD_TIMEOUT });
     } catch {
-        return { ok: false, reason: "The page never finished loading after the click." };
+        return {
+            ok: false,
+            reason: "The page never finished loading after the click.",
+            diagnostics,
+        };
     }
 
     const url = landed.page.url();
@@ -369,6 +495,7 @@ async function attemptOpen(page, context, attempt) {
             nonActionable: noDestination,
             definitive: false,
             probe,
+            diagnostics,
             reason: noDestination
                 ? `The "${CREDIT_HERO_LABEL}" control has no usable href and the click did not ` +
                   `navigate — still on CRC (${url}). The control is present but dead.`
@@ -418,6 +545,7 @@ async function attemptOpen(page, context, attempt) {
                 reason:
                     `The "${CREDIT_HERO_LABEL}" tab opened but was closed before CreditHero could ` +
                     `be confirmed. Failing closed rather than adopting a dead page.`,
+                diagnostics,
             };
         }
 
@@ -469,10 +597,11 @@ async function attemptOpen(page, context, attempt) {
                 `positive CreditHero evidence (a known CreditHero URL path or a recognized CreditHero ` +
                 `page state) within the wait. Failing closed — the run does not read a report, decide ` +
                 `freshness, or enter acquisition on an unconfirmed page.`,
+            diagnostics,
         };
     }
 
-    return { ok: true, ...landed };
+    return { ok: true, ...landed, diagnostics };
 }
 
 /**
@@ -549,6 +678,10 @@ export async function openCreditHero(page, context) {
             reason: result.reason,
             nonActionable: result.nonActionable === true,
             definitive: result.definitive === true,
+            // DIAGNOSTIC ONLY — the full object, untruncated. Present on every
+            // post-click return; null on the pre-click early exits (control not
+            // present/visible/enabled), which is itself informative.
+            diagnostics: result.diagnostics ?? null,
         });
 
         console.error(`Attempt ${attempt} failed: ${result.reason}`);
