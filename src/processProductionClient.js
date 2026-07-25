@@ -384,46 +384,53 @@ export async function runProductionClient(data = {}) {
         };
     }
 
-    // CREDENTIALS_OR_AUTH_FAILED -> Manual Review Required (status only).
+    // CREDENTIALS_OR_AUTH_FAILED -> inactive workflow (needs BOTH gates).
+    //
+    // BUSINESS STATE, NOT A TECHNICAL FAILURE. The observed page is
+    // payment_update.asp reading "Your payment information has already been
+    // updated. Please login to confirm." — the client changed their CreditHero
+    // login/payment, so CRC's stored access no longer works. That is
+    // CREDIT_MONITORING_INACTIVE, identical in business meaning to
+    // PAYMENT_REQUIRED and CHS_NOT_ACTIVATED: monitoring access is gone until the
+    // client restores it. It routes to the SAME existing inactive workflow — CRC
+    // status "Credit Monitoring Inactive", inactive access state in memory, the
+    // initial inactive message, and the existing daily-check + 7-day reminder —
+    // NOT to generic Manual Review. No report is ordered, monitoring is not
+    // reactivated, no round advances, no letters are generated; normal processing
+    // resumes only once CreditHero access is restored (which flips the landing
+    // state away from this marker on a future run).
     if (classification === "CREDENTIALS_OR_AUTH_FAILED") {
         if (!routingApproved) {
             return {
-                ...base, ok: false, stage: "credentials_or_auth_failed",
-                blockedReason: "credentials_or_auth_failed",
+                ...base, ok: false, stage: "credit_hero_inactive",
+                blockedReason: "credit_monitoring_inactive",
                 classification, crcClientId: routeCrcId,
-                proposedAction: "SET_MANUAL_REVIEW_REQUIRED",
+                proposedAction: "ENTER_INACTIVE_WORKFLOW",
                 statusUpdated: false, m7,
             };
         }
 
-        const status = await statusOnlyUpdate({
-            clientName, crcClientId: routeCrcId,
-            targetStatus: "Manual Review Required",
-            blockReason: "CREDENTIALS_OR_AUTH_FAILED",
+        const inactive = await runInactiveWorkflow({
+            clientName,
+            crcClientId: routeCrcId,
+            inactiveWorkflowApproved: data.inactiveWorkflowApproved === true,
         });
 
-        if (status.statusUpdated) {
-            await recordCreditHeroState(String(routeCrcId), {
-                block_reason: "CREDENTIALS_OR_AUTH_FAILED",
-                last_credit_hero_check_at: nowIso,
+        // Same confirmed-status persistence as the PAYMENT_REQUIRED branch: only
+        // the status runInactiveWorkflow() read back as actually written.
+        if (inactive?.statusUpdated === true && inactive?.statusWritten) {
+            await recordCreditHeroState(String(inactive.crcClientId), {
+                crc_client_status: inactive.statusWritten,
             }).catch(() => {});
-
-            // Persist the exact CRC status statusOnlyUpdate() confirmed it wrote —
-            // its own report.statusWritten, passed through from updateClientStatus()'s
-            // read-back, never the requested targetStatus. Only on confirmed success.
-            if (status?.statusUpdated === true && status?.statusWritten) {
-                await recordCreditHeroState(String(routeCrcId), {
-                    crc_client_status: status.statusWritten,
-                }).catch(() => {});
-            }
         }
 
         return {
-            ...base, ok: status.statusUpdated,
-            stage: "credentials_or_auth_failed",
-            blockedReason: "credentials_or_auth_failed",
-            classification, crcClientId: routeCrcId,
-            status, m7,
+            ...base,
+            ok: inactive.noticeSent || inactive.reminderSent || inactive.statusUpdated,
+            stage: "credit_hero_inactive",
+            blockedReason: "credit_monitoring_inactive",
+            classification, crcClientId: inactive.crcClientId,
+            inactive, m7,
         };
     }
 

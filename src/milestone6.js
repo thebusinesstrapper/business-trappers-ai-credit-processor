@@ -453,7 +453,13 @@ async function captureAndNormalize(data = {}, identityState = {}) {
                 creditHeroLandingState: "CREDENTIALS_OR_AUTH_FAILED",
                 classificationReason: chLanding.reason,
                 evidence: chLanding.evidence,
-                requiresHumanReview: true,
+                // A changed CreditHero login/payment is a business inactive state,
+                // not a technical failure: the client updated their credentials so
+                // CRC's stored access no longer works. Routes to the existing
+                // inactive workflow (CRC status, memory, initial message, daily +
+                // 7-day reminder) — the same flag PAYMENT_REQUIRED and
+                // CHS_NOT_ACTIVATED set — NOT generic Manual Review.
+                requiresInactiveWorkflow: true,
                 diagnosticOnly: true,
                 replayUrl,
             });
@@ -497,6 +503,10 @@ async function captureAndNormalize(data = {}, identityState = {}) {
         const memberDashboardUrl = chPage.url();
 
         let reportPage;
+        // Set true only when the order-page catch acquires a report and re-opens
+        // it, so the CREDIT_REPORT_PAGE_UNAVAILABLE fall-through is skipped and
+        // control reaches the selector/capture flow.
+        let reportAcquiredInCatch = false;
 
         try {
             reportPage = await openCreditReport(chPage);
@@ -533,32 +543,74 @@ async function captureAndNormalize(data = {}, identityState = {}) {
             }
 
             if (orderRead && orderRead.classification === ORDER_STATE.FREE_REPORT_AVAILABLE) {
-                return successResponse({
-                    milestone: "M6_CAPTURE",
-                    result: "FREE_REPORT_AVAILABLE",
-                    stage: "order_page",
+                // The free report is available and the client is due. This is the
+                // acquisition trigger — run the SAME validated path the
+                // report-selector branch uses (GATE 0 $0 verify, single submit,
+                // intent, poll). openCreditReport threw because CreditHero
+                // redirected us to the order page (no report yet), so there is no
+                // report URL to re-open with: pass reportPageUrl:null and the poll
+                // re-opens via openCreditReport() from the member dashboard once
+                // the ordered report lands.
+                const acqBaselineReportDate = orderRead.lastReportDate ?? null;
+                const acqOpenIntent = await readOpenIntent(client.crcClientId).catch(() => null);
+                const acqRecovery = decideIntentRecovery(acqOpenIntent, acqBaselineReportDate);
+
+                const acquisition = await runAcquisitionPath({
+                    chPage,
                     crcClientId: client.crcClientId,
-                    classification: "FREE_REPORT_AVAILABLE",
-                    freeReportEnabled: orderRead.freeReportEnabled,
-                    nextFreeReportAvailableAt: orderRead.nextFreeReportAvailableAt,
-                    paidReportPresent: orderRead.paidReportPresent,
-                    paidReportPrice: orderRead.paidReportPrice,
-                    lastReportDate: orderRead.lastReportDate,
+                    processingRunId,
+                    browserbaseSessionId,
+                    baselineReportDate: acqBaselineReportDate,
                     eligibilityHint: orderRead.eligibilityHint,
-                    temporaryOverrideApplied: orderRead.temporaryOverrideApplied,
-                    diagnosticOnly: true,
+                    reportPageUrl: null,
+                    memberDashboardUrl,
+                    openIntent: acqOpenIntent,
+                    recovery: acqRecovery,
                     replayUrl,
+                    submitApproved: data.submitApproved === true,
+                    operationalRoutingApproved: data.operationalRoutingApproved === true,
+                    clientName: data.clientName ?? null,
+                    approvalTrace: data.approvalTrace,
+                    approvalTraceLimit: data.approvalTraceLimit,
                 });
+
+                if (!acquisition.proceedWithCapture) return acquisition.response;
+
+                // A strictly newer report was ordered and confirmed. Re-open the
+                // report page (it now exists) and fall through to the existing
+                // selector -> freshness -> capture flow. openCreditReport still
+                // hard-blocks the order page; it succeeds now only because a real
+                // report is present to open.
+                try {
+                    reportPage = await openCreditReport(chPage);
+                } catch (reopenError) {
+                    return errorResponse("REPORT_REOPEN_FAILED_AFTER_ACQUISITION",
+                        `A new free report was acquired but the report page could not be re-opened: ` +
+                            `${reopenError.message}`,
+                        {
+                            milestone: "M6_CAPTURE",
+                            stage: "post_acquisition",
+                            crcClientId: client.crcClientId,
+                            requiresHumanReview: true,
+                        });
+                }
+
+                reportAcquiredInCatch = true;
             }
 
-            return errorResponse("CREDIT_REPORT_PAGE_UNAVAILABLE",
-                `Could not reach the credit report page: ${error.message}`,
-                {
-                    milestone: "M6_CAPTURE",
-                    creditHeroLandingUrl: chPage.url(),
-                    orderPageClassification: orderRead ? orderRead.classification : null,
-                    requiresHumanReview: true,
-                });
+            // Only reached for classifications we do not act on (true WAITING is
+            // returned above; ORDER_PAGE_UNREADABLE / null fall here). Skipped
+            // when the catch acquired and re-opened a report.
+            if (!reportAcquiredInCatch) {
+                return errorResponse("CREDIT_REPORT_PAGE_UNAVAILABLE",
+                    `Could not reach the credit report page: ${error.message}`,
+                    {
+                        milestone: "M6_CAPTURE",
+                        creditHeroLandingUrl: chPage.url(),
+                        orderPageClassification: orderRead ? orderRead.classification : null,
+                        requiresHumanReview: true,
+                    });
+            }
         }
 
         console.log(`On the report page: ${reportPage.reportUrl}`);
@@ -1424,7 +1476,17 @@ async function runAcquisitionPath(ctx) {
     while (Date.now() < deadline) {
         await chPage.waitForTimeout(ACQUISITION_POLL_INTERVAL_MS);
 
-        await chPage.goto(reportPageUrl, { waitUntil: "load" }).catch(() => {});
+        // Re-open the report page for this poll iteration. The report-selector
+        // branch supplies a concrete reportPageUrl (goto is enough). The
+        // order-page-catch branch has none (openCreditReport threw earlier), so
+        // re-open via the validated navigator from the member dashboard — it
+        // succeeds once the ordered report lands, and still hard-blocks the
+        // order page throughout.
+        if (reportPageUrl) {
+            await chPage.goto(reportPageUrl, { waitUntil: "load" }).catch(() => {});
+        } else {
+            await openCreditReport(chPage).catch(() => {});
+        }
 
         const fresh = await readReportSelector(chPage);
 
