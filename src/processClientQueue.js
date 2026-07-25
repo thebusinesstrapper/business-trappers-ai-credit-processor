@@ -629,6 +629,47 @@ function buildExtractionDiagnostic(capture) {
  * Excluded by construction: report payloads, letter bodies, addresses, DOB,
  * SSN, identity objects, bureau data, PDF contents.
  */
+/**
+ * Project openCreditHero's per-attempt diagnostics through an EXPLICIT
+ * whitelist for the public job payload.
+ *
+ * The diagnostics are already sanitized at source in openCreditHero.js (URLs
+ * stripped of query/GUID, onclick reduced to a boolean, visible text capped).
+ * This is the trust boundary for the GET response, so we re-sanitize defensively
+ * and, more importantly, name every field that may pass — nothing added to the
+ * source object later can leak into the public payload without also being added
+ * here. Any unknown field is dropped.
+ *
+ * Booleans pass as booleans (or null); strings run through the existing
+ * sanitizers; URLs additionally have the client name redacted.
+ */
+function projectCreditHeroDiagnostics(diag, clientName = null) {
+    if (!diag || typeof diag !== "object") return null;
+
+    const bool = (v) => (typeof v === "boolean" ? v : null);
+    const url = (v) => redactClientName(safeCode(v), clientName);
+    const str = (v) => redactClientName(safeCode(v), clientName);
+
+    return {
+        // Q1 / Q3 — booleans about the followed page.
+        newPageEventFired: bool(diag.newPageEventFired),
+        returnedPageClosed: bool(diag.returnedPageClosed),
+        // Q2 / Q3 — sanitized URLs (already query/GUID-stripped at source).
+        finalUrl: url(diag.finalUrl),
+        originUrlAfterClick: url(diag.originUrlAfterClick),
+        originUrlBeforeClick: url(diag.originUrlBeforeClick),
+        // Q4 / Q10 — the control's shape.
+        controlTag: str(diag.controlTag),
+        controlHref: str(diag.controlHref),
+        controlTarget: str(diag.controlTarget),
+        controlRole: str(diag.controlRole),
+        controlHasOnclick: bool(diag.controlHasOnclick),
+        controlVisibleText: redactClientName(safeReason(diag.controlVisibleText), clientName),
+        // Which locator strategy matched.
+        locatorStrategy: str(diag.locatorStrategy),
+    };
+}
+
 function buildM7Diagnostic(m7, clientName = null) {
     if (!m7 || typeof m7 !== "object") return null;
 
@@ -705,6 +746,13 @@ function buildM7Diagnostic(m7, clientName = null) {
                 attemptLog: attemptLog.map((entry) => ({
                     attempt: Number.isFinite(Number(entry?.attempt)) ? Number(entry.attempt) : null,
                     reason: redactClientName(safeReason(entry?.reason), clientName),
+                    // The per-attempt diagnostics from openCreditHero. Already
+                    // sanitized at source (URLs stripped of query/GUID, onclick
+                    // reduced to a boolean, text capped); re-projected here
+                    // through an explicit whitelist so this boundary controls
+                    // exactly which fields reach the public payload and nothing
+                    // new can leak in later.
+                    diagnostics: projectCreditHeroDiagnostics(entry?.diagnostics, clientName),
                 })),
             }
             : null,
