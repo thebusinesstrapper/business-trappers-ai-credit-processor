@@ -512,69 +512,66 @@ async function selectVerifiedFreeOption(frame, optionId) {
 
     const radio = frame.locator(idSelector(optionId)).first();
 
-    if (await radio.isVisible().catch(() => false)) {
-        outcome.via = "native_input";
-        outcome.clickAttempted = true;
+    // Select the native radio DIRECTLY by #id via .check(). CreditHero
+    // CSS-replaces the radio with a styled control, so the input reports
+    // isVisible() === false while remaining fully actionable — the old
+    // isVisible() gate therefore fell through to a bound <label for>, which this
+    // page does NOT have, so nothing was ever selected and Submit was never
+    // reached. .check() waits for the radio to be actionable (not merely
+    // visible), performs the check, and is a no-op if already checked; we then
+    // PROVE it with isChecked(). Never forced.
+    outcome.via = "native_input_check";
+    outcome.clickAttempted = true;
 
-        const done = await radio
-            .check({ timeout: SELECT_TIMEOUT })   // NO force.
-            .then(() => true)
-            .catch(() => false);
+    const checked = await radio
+        .check({ timeout: SELECT_TIMEOUT })
+        .then(() => true)
+        .catch(() => false);
 
-        if (!done) {
-            return { ...outcome, ok: false, reason: "check() on the native radio did not complete." };
-        }
-    } else {
+    if (!checked) {
+        // Fall back to a bound <label for> only if the direct check could not
+        // complete — preserves the prior behaviour for pages that DO style via a
+        // real label and leave the input genuinely non-actionable.
         const labels = frame.locator(labelSelector(optionId));
         const labelCount = await labels.count().catch(() => 0);
 
-        if (labelCount === 0) {
+        if (labelCount !== 1) {
             return {
                 ...outcome,
                 ok: false,
                 reason:
-                    `The native radio for "${optionId}" is not actionable and no bound ` +
-                    `<label for="${optionId}"> exists to click. Not selecting.`,
-            };
-        }
-
-        if (labelCount > 1) {
-            return {
-                ...outcome,
-                ok: false,
-                reason:
-                    `Ambiguous: ${labelCount} labels are bound to "${optionId}". We do not ` +
-                    `resolve ambiguity by choosing one. Not selecting.`,
+                    `check() on #${optionId} did not complete and there is no single bound ` +
+                    `<label for="${optionId}"> to fall back to (${labelCount} found). Not selecting.`,
             };
         }
 
         const label = labels.first();
-
         if (!(await label.isVisible().catch(() => false))) {
-            return {
-                ...outcome,
-                ok: false,
-                reason: `The label bound to "${optionId}" is present but not visible. Not clicking it.`,
-            };
+            return { ...outcome, ok: false,
+                reason: `The label bound to "${optionId}" is present but not visible. Not clicking it.` };
         }
 
         outcome.via = "bound_label";
-        outcome.clickAttempted = true;
-
-        const done = await label
-            .click({ timeout: SELECT_TIMEOUT })   // NO force.
+        const labelDone = await label
+            .click({ timeout: SELECT_TIMEOUT })
             .then(() => true)
             .catch(() => false);
 
-        if (!done) {
+        if (!labelDone) {
             return { ...outcome, ok: false, reason: "The bound-label click did not complete." };
         }
     }
 
+    // POSITIVE PROOF the radio is actually checked. verifyOnlyFreeIsChecked is
+    // the authority: it confirms the FREE option is checked AND is the only one
+    // checked, and reports the actual checkedIds as evidence (so a click that
+    // checked the WRONG option is surfaced, not hidden). Run it unconditionally.
     const verification = await verifyOnlyFreeIsChecked(frame, optionId);
     outcome.verification = verification;
 
-    if (!verification.ok) return { ...outcome, ok: false, reason: verification.reason };
+    if (!verification.ok) {
+        return { ...outcome, ok: false, reason: verification.reason };
+    }
 
     return { ...outcome, ok: true };
 }
