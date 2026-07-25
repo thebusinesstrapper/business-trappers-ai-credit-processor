@@ -98,6 +98,9 @@ function publicJob(job) {
         delayMs: job.delayMs,
         suppliedClientCount: job.clientNames.length,
         summary: { ...job.summary },
+        // PATCH 2: the bounded approval trace, so a misconfigured run's flag
+        // values are visible in the polled result rather than only in logs.
+        approvalTrace: Array.isArray(job.approvalTrace) ? job.approvalTrace : [],
         currentClient: job.currentClient,
         queuePreview: job.queue.slice(0, 20),
         results: job.results.slice(-MAX_RETAINED_RESULTS),

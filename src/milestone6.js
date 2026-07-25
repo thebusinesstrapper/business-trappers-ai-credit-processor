@@ -665,6 +665,13 @@ async function captureAndNormalize(data = {}, identityState = {}) {
                 // path can state WHICH gate blocked it.
                 submitApproved: data.submitApproved === true,
                 operationalRoutingApproved: data.operationalRoutingApproved === true,
+                // The shared bounded trace, threaded IN so the acquisition-gate
+                // stamp uses ctx-scoped values. runAcquisitionPath's parameter is
+                // `ctx`, not `data`; referencing `data` inside it threw
+                // "data is not defined" (surfaced as MILESTONE_6_ERROR).
+                clientName: data.clientName ?? null,
+                approvalTrace: data.approvalTrace,
+                approvalTraceLimit: data.approvalTraceLimit,
             });
 
             if (!acquisition.proceedWithCapture) return acquisition.response;
@@ -1071,6 +1078,7 @@ async function runAcquisitionPath(ctx) {
         baselineReportDate, eligibilityHint, reportPageUrl, memberDashboardUrl,
         openIntent, recovery, replayUrl,
         submitApproved, operationalRoutingApproved,
+        clientName: traceClientName, approvalTrace, approvalTraceLimit,
     } = ctx;
 
     const base = {
@@ -1272,12 +1280,17 @@ async function runAcquisitionPath(ctx) {
     // PATCH 2 — stage 7: the acquisition gate. The DECISIVE record — these are
     // the exact booleans GATE 0 evaluates, so a run that reaches here with a
     // false shows precisely where the authorization was lost.
-    if (Array.isArray(data.approvalTrace)) {
-        const limit = Number.isInteger(data.approvalTraceLimit) ? data.approvalTraceLimit : 200;
-        if (data.approvalTrace.length < limit) {
-            data.approvalTrace.push({
+    //
+    // Uses ONLY variables in this function's scope: approvalTrace /
+    // approvalTraceLimit / traceClientName come from ctx (destructured above),
+    // gateState is local. There is no `data` here — runAcquisitionPath's
+    // parameter is `ctx`.
+    if (Array.isArray(approvalTrace)) {
+        const limit = Number.isInteger(approvalTraceLimit) ? approvalTraceLimit : 200;
+        if (approvalTrace.length < limit) {
+            approvalTrace.push({
                 jobId: null,
-                clientName: data.clientName ?? null,
+                clientName: traceClientName ?? null,
                 processingApproved: null,
                 diagnosticOnly: null,
                 submitApproved: gateState.submitApproved,
