@@ -38,12 +38,52 @@
  * it and report it. We do not attempt to resolve it.
  */
 
+import { recognizeCreditHeroLanding, CH_LANDING_STATE } from "./creditHeroLandingState.js";
+
 // How long to give CRC to spawn a new tab after the click before we conclude
 // it navigated in the current tab instead.
 const NEW_TAB_TIMEOUT = 15000;
 
 // How long to wait for the CreditHeroScore page to reach the "load" state.
 const PAGE_LOAD_TIMEOUT = 60000;
+
+/**
+ * How long the adopted page may take to POSITIVELY leave the CRC host and be a
+ * live CreditHero page before we give up and fail closed. Short: the load-state
+ * wait above already elapsed, so the URL is expected to have settled; this only
+ * absorbs a brief post-load redirect from the CRC domain to CreditHero.
+ */
+const CH_CONFIRM_TIMEOUT_MS = 8000;
+const CH_CONFIRM_POLL_MS = 250;
+
+/**
+ * The CRC host. Reused verbatim from the existing same-tab guard below. A page
+ * still on this host is, by definition, NOT CreditHero.
+ */
+const CRC_HOST_PATTERN = /app\.creditrepaircloud\.com/i;
+
+/**
+ * POSITIVE CreditHero URL evidence — the exact .asp paths the system already
+ * trusts as CreditHero-owned, sourced verbatim from other modules. No host is
+ * invented:
+ *   - mcc_creditreports_v2.asp  openCreditReport.js REPORT_PAGE (the report page)
+ *   - mcc_order_select_v2.asp   openCreditReport.js FORBIDDEN_PAGES (the order page)
+ *   - customer_login.asp        creditHeroLandingState.js AUTH link
+ *   - payment_update.asp        creditHeroLandingState.js PAYMENT form
+ *   - mcc_home.asp              the CreditHero member dashboard landing
+ *
+ * These live under CreditHero's cp6 application; a URL carrying any of them is a
+ * CreditHero page. This is ONE of two accepted positive signals — see below.
+ */
+const CH_URL_PATH_PATTERN =
+    /(mcc_creditreports_v2|mcc_order_select_v2|mcc_home|customer_login|payment_update)\.asp/i;
+
+/**
+ * URLs that are never a confirmed page, whatever else is true: blank tabs, empty
+ * strings, and browser error pages. about:blank is the specific Mary case — a
+ * new tab that opened and never completed navigation.
+ */
+const NON_PAGE_URL_PATTERN = /^(about:blank|about:blank#|chrome-error:|chrome:|data:|edge-error:)/i;
 
 /**
  * TEMPORARY — MILESTONE 3 DISCOVERY SCAFFOLDING.
@@ -319,7 +359,7 @@ async function attemptOpen(page, context, attempt) {
 
     // Still on CRC means the click did nothing. This is the silent no-op above,
     // and it is the failure mode a naive "did we click?" check cannot see.
-    if (!landed.openedInNewTab && /app\.creditrepaircloud\.com/i.test(url)) {
+    if (!landed.openedInNewTab && CRC_HOST_PATTERN.test(url)) {
         // THE CORROBORATION PAIRS HERE, and only here. An anchor with no
         // destination that ALSO did not navigate is a dead control. An anchor
         // with no destination that DID navigate is CRC's ordinary href-less
@@ -333,6 +373,102 @@ async function attemptOpen(page, context, attempt) {
                 ? `The "${CREDIT_HERO_LABEL}" control has no usable href and the click did not ` +
                   `navigate — still on CRC (${url}). The control is present but dead.`
                 : `The click did not navigate — still on CRC (${url}). The control was likely not yet wired up.`,
+        };
+    }
+
+    // ---- 7. POSITIVELY CONFIRM CREDITHERO OPENED --------------------------
+    //
+    // WHY THIS EXISTS. The CRC-host guard above only runs on the SAME-TAB
+    // branch (!openedInNewTab). When CreditHero opens in a NEW TAB, that guard
+    // was skipped entirely, so a new tab that opened but never reached
+    // CreditHero — blank, an interstitial, opened-then-stalled, or opened and
+    // immediately closed — returned ok:true with a page that is not CreditHero.
+    // Milestone 6 adopted it, every downstream read failed SOFT, and the run
+    // drifted into the acquisition poll until the Browserbase session timed out.
+    // That is the Mary Battie 5:14 timeout, and about:blank never completing
+    // navigation is a leading explanation for it.
+    //
+    // "NOT ON CRC" IS NOT ENOUGH — about:blank is off-CRC but is not CreditHero.
+    // We require POSITIVE CreditHero evidence, from signals already trusted in
+    // this codebase, and we poll within a bounded wait so a briefly-blank tab
+    // that COMPLETES navigation to CreditHero is accepted rather than rejected.
+    //
+    // ACCEPTED when the page is live (not closed, not blank/error, not on CRC)
+    // AND either:
+    //   (a) its URL carries a known CreditHero .asp path (CH_URL_PATH_PATTERN);
+    //       this catches the healthy dashboard, the report page, the order page
+    //       and the login/payment pages by their own trusted URLs; OR
+    //   (b) recognizeCreditHeroLanding() — the SAME read-only recognizer M6 runs
+    //       on this page moments later — returns a NAMED state
+    //       (HEALTHY_MEMBER_DASHBOARD / CREDENTIALS_OR_AUTH_FAILED /
+    //       PAYMENT_REQUIRED). This catches a CreditHero page whose URL path we
+    //       did not enumerate, by its content.
+    //
+    // The OR is deliberate: a healthy dashboard returns UNKNOWN from the content
+    // recognizer unless it hits >=2 markers, but its URL is a cp6/*.asp path, so
+    // signal (a) confirms it. Neither signal fires for about:blank.
+    const confirmDeadline = Date.now() + CH_CONFIRM_TIMEOUT_MS;
+    let confirmed = false;
+
+    while (Date.now() < confirmDeadline) {
+        if (landed.page.isClosed()) {
+            return {
+                ok: false,
+                error_code: "CREDIT_HERO_PAGE_NOT_CONFIRMED",
+                reason:
+                    `The "${CREDIT_HERO_LABEL}" tab opened but was closed before CreditHero could ` +
+                    `be confirmed. Failing closed rather than adopting a dead page.`,
+            };
+        }
+
+        const currentUrl = landed.page.url() || "";
+
+        // A live, CreditHero-looking URL is sufficient on its own.
+        const urlIsCreditHero =
+            currentUrl !== "" &&
+            !NON_PAGE_URL_PATTERN.test(currentUrl) &&
+            !CRC_HOST_PATTERN.test(currentUrl) &&
+            CH_URL_PATH_PATTERN.test(currentUrl);
+
+        if (urlIsCreditHero) {
+            confirmed = true;
+            break;
+        }
+
+        // Otherwise, if the page has settled onto SOMETHING that is not blank,
+        // not an error page and not CRC, ask the content recognizer. Only then —
+        // running it on a blank page is pointless and running it on CRC would be
+        // reading the wrong tab.
+        const settledOffCrc =
+            currentUrl !== "" &&
+            !NON_PAGE_URL_PATTERN.test(currentUrl) &&
+            !CRC_HOST_PATTERN.test(currentUrl);
+
+        if (settledOffCrc) {
+            const landing = await recognizeCreditHeroLanding(landed.page).catch(() => null);
+
+            if (
+                landing &&
+                landing.state &&
+                landing.state !== CH_LANDING_STATE.UNKNOWN
+            ) {
+                confirmed = true;
+                break;
+            }
+        }
+
+        await landed.page.waitForTimeout(CH_CONFIRM_POLL_MS);
+    }
+
+    if (!confirmed) {
+        return {
+            ok: false,
+            error_code: "CREDIT_HERO_PAGE_NOT_CONFIRMED",
+            reason:
+                `The "${CREDIT_HERO_LABEL}" control was clicked but the resulting page never showed ` +
+                `positive CreditHero evidence (a known CreditHero URL path or a recognized CreditHero ` +
+                `page state) within the wait. Failing closed — the run does not read a report, decide ` +
+                `freshness, or enter acquisition on an unconfirmed page.`,
         };
     }
 
