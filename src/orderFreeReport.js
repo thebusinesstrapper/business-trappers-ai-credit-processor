@@ -47,6 +47,13 @@ const SELECT_TIMEOUT = 15000;
 /** How long to watch for the page reacting to Submit. Observation only. */
 const POST_SUBMIT_STATE_TIMEOUT_MS = 15000;
 const POST_SUBMIT_POLL_MS = 500;
+// Stage-2 of the live order flow. Reaching mcc_order_post.asp is only SELECTION
+// ACCEPTED — the "Confirm Payment Information" page. The real, irreversible order
+// is its SECOND submit, whose success is a 302 to mcc_order_post_thankyou.asp.
+const ORDER_POST_PAGE = "mcc_order_post.asp";
+const ORDER_THANKYOU_PAGE = "mcc_order_post_thankyou.asp";
+const CONFIRM_PRICE_REQUIRED = "$0.00";
+const CONFIRM_NAV_TIMEOUT_MS = 20000;
 const NAV_TIMEOUT = 60000;
 const READ_TIMEOUT = 8000;
 
@@ -1024,9 +1031,9 @@ export async function selectAndSubmitFreeReport(page, opts = {}) {
         return report;
     }
 
-    // Positive success = the AJAX order returned "0" and navigated to
-    // mcc_order_post.asp. Wait for that specific navigation.
-    const ORDER_POST_PAGE = "mcc_order_post.asp";
+    // Positive STAGE-1 signal = the AJAX order returned "0" and navigated to
+    // mcc_order_post.asp. That is SELECTION ACCEPTED — the Confirm Payment
+    // Information page — NOT the order. Wait for that navigation.
     const ajaxDeadline = Date.now() + POST_SUBMIT_STATE_TIMEOUT_MS;
     let reachedOrderPost = false;
 
@@ -1038,14 +1045,11 @@ export async function selectAndSubmitFreeReport(page, opts = {}) {
         await page.waitForTimeout(POST_SUBMIT_POLL_MS);
     }
 
-    page.off("dialog", dialogHandler);
-
     // Read whether the failure indicator is showing (the AJAX returned non-"0").
     const errorShown = await targetFrame
         .evaluate(() => {
             const el = document.querySelector(".error-message");
             if (!el) return false;
-            // It is a real error only when NOT hidden.
             return !el.classList.contains("hide");
         })
         .catch(() => false);
@@ -1056,37 +1060,172 @@ export async function selectAndSubmitFreeReport(page, opts = {}) {
     report.ajaxErrorShown = errorShown;
     report.submitDialogMessage = dialogMessage;
 
-    // ---- SUCCESS ONLY ON POSITIVE AJAX CONFIRMATION -----------------------
-    //
-    // Confirmed only when we reached mcc_order_post.asp (ajaxOrderSelect got "0")
-    // AND no dialog blocked us AND the error indicator is not showing. Anything
-    // else: the AJAX did not succeed — return the real signal, do NOT poll, do
-    // NOT mark submitted; the intent stays unresolved for report-appearance
-    // recovery.
-    const stateChanged = reachedOrderPost && dialogMessage === null && errorShown === false;
-    report.postSubmitStateChanged = stateChanged;
+    // Stage 1 must have succeeded before we even look at the payment page.
+    if (!reachedOrderPost || dialogMessage !== null || errorShown) {
+        page.off("dialog", dialogHandler);
+        report.reachedConfirmPaymentPage = false;
+        report.submissionConfirmed = false;
+        report.postSubmitStateChanged = false;
+        report.error_code = report.error_code ?? "ORDER_SELECT_STAGE1_NOT_CONFIRMED";
+        report.failureReason = report.failureReason ??
+            "orderSelect() did not navigate to the confirm-payment page (mcc_order_post.asp). " +
+            "Nothing was ordered; intent left unresolved.";
+        return report;
+    }
 
-    // ---- SUBMISSION CONFIRMED vs SUBMIT CLICKED ---------------------------
+    // ---- STAGE 2: CONFIRM PAYMENT INFORMATION PAGE ------------------------
     //
-    // submissionConfirmed is the POSITIVE, irreversible evidence that
-    // ajaxOrderSelect() succeeded: orderSelect() was invoked AND the AJAX order
-    // navigated to mcc_order_post.asp with no blocking dialog and no error
-    // indicator. Only this drives the intent to `submitted`. Anything short of it
-    // leaves the outcome UNKNOWN — the intent stays unresolved for report-
-    // appearance recovery and is never asserted as submitted.
-    report.submissionConfirmed = report.submitClicked === true && stateChanged === true;
+    // mcc_order_post.asp shows the product, a price, saved payment info, and a
+    // SECOND Submit. We verify the product is the 3-bureau report and the price
+    // is EXACTLY $0.00 before touching the second Submit. We NEVER read, log, or
+    // store any card/payment/billing value — only the product and price text and
+    // the presence of the submit control.
+    const confirm = await targetFrame
+        .evaluate(() => {
+            const bodyText = document.body ? document.body.innerText : "";
+            // Product line: the 3-bureau report. Match on bureau names/structure,
+            // not on any payment field.
+            const productMatched =
+                /3\s*bureau/i.test(bodyText) &&
+                /experian/i.test(bodyText) &&
+                /equifax/i.test(bodyText) &&
+                /transunion/i.test(bodyText);
 
-    if (!stateChanged) {
-        report.postSubmitObservation =
-            "Submit was clicked but the order page did not visibly change within the wait " +
-            "window. The order may still have been placed; the acquisition intent stays " +
-            "unresolved and is reconciled by report appearance, never by resubmitting.";
+            // Price: capture the FIRST $-amount on the page as the order price.
+            const priceMatch = bodyText.match(/\$\s*\d[\d,]*\.\d{2}/);
+            const priceText = priceMatch ? priceMatch[0].replace(/\s+/g, "") : null;
+
+            // The second Submit: a form submit control on this page. Report only
+            // its presence, never its surrounding payment fields.
+            const secondSubmit =
+                document.querySelector(
+                    'input[type="submit"], button[type="submit"], a[onclick*="submit" i], a.btn-primary'
+                ) || null;
+
+            return {
+                productMatched,
+                priceText,
+                secondSubmitPresent: !!secondSubmit,
+            };
+        })
+        .catch(() => null);
+
+    report.reachedConfirmPaymentPage = true;
+    report.confirmProductMatched = confirm?.productMatched ?? false;
+    report.confirmedPrice = confirm?.priceText ?? null;
+    report.secondSubmitPresent = confirm?.secondSubmitPresent ?? false;
+
+    // FAIL CLOSED on any ambiguity. Never click if the price is missing, is not
+    // exactly $0.00, the product does not match, or the second Submit is absent.
+    if (
+        !confirm ||
+        confirm.productMatched !== true ||
+        confirm.priceText == null ||
+        confirm.priceText !== CONFIRM_PRICE_REQUIRED ||
+        confirm.secondSubmitPresent !== true
+    ) {
+        page.off("dialog", dialogHandler);
+        report.secondSubmitClicked = false;
+        report.submissionConfirmed = false;
+        report.postSubmitStateChanged = false;
+        report.error_code = "CONFIRM_PAYMENT_PAGE_NOT_VERIFIED";
+        report.failureReason =
+            `Confirm-payment page failed verification (product matched: ` +
+            `${confirm?.productMatched}, price: "${confirm?.priceText}", second submit: ` +
+            `${confirm?.secondSubmitPresent}). Required price exactly ${CONFIRM_PRICE_REQUIRED}. ` +
+            `Not clicking the second Submit. Nothing was ordered.`;
+        return report;
+    }
+
+    // ---- CLICK THE SECOND SUBMIT ONCE, VIA THE PAGE'S OWN FORM ------------
+    //
+    // Submit the existing form with its own current values — never reconstruct or
+    // hardcode the payment payload. The success signal is the 302 to
+    // mcc_order_post_thankyou.asp (captured passively) OR navigation there.
+    let orderPostHttpStatus = null;
+    const onResponse = (response) => {
+        try {
+            const u = response.url().toLowerCase();
+            if (u.includes(ORDER_POST_PAGE)) {
+                orderPostHttpStatus = response.status();
+            }
+        } catch {
+            /* ignore */
+        }
+    };
+    page.on("response", onResponse);
+
+    let secondClickError = null;
+    try {
+        // Prefer submitting the actual form the second Submit belongs to, so the
+        // page's own values (including payment) are sent verbatim. Fall back to
+        // clicking the submit control.
+        await targetFrame.evaluate(() => {
+            const btn = document.querySelector(
+                'input[type="submit"], button[type="submit"], a[onclick*="submit" i], a.btn-primary'
+            );
+            if (btn && btn.form) {
+                btn.form.submit();
+            } else if (btn) {
+                btn.click();
+            } else {
+                const form = document.querySelector('form[action*="mcc_order_post" i]') ||
+                    document.querySelector("form");
+                if (form) form.submit();
+                else throw new Error("No confirm-payment form or submit control found.");
+            }
+        });
+        report.secondSubmitClicked = true;
+    } catch (error) {
+        secondClickError = error?.message || String(error);
+        report.secondSubmitClicked = false;
+    }
+
+    // Wait for the thank-you navigation (actual order confirmation).
+    let reachedThankYou = false;
+    const thankYouDeadline = Date.now() + CONFIRM_NAV_TIMEOUT_MS;
+    while (!reachedThankYou && Date.now() < thankYouDeadline) {
+        if (page.url().toLowerCase().includes(ORDER_THANKYOU_PAGE)) {
+            reachedThankYou = true;
+            break;
+        }
+        await page.waitForTimeout(POST_SUBMIT_POLL_MS);
+    }
+
+    page.off("response", onResponse);
+    page.off("dialog", dialogHandler);
+
+    report.orderPostObserved = orderPostHttpStatus !== null;
+    report.orderPostHttpStatus = orderPostHttpStatus;
+    report.reachedThankYouPage = reachedThankYou;
+    report.secondSubmitError = secondClickError;
+
+    // ---- ACTUAL ORDER CONFIRMATION ---------------------------------------
+    //
+    // Confirmed ONLY when the browser reached mcc_order_post_thankyou.asp, OR the
+    // POST response to mcc_order_post.asp was observed as a 302 whose redirect
+    // leads to the thank-you page. Anything else: not ordered — fail closed, do
+    // not mark submitted, do not poll.
+    const orderConfirmed =
+        reachedThankYou ||
+        (orderPostHttpStatus === 302 && page.url().toLowerCase().includes(ORDER_THANKYOU_PAGE));
+
+    report.postSubmitStateChanged = orderConfirmed;
+    report.submissionConfirmed = report.submitClicked === true && orderConfirmed === true;
+
+    if (!report.submissionConfirmed) {
+        report.error_code = report.error_code ?? "ORDER_NOT_CONFIRMED_AT_THANKYOU";
+        report.failureReason = report.failureReason ??
+            (secondClickError
+                ? `The second Submit did not complete: ${secondClickError}.`
+                : "The second Submit was clicked but the browser did not reach " +
+                  "mcc_order_post_thankyou.asp. Order NOT confirmed; intent left unresolved.");
     }
 
     console.log(
         report.submissionConfirmed
-            ? "Free report submitted and the order page positively changed. Effect (new report) not yet confirmed."
-            : "Free report submit was clicked but the page did not visibly change — submission NOT confirmed."
+            ? "Free report ORDER CONFIRMED (reached mcc_order_post_thankyou.asp). Report appearance pending."
+            : "Free report order NOT confirmed at the thank-you page — submission NOT confirmed."
     );
 
     return report;
