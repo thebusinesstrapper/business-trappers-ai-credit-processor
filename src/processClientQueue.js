@@ -779,6 +779,35 @@ function buildM7Diagnostic(m7, clientName = null) {
             safeIsoDate(capture?.nextFreeReportAvailableAt) ?? safeIsoDate(m7.nextFreeReportAvailableAt),
         paidReportPresent: safeBool(capture?.paidReportPresent) ?? safeBool(m7.paidReportPresent),
         paidReportPrice: safeNumber(capture?.paidReportPrice) ?? safeNumber(m7.paidReportPrice),
+
+        // ---- INTENT DIAGNOSTICS (diagnostic only; nothing routes on these) ----
+        // Surface why a run waited or resolved an intent, so a future payload
+        // shows the real reason instead of a bare WAITING. All null-safe.
+        intentId: safeCode(capture?.intentId) ?? null,
+        acquisitionIntentOpen: safeBool(capture?.acquisitionIntentOpen),
+        acquisitionIntentResolvedAs: safeCode(capture?.acquisitionIntentResolvedAs) ?? null,
+        acquisitionRecovery: safeCode(capture?.acquisitionRecovery) ?? null,
+        acquisitionRecoveryReason: safeReason(capture?.acquisitionRecoveryReason) ?? null,
+        submissionConfirmed: safeBool(capture?.submissionConfirmed),
+        reachedOrderPost: safeBool(capture?.reachedOrderPost),
+        ajaxErrorShown: safeBool(capture?.ajaxErrorShown),
+        orderSelectError: safeReason(capture?.orderSelectError) ?? null,
+        intentFailureReason: safeReason(capture?.intentFailureReason) ?? null,
+        // preInvokeCheck is a small structured object of booleans/strings — pass
+        // it through an explicit whitelist so no raw page data can leak.
+        preInvokeCheck: projectPreInvokeCheck(capture?.preInvokeCheck),
+    };
+}
+
+/** Explicit whitelist for the in-page pre-invoke check (booleans + sanitized values). */
+function projectPreInvokeCheck(pre) {
+    if (!pre || typeof pre !== "object") return null;
+    return {
+        domChecked: safeBool(pre.domChecked),
+        domValue: safeCode(pre.domValue) ?? null,
+        jqueryCheckedValue: safeCode(pre.jqueryCheckedValue) ?? null,
+        orderSelectIsFn: safeBool(pre.orderSelectIsFn),
+        ajaxOrderSelectIsFn: safeBool(pre.ajaxOrderSelectIsFn),
     };
 }
 

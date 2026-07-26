@@ -1128,10 +1128,15 @@ async function runAcquisitionPath(ctx) {
     const {
         chPage, crcClientId, processingRunId, browserbaseSessionId,
         baselineReportDate, eligibilityHint, reportPageUrl, memberDashboardUrl,
-        openIntent, recovery, replayUrl,
+        replayUrl,
         submitApproved, operationalRoutingApproved,
         clientName: traceClientName, approvalTrace, approvalTraceLimit,
     } = ctx;
+
+    // openIntent/recovery are reassigned when a never-confirmed intent is
+    // resolved false below, so bind them mutably.
+    let openIntent = ctx.openIntent;
+    let recovery = ctx.recovery;
 
     const base = {
         milestone: "M6_CAPTURE",
@@ -1142,6 +1147,22 @@ async function runAcquisitionPath(ctx) {
         eligibilityHint,
         replayUrl,
     };
+
+    // ---- 0. A NEVER-CONFIRMED INTENT MUST NOT BLOCK ACQUISITION ----------
+    //
+    // An intent still in intent_created / submission_started was never confirmed
+    // as a placed order (per decideIntentRecovery). Resolve it CANCELLED and fall
+    // through — do NOT return WAITING — so this run attempts the order normally.
+    // This clears a dangling false intent instead of waiting 48h on nothing.
+    if (recovery.action === RECOVERY.RESOLVE_FALSE_UNCONFIRMED) {
+        await resolveIntent(openIntent.id, INTENT_STATUS.CANCELLED, {
+            failureReason: recovery.reason ?? "unconfirmed_intent_resolved_false",
+        }).catch(() => {});
+        // openIntent is now resolved; treat the rest of this path as having no
+        // open intent so acquisition proceeds.
+        openIntent = null;
+        recovery = { action: RECOVERY.NO_OPEN_INTENT, reason: "Prior unconfirmed intent resolved; proceeding." };
+    }
 
     // ---- 1. AN UNRESOLVED INTENT STOPS EVERYTHING ------------------------
     //
@@ -1472,6 +1493,20 @@ async function runAcquisitionPath(ctx) {
     // report-appearance recovery reconciles it, and fail closed to a waiting
     // state — never assert `submitted`, and never resubmit.
     if (submission.submissionConfirmed !== true) {
+        // NOT positively confirmed. The order did NOT reach mcc_order_post.asp
+        // with a success AJAX result, so no order was placed. RESOLVE the intent
+        // immediately as failed with the exact reason — never leave it in
+        // intent_created / submission_started / submitted, where it would falsely
+        // block acquisition on the next run via WAIT_WITHIN_GRACE.
+        const failureReason =
+            submission.error_code
+                ? `${submission.error_code}: ${submission.failureReason ?? "submission not confirmed"}`
+                : submission.failureReason ?? "submission_not_confirmed";
+
+        await resolveIntent(intent.intent.id, INTENT_STATUS.FAILED, {
+            failureReason,
+        }).catch(() => {});
+
         return {
             proceedWithCapture: false,
             response: successResponse({
@@ -1481,7 +1516,16 @@ async function runAcquisitionPath(ctx) {
                 reportOrdered: false,
                 submissionAttempted: true,
                 submissionConfirmed: false,
-                acquisitionIntentOpen: true,
+                // The intent is now RESOLVED (failed) — not open — so the next run
+                // is free to attempt acquisition normally.
+                acquisitionIntentOpen: false,
+                acquisitionIntentResolvedAs: INTENT_STATUS.FAILED,
+                intentId: intent.intent.id,
+                intentFailureReason: failureReason,
+                reachedOrderPost: submission.reachedOrderPost ?? false,
+                ajaxErrorShown: submission.ajaxErrorShown ?? null,
+                orderSelectError: submission.orderSelectError ?? null,
+                preInvokeCheck: submission.preInvokeCheck ?? null,
                 acquisitionDecision: decisionRecord,
                 gateState,
                 freeReportEnabled: null,
@@ -1491,9 +1535,9 @@ async function runAcquisitionPath(ctx) {
                 temporaryOverrideApplied: false,
                 submission,
                 message:
-                    "The Submit control was clicked but the order page did not positively change, " +
-                    "so submission is NOT confirmed. The intent is left unresolved (not marked " +
-                    "submitted) and will be reconciled by report appearance; nothing is resubmitted.",
+                    "orderSelect()/ajaxOrderSelect() did not positively confirm an order " +
+                    "(no mcc_order_post.asp navigation). The intent is marked FAILED with the exact " +
+                    "reason so it does not block the next acquisition attempt. Nothing was submitted.",
                 diagnosticOnly: true,
             }),
         };

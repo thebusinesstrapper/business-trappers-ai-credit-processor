@@ -325,6 +325,9 @@ export async function resolveIntent(intentId, status, fields = {}) {
 export const RECOVERY = Object.freeze({
     NO_OPEN_INTENT: "no_open_intent",
     RESOLVE_REPORT_AVAILABLE: "resolve_report_available",
+    // A dangling intent that was never confirmed as submitted: resolve it false
+    // (cancelled) and let acquisition proceed. Not a placed order.
+    RESOLVE_FALSE_UNCONFIRMED: "resolve_false_unconfirmed",
     WAIT_WITHIN_GRACE: "wait_within_grace",
     MANUAL_REVIEW: "manual_review",
 });
@@ -370,11 +373,33 @@ export function decideIntentRecovery(intent, newestReportDate, now = new Date())
 
     const hoursWaited = (now.getTime() - startedMs) / 3600000;
 
+    // GRACE REQUIRES POSITIVELY CONFIRMED SUBMISSION. WAIT_WITHIN_GRACE means
+    // "an order was placed; wait for the report to appear." That is only true for
+    // a `submitted` intent — the status the acquisition path now writes ONLY on
+    // confirmed mcc_order_post.asp navigation. An intent still in intent_created
+    // or submission_started reached NO confirmed order (e.g. the radio was
+    // selected and orderSelect() invoked but the AJAX never navigated), so it
+    // must NOT hold acquisition hostage: resolve it false and let the next run
+    // attempt the order normally. This is the guard against a dangling intent
+    // falsely blocking a client whose free report is still available.
+    if (intent.status !== INTENT_STATUS.SUBMITTED) {
+        return {
+            action: RECOVERY.RESOLVE_FALSE_UNCONFIRMED,
+            reason:
+                `Intent status "${intent.status}" was never confirmed as submitted (no ` +
+                `mcc_order_post.asp success recorded). It does not represent a placed order, so it ` +
+                `is resolved as cancelled and acquisition may proceed normally. Nothing is resubmitted ` +
+                `on its account.`,
+            hoursWaited,
+            baseline,
+        };
+    }
+
     if (hoursWaited < INTENT_GRACE_HOURS) {
         return {
             action: RECOVERY.WAIT_WITHIN_GRACE,
             reason:
-                `No newer report yet; ${Math.floor(hoursWaited)}h of the ` +
+                `Confirmed-submitted order; no newer report yet; ${Math.floor(hoursWaited)}h of the ` +
                 `${INTENT_GRACE_HOURS}h grace period used. Leaving the intent unresolved and ` +
                 `re-observing on a later run. Nothing is resubmitted.`,
             hoursWaited,
@@ -385,9 +410,9 @@ export function decideIntentRecovery(intent, newestReportDate, now = new Date())
     return {
         action: RECOVERY.MANUAL_REVIEW,
         reason:
-            `No newer report appeared within ${INTENT_GRACE_HOURS}h of an unresolved ` +
+            `No newer report appeared within ${INTENT_GRACE_HOURS}h of a confirmed-submitted ` +
             `acquisition intent (status "${intent.status}"). A human must establish whether ` +
-            `an order was placed. The processor does not resubmit to find out.`,
+            `the report will arrive. The processor does not resubmit to find out.`,
         hoursWaited,
         baseline,
     };
