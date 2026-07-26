@@ -465,16 +465,20 @@ function sameTradelineIdentity(a, b) {
     // the bureau printed is what tells them apart.
     if (fullA !== fullB) return false;
 
-    // Same displayed account number at the same bureau. The furnisher must not
-    // CONTRADICT that. Two different furnishers reporting the identical account
-    // number is ambiguity, and ambiguity fails closed rather than folding.
+    // SAME DISPLAYED ACCOUNT NUMBER AT THE SAME BUREAU -> THE SAME TRADELINE.
     //
-    // An ABSENT furnisher does not contradict anything, so it does not block a
-    // fold that the account number already proves.
-    if (a.furnisher_norm && b.furnisher_norm && a.furnisher_norm !== b.furnisher_norm) {
-        return false;
-    }
-
+    // Per the binding collision definition (Extraction Standard §7.6): a
+    // collision exists ONLY when one identifier maps to two DEMONSTRABLY
+    // DIFFERENT financial accounts — different masked trailing digits or a
+    // different opened month. "Furnisher naming differences alone are NEVER
+    // sufficient evidence of a collision." Bureaus are EXPECTED to name one
+    // lender differently (NAVY FCU / NAVY FEDERAL CR UNION), so furnisher_norm
+    // must never SPLIT an account that the account-number evidence has joined.
+    //
+    // The account number has already matched, so these fold. A differing
+    // furnisher label is retained per-observation as evidence for the
+    // Intelligence Engine (BT-DM-0031 handles genuine cross-bureau furnisher
+    // discrepancies as a dispute), never used to fabricate a split here.
     return true;
 }
 
