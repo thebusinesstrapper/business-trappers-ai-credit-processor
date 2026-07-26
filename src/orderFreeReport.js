@@ -917,9 +917,6 @@ export async function selectAndSubmitFreeReport(page, opts = {}) {
     // thrown error is returned as real evidence instead of being lost.
     const urlBefore = page.url();
 
-    // Capture a native dialog (alert/confirm) that orderSelect() might raise —
-    // its presence is proof the site validated and BLOCKED, so we accept it and
-    // record the message rather than letting it hang the frame.
     let dialogMessage = null;
     const dialogHandler = async (dialog) => {
         dialogMessage = dialog.message();
@@ -927,97 +924,156 @@ export async function selectAndSubmitFreeReport(page, opts = {}) {
     };
     page.on("dialog", dialogHandler);
 
+    // ---- PRE-INVOKE PROOF, IN THE PAGE, THE WAY orderSelect() READS IT ----
+    //
+    // orderSelect() reads $("input[name='productBuyNew']:checked").val() and only
+    // then calls ajaxOrderSelect(product,...). If the radio is not checked, the
+    // jQuery value is undefined, orderSelect() returns false and shows
+    // .error-message — it never reaches ajaxOrderSelect(). So we must verify the
+    // jQuery-visible checked value (not just the DOM .checked property) equals the
+    // free SKU before invoking. Both checks are required.
+    let preCheck = null;
     let invokeError = null;
     try {
-        await targetFrame.evaluate(
+        preCheck = await targetFrame.evaluate(
             ({ optionId, expectedValue }) => {
                 const radio = document.querySelector(`#${optionId}`);
-                if (!radio || !radio.checked) {
-                    throw new Error("FREE_RADIO_NOT_CHECKED_BEFORE_ORDER_SELECT");
+                const domChecked = !!(radio && radio.checked);
+                // jQuery is what orderSelect() itself uses; fall back to DOM query
+                // if $ is somehow absent so we still return a definitive value.
+                let jqueryVal;
+                if (typeof window.$ === "function") {
+                    jqueryVal = window.$("input[name='productBuyNew']:checked").val();
+                } else {
+                    const c = document.querySelector('input[name="productBuyNew"]:checked');
+                    jqueryVal = c ? c.value : undefined;
                 }
-                if (radio.value !== expectedValue) {
-                    throw new Error("FREE_RADIO_VALUE_MISMATCH_BEFORE_ORDER_SELECT");
-                }
-                const checkedInGroup = document.querySelectorAll(
-                    'input[name="productBuyNew"]:checked'
-                );
-                if (checkedInGroup.length !== 1 || checkedInGroup[0].id !== optionId) {
-                    throw new Error("NOT_EXACTLY_ONE_FREE_OPTION_CHECKED_BEFORE_ORDER_SELECT");
-                }
-                if (typeof window.orderSelect !== "function") {
-                    throw new Error("ORDER_SELECT_FUNCTION_NOT_FOUND");
-                }
-                // Run the site's real submission function.
-                window.orderSelect();
+                return {
+                    domChecked,
+                    domValue: radio ? radio.value : null,
+                    jqueryCheckedValue: jqueryVal ?? null,
+                    orderSelectIsFn: typeof window.orderSelect === "function",
+                    ajaxOrderSelectIsFn: typeof window.ajaxOrderSelect === "function",
+                    expectedValue,
+                };
             },
             { optionId, expectedValue: FREE_OPTION_VALUE }
         );
     } catch (error) {
         invokeError = error?.message || String(error);
-    } finally {
-        page.off("dialog", dialogHandler);
     }
 
-    report.submitClicked = true;                 // the invocation was attempted
-    report.orderSelectInvoked = invokeError === null;
-    report.orderSelectError = invokeError;
-    report.submitDialogMessage = dialogMessage;
+    report.preInvokeCheck = preCheck;
 
-    // If orderSelect() threw, or the site raised a validation dialog, DO NOT
-    // treat this as submitted. Return the exact browser evidence; the intent
-    // stays unresolved and the caller does not enter the polling loop.
-    if (invokeError !== null || dialogMessage !== null) {
-        report.error_code = invokeError !== null ? "ORDER_SELECT_INVOKE_FAILED" : "ORDER_SELECT_BLOCKED_BY_DIALOG";
-        report.failureReason = invokeError !== null
-            ? `orderSelect() did not run: ${invokeError}. Nothing submitted; intent left unresolved.`
-            : `orderSelect() raised a dialog ("${dialogMessage}") — the site blocked the order. ` +
-              `Nothing submitted; intent left unresolved.`;
+    // Gate: BOTH the DOM property and the jQuery :checked value must confirm the
+    // free option before we call orderSelect(). This is exactly what stops the
+    // "radio not checked -> orderSelect returns false -> .error-message" no-op.
+    if (invokeError === null) {
+        if (!preCheck || preCheck.domChecked !== true) {
+            invokeError = "FREE_RADIO_NOT_CHECKED_BEFORE_ORDER_SELECT";
+        } else if (preCheck.jqueryCheckedValue !== FREE_OPTION_VALUE) {
+            invokeError =
+                `JQUERY_CHECKED_VALUE_MISMATCH (saw "${preCheck.jqueryCheckedValue}", expected ` +
+                `"${FREE_OPTION_VALUE}") — orderSelect() would not submit.`;
+        } else if (!preCheck.orderSelectIsFn) {
+            invokeError = "ORDER_SELECT_FUNCTION_NOT_FOUND";
+        }
+    }
+
+    if (invokeError !== null) {
+        page.off("dialog", dialogHandler);
+        report.submitClicked = false;
+        report.orderSelectInvoked = false;
+        report.orderSelectError = invokeError;
+        report.submitDialogMessage = dialogMessage;
+        report.error_code = "ORDER_SELECT_PRECONDITION_FAILED";
+        report.failureReason =
+            `orderSelect() was NOT invoked: ${invokeError}. Nothing submitted; intent left unresolved.`;
         report.postSubmitStateChanged = false;
         report.submissionConfirmed = false;
         return report;
     }
 
-    // ---- DID CREDITHERO POSITIVELY LEAVE THE UNCHANGED ORDER STATE? -------
+    // ---- INVOKE orderSelect(); ajaxOrderSelect() success == navigation --------
     //
-    // orderSelect() ran without throwing — but that alone is not an order. The
-    // authoritative proof is a strictly newer report appearing (milestone6 polls
-    // for it). This is the immediate signal that the page reacted at all:
-    // navigation off the order page, or the order controls disappearing. A
-    // temporary URL change that returns to the order page does NOT count — the
-    // final observation is what stands.
-    const stateDeadline = Date.now() + POST_SUBMIT_STATE_TIMEOUT_MS;
-    let stateChanged = false;
-
-    while (!stateChanged && Date.now() < stateDeadline) {
-        const leftOrderPage = !page.url().toLowerCase().includes(ORDER_PAGE.toLowerCase());
-
-        const controlGone =
-            (await targetFrame.locator(SUBMIT_CONTROL_SELECTOR).count().catch(() => 0)) === 0;
-
-        // The free radio no longer being present/checked is also positive change.
-        const freeGone =
-            (await targetFrame.locator('input[name="productBuyNew"]:checked').count().catch(() => 0)) === 0;
-
-        stateChanged = leftOrderPage || controlGone || freeGone;
-
-        if (!stateChanged) await page.waitForTimeout(POST_SUBMIT_POLL_MS);
+    // ajaxOrderSelect() $.post(...)s and, ONLY on a "0" response, sets
+    // location.href = "mcc_order_post.asp". So the authoritative success signal
+    // is navigation to mcc_order_post.asp. A non-"0" response instead un-hides
+    // nothing and re-shows .order-select — the order page stays put and
+    // .error-message may show. We invoke, then wait for that navigation.
+    try {
+        await targetFrame.evaluate(() => {
+            // eslint-disable-next-line no-undef
+            window.orderSelect();
+        });
+    } catch (error) {
+        invokeError = error?.message || String(error);
     }
+
+    report.submitClicked = true;
+    report.orderSelectInvoked = invokeError === null;
+    report.orderSelectError = invokeError;
+
+    if (invokeError !== null) {
+        page.off("dialog", dialogHandler);
+        report.submitDialogMessage = dialogMessage;
+        report.error_code = "ORDER_SELECT_INVOKE_FAILED";
+        report.failureReason = `orderSelect() threw during invocation: ${invokeError}.`;
+        report.postSubmitStateChanged = false;
+        report.submissionConfirmed = false;
+        return report;
+    }
+
+    // Positive success = the AJAX order returned "0" and navigated to
+    // mcc_order_post.asp. Wait for that specific navigation.
+    const ORDER_POST_PAGE = "mcc_order_post.asp";
+    const ajaxDeadline = Date.now() + POST_SUBMIT_STATE_TIMEOUT_MS;
+    let reachedOrderPost = false;
+
+    while (!reachedOrderPost && Date.now() < ajaxDeadline) {
+        if (page.url().toLowerCase().includes(ORDER_POST_PAGE)) {
+            reachedOrderPost = true;
+            break;
+        }
+        await page.waitForTimeout(POST_SUBMIT_POLL_MS);
+    }
+
+    page.off("dialog", dialogHandler);
+
+    // Read whether the failure indicator is showing (the AJAX returned non-"0").
+    const errorShown = await targetFrame
+        .evaluate(() => {
+            const el = document.querySelector(".error-message");
+            if (!el) return false;
+            // It is a real error only when NOT hidden.
+            return !el.classList.contains("hide");
+        })
+        .catch(() => false);
 
     report.urlBefore = urlBefore;
     report.urlAfter = page.url();
-    report.leftOrderPage = !page.url().toLowerCase().includes(ORDER_PAGE.toLowerCase());
+    report.reachedOrderPost = reachedOrderPost;
+    report.ajaxErrorShown = errorShown;
+    report.submitDialogMessage = dialogMessage;
+
+    // ---- SUCCESS ONLY ON POSITIVE AJAX CONFIRMATION -----------------------
+    //
+    // Confirmed only when we reached mcc_order_post.asp (ajaxOrderSelect got "0")
+    // AND no dialog blocked us AND the error indicator is not showing. Anything
+    // else: the AJAX did not succeed — return the real signal, do NOT poll, do
+    // NOT mark submitted; the intent stays unresolved for report-appearance
+    // recovery.
+    const stateChanged = reachedOrderPost && dialogMessage === null && errorShown === false;
     report.postSubmitStateChanged = stateChanged;
 
     // ---- SUBMISSION CONFIRMED vs SUBMIT CLICKED ---------------------------
     //
-    // submitClicked means only that .click() returned — the page may not have
-    // reacted at all (a swallowed click, the wrong element, a still-rendered
-    // button). submissionConfirmed is the POSITIVE, irreversible evidence: the
-    // click happened AND the order page visibly changed (we left it, or the
-    // Submit control disappeared). Only submissionConfirmed may drive the intent
-    // to `submitted`. When the click happened but nothing changed, the outcome is
-    // genuinely UNKNOWN — the intent must stay unresolved for report-appearance
-    // recovery, never be asserted as submitted.
+    // submissionConfirmed is the POSITIVE, irreversible evidence that
+    // ajaxOrderSelect() succeeded: orderSelect() was invoked AND the AJAX order
+    // navigated to mcc_order_post.asp with no blocking dialog and no error
+    // indicator. Only this drives the intent to `submitted`. Anything short of it
+    // leaves the outcome UNKNOWN — the intent stays unresolved for report-
+    // appearance recovery and is never asserted as submitted.
     report.submissionConfirmed = report.submitClicked === true && stateChanged === true;
 
     if (!stateChanged) {
