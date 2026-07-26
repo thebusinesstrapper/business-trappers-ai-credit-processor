@@ -512,52 +512,65 @@ async function selectVerifiedFreeOption(frame, optionId) {
 
     const radio = frame.locator(idSelector(optionId)).first();
 
-    // FORCE-SET the native radio. CreditHero CSS-replaces the radio with a styled
-    // control, so the input is not "actionable" by Playwright's normal checks and
-    // both .check() and label clicks fail silently. setChecked(true,{force:true})
-    // sets the checked state directly, bypassing the actionability gate. Then we
-    // dispatch input+change (bubbling) so CreditHero's own JS, which reacts to the
-    // change event to enable/prime Submit, sees the selection.
-    outcome.via = "native_input_force_set";
+    // Select the way a human does: click the VISIBLE label bound to the input.
+    // The native radio is CSS-hidden, so .check()/setChecked() fail actionability;
+    // the styled <label for="productBuyNew_01"> is what the user actually clicks,
+    // and clicking it checks the associated input via native label behaviour.
+    const label = frame.locator(labelSelector(optionId)).first();
+
+    const labelCount = await frame.locator(labelSelector(optionId)).count().catch(() => 0);
+    if (labelCount === 0) {
+        return { ...outcome, ok: false,
+            reason: `No <label for="${optionId}"> to click; the CSS-hidden radio cannot be selected. Not submitting.` };
+    }
+
+    outcome.via = "bound_label_click";
     outcome.clickAttempted = true;
 
-    const set = await radio
-        .setChecked(true, { force: true })
+    const clicked = await label
+        .click({ force: true, timeout: SELECT_TIMEOUT })
         .then(() => true)
         .catch(() => false);
 
-    if (!set) {
+    if (!clicked) {
         return { ...outcome, ok: false,
-            reason: `setChecked(true,{force:true}) on #${optionId} did not complete. Not submitting.` };
+            reason: `The label for "${optionId}" was found but the click did not complete. Not submitting.` };
     }
 
-    // Fire the native events CreditHero's JavaScript listens for.
-    await radio
-        .evaluate((el) => {
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-            el.dispatchEvent(new Event("change", { bubbles: true }));
-        })
-        .catch(() => {});
-
-    // POSITIVE PROOF: verifyOnlyFreeIsChecked is the authority — it confirms
-    // exactly one productBuyNew radio is checked, that it is #productBuyNew_01,
-    // and reports the actual checkedIds as evidence (so a force-set that landed
-    // on the WRONG option is surfaced, not hidden). This subsumes a bare
-    // isChecked() on the free radio. Run it first, unconditionally.
+    // POSITIVE PROOF: verifyOnlyFreeIsChecked is the authority — exactly one
+    // productBuyNew radio checked, id === productBuyNew_01, and it surfaces
+    // checkedIds as evidence if the click checked the WRONG option. Run first.
     const verification = await verifyOnlyFreeIsChecked(frame, optionId);
     outcome.verification = verification;
 
     if (!verification.ok) return { ...outcome, ok: false, reason: verification.reason };
 
-    // Belt-and-braces: the free radio itself reports checked.
+    // Exact contract for THIS radio group: precisely one input[name="productBuyNew"]
+    // is checked and it is the free option. Scoped to the name so it holds even
+    // if unrelated radios exist elsewhere on the page.
+    const checkedInGroup = frame.locator('input[name="productBuyNew"]:checked');
+    const checkedInGroupCount = await checkedInGroup.count().catch(() => -1);
+    if (checkedInGroupCount !== 1) {
+        return { ...outcome, ok: false,
+            reason:
+                `Expected exactly one checked input[name="productBuyNew"]; found ${checkedInGroupCount}. ` +
+                `Not submitting.` };
+    }
+    const checkedGroupId = await checkedInGroup.first().getAttribute("id").catch(() => null);
+    if (checkedGroupId !== optionId) {
+        return { ...outcome, ok: false,
+            reason: `The checked productBuyNew option is "${checkedGroupId}", not "${optionId}". Not submitting.` };
+    }
+
+    // The free input itself reports checked.
     const isChecked = await radio.isChecked().catch(() => false);
     if (!isChecked) {
         return { ...outcome, ok: false,
-            reason: `#${optionId} did not report isChecked() === true after setChecked. Not submitting.` };
+            reason: `#${optionId} did not report isChecked() === true after the label click. Not submitting.` };
     }
 
-    // POSITIVE PROOF: the checked option's value matches the free-report SKU, so
-    // we never submit a look-alike option that shares the id but not the SKU.
+    // The checked option's value matches the free-report SKU — never submit a
+    // look-alike option that shares the id but not the SKU.
     const checkedValue = await radio.getAttribute("value").catch(() => null);
     if (checkedValue !== FREE_OPTION_VALUE) {
         return { ...outcome, ok: false,
