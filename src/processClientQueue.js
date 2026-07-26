@@ -784,15 +784,19 @@ function buildM7Diagnostic(m7, clientName = null) {
         // Surface why a run waited or resolved an intent, so a future payload
         // shows the real reason instead of a bare WAITING. All null-safe.
         intentId: safeCode(capture?.intentId) ?? null,
+        intentStatus: safeCode(capture?.intentStatus) ?? null,
         acquisitionIntentOpen: safeBool(capture?.acquisitionIntentOpen),
         acquisitionIntentResolvedAs: safeCode(capture?.acquisitionIntentResolvedAs) ?? null,
         acquisitionRecovery: safeCode(capture?.acquisitionRecovery) ?? null,
         acquisitionRecoveryReason: safeReason(capture?.acquisitionRecoveryReason) ?? null,
         submissionConfirmed: safeBool(capture?.submissionConfirmed),
+        orderSelectInvoked: safeBool(capture?.orderSelectInvoked),
         reachedOrderPost: safeBool(capture?.reachedOrderPost),
         ajaxErrorShown: safeBool(capture?.ajaxErrorShown),
         orderSelectError: safeReason(capture?.orderSelectError) ?? null,
         intentFailureReason: safeReason(capture?.intentFailureReason) ?? null,
+        urlBefore: safeCode(capture?.urlBefore) ?? null,
+        urlAfter: safeCode(capture?.urlAfter) ?? null,
         // preInvokeCheck is a small structured object of booleans/strings — pass
         // it through an explicit whitelist so no raw page data can leak.
         preInvokeCheck: projectPreInvokeCheck(capture?.preInvokeCheck),

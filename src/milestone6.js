@@ -121,6 +121,9 @@ export async function runMilestone6(data = {}) {
 
 async function captureAndNormalize(data = {}, identityState = {}) {
     let browser;
+    // Evidence collected during acquisition, kept OUTSIDE the try so a later
+    // page-closure can still surface it instead of losing it to the catch.
+    let acquisitionEvidence = null;
 
     try {
         const clientName = data.clientName || "Elizabeth Kelley";
@@ -286,6 +289,10 @@ async function captureAndNormalize(data = {}, identityState = {}) {
         // a second one mid-run.
         const processingRunId = randomUUID();
         const browserbaseSessionId = session.session?.id ?? null;
+        // Wall-clock start of this Browserbase session. The acquisition poll uses
+        // it to stop safely BEFORE the ~5-minute Browserbase boundary rather than
+        // running until the browser is torn out from under a waitForTimeout.
+        const sessionStartedMs = Date.now();
 
         // ---- 2. ATTACH THE PASSIVE LISTENER *BEFORE* NAVIGATING ------------
         //
@@ -560,6 +567,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
                     crcClientId: client.crcClientId,
                     processingRunId,
                     browserbaseSessionId,
+                    sessionStartedMs,
                     baselineReportDate: acqBaselineReportDate,
                     eligibilityHint: orderRead.eligibilityHint,
                     reportPageUrl: null,
@@ -573,6 +581,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
                     approvalTrace: data.approvalTrace,
                     approvalTraceLimit: data.approvalTraceLimit,
                 });
+                acquisitionEvidence = acquisition.evidence ?? acquisitionEvidence;
 
                 if (!acquisition.proceedWithCapture) return acquisition.response;
 
@@ -705,6 +714,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
                 crcClientId: client.crcClientId,
                 processingRunId,
                 browserbaseSessionId,
+                sessionStartedMs,
                 baselineReportDate,
                 eligibilityHint,
                 reportPageUrl: reportPage.reportUrl,
@@ -725,6 +735,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
                 approvalTrace: data.approvalTrace,
                 approvalTraceLimit: data.approvalTraceLimit,
             });
+            acquisitionEvidence = acquisition.evidence ?? acquisitionEvidence;
 
             if (!acquisition.proceedWithCapture) return acquisition.response;
 
@@ -1011,6 +1022,39 @@ async function captureAndNormalize(data = {}, identityState = {}) {
 
     } catch (error) {
         console.error("Milestone 6 failed:", error);
+
+        // A Browserbase teardown surfaces as "Target page, context or browser has
+        // been closed" (or "Target closed"). That is NOT a logic failure — it just
+        // means the session ended. Rather than throw MILESTONE_6_ERROR and lose
+        // every diagnostic, return a clean WAITING carrying whatever acquisition
+        // evidence was already collected on this run, so the payload is
+        // actionable and the next run reconciles the intent.
+        const message = String(error?.message ?? error);
+        const isSessionClosed =
+            /target.*closed|context or browser has been closed|browser has been closed|page.*closed/i.test(message);
+
+        if (isSessionClosed) {
+            return successResponse({
+                milestone: "M6_CAPTURE",
+                stage: "report_acquisition",
+                result: "WAITING_FOR_FREE_REPORT",
+                classification: "WAITING_FOR_FREE_REPORT",
+                sessionEndedBeforeReport: true,
+                sessionClosedError: message,
+                // Best-effort evidence captured before the close, if the
+                // acquisition path recorded any onto this scope.
+                ...(typeof acquisitionEvidence !== "undefined" && acquisitionEvidence
+                    ? acquisitionEvidence
+                    : {}),
+                waitingForReportReadiness: true,
+                message:
+                    "The Browserbase session closed before the report was confirmed. Returning the " +
+                    "evidence collected so far instead of a generic failure; the acquisition intent " +
+                    "is reconciled on the next run. Nothing was resubmitted.",
+                diagnosticOnly: true,
+            });
+        }
+
         return errorResponse("MILESTONE_6_ERROR", error.message, { milestone: "M6_CAPTURE" });
 
     } finally {
@@ -1123,10 +1167,18 @@ function looksLikeCreditReport(body) {
 /** How long to wait for a newly ordered report to appear before deferring. */
 const ACQUISITION_POLL_MS = 180000;
 const ACQUISITION_POLL_INTERVAL_MS = 15000;
+// The Browserbase session is torn down around the 5-minute mark. We stop the
+// report poll safely before that so a waitForTimeout never fires into a closed
+// browser (the crash that lost all acquisition diagnostics). 30s of headroom is
+// left for the return path (resolve intent, serialize, close).
+const BROWSERBASE_SESSION_BUDGET_MS = 300000;
+const SESSION_SAFETY_MARGIN_MS = 30000;
+const CONFIRM_NAV_TIMEOUT_MS = 15000;
 
 async function runAcquisitionPath(ctx) {
     const {
         chPage, crcClientId, processingRunId, browserbaseSessionId,
+        sessionStartedMs,
         baselineReportDate, eligibilityHint, reportPageUrl, memberDashboardUrl,
         replayUrl,
         submitApproved, operationalRoutingApproved,
@@ -1546,29 +1598,66 @@ async function runAcquisitionPath(ctx) {
     // Submission is POSITIVELY confirmed — only now is the intent `submitted`.
     await markSubmitted(intent.intent.id).catch(() => {});
 
+    // Snapshot the confirmed-submission evidence NOW, before the poll. If the
+    // Browserbase session closes mid-poll, this is what the top-level catch
+    // surfaces instead of a bare MILESTONE_6_ERROR.
+    const confirmedEvidence = {
+        intentId: intent.intent.id,
+        intentStatus: INTENT_STATUS.SUBMITTED,
+        preInvokeCheck: submission.preInvokeCheck ?? null,
+        orderSelectInvoked: submission.orderSelectInvoked ?? true,
+        orderSelectError: submission.orderSelectError ?? null,
+        reachedOrderPost: submission.reachedOrderPost ?? true,
+        ajaxErrorShown: submission.ajaxErrorShown ?? null,
+        submissionConfirmed: true,
+        urlBefore: submission.urlBefore ?? null,
+        urlAfter: submission.urlAfter ?? null,
+        reportOrdered: true,
+    };
+
     // ---- 7. WAIT FOR THE EFFECT, THEN PROVE IT ---------------------------
     //
     // hasNewerReport() requires STRICTLY newer than the baseline. Not
     // "different", not "the count changed" — only a date greater than the
     // baseline proves the report we ordered actually landed.
-    const deadline = Date.now() + ACQUISITION_POLL_MS;
+    // The report may take longer than one session. Poll only until the SAFER of
+    // the acquisition budget and a Browserbase-safe deadline, so a waitForTimeout
+    // never fires into a torn-down browser (the crash that lost all diagnostics).
+    const safeSessionDeadline =
+        (Number.isFinite(sessionStartedMs) ? sessionStartedMs : Date.now()) +
+        BROWSERBASE_SESSION_BUDGET_MS - SESSION_SAFETY_MARGIN_MS;
+    const deadline = Math.min(Date.now() + ACQUISITION_POLL_MS, safeSessionDeadline);
 
     while (Date.now() < deadline) {
-        await chPage.waitForTimeout(ACQUISITION_POLL_INTERVAL_MS);
+        // NEVER wait on a page that is already gone. If the session closed, stop
+        // polling and fall through to the clean WAITING return below — the intent
+        // stays `submitted` and the next run's recovery reconciles it.
+        if (chPage.isClosed()) break;
+
+        // Sleep without requiring a live page: a plain timer, not
+        // page.waitForTimeout, so a mid-wait teardown cannot throw. Cap the sleep
+        // so we never overshoot the deadline.
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(ACQUISITION_POLL_INTERVAL_MS, remaining)));
+
+        if (chPage.isClosed()) break;
 
         // Re-open the report page for this poll iteration. The report-selector
         // branch supplies a concrete reportPageUrl (goto is enough). The
         // order-page-catch branch has none (openCreditReport threw earlier), so
         // re-open via the validated navigator from the member dashboard — it
         // succeeds once the ordered report lands, and still hard-blocks the
-        // order page throughout.
+        // order page throughout. Both are guarded so a closed page never throws.
         if (reportPageUrl) {
             await chPage.goto(reportPageUrl, { waitUntil: "load" }).catch(() => {});
         } else {
             await openCreditReport(chPage).catch(() => {});
         }
 
-        const fresh = await readReportSelector(chPage);
+        if (chPage.isClosed()) break;
+
+        const fresh = await readReportSelector(chPage).catch(() => ({ ok: false }));
 
         if (!fresh.ok) continue;
 
@@ -1586,6 +1675,7 @@ async function runAcquisitionPath(ctx) {
             // than the stale one we were sent here to replace.
             return {
                 proceedWithCapture: true,
+                evidence: { ...confirmedEvidence, submissionConfirmed: true },
                 acquisitionOutcome: {
                     submissionAttempted: true,
                     submissionConfirmed: true,
@@ -1597,25 +1687,32 @@ async function runAcquisitionPath(ctx) {
         }
     }
 
-    // TIMED OUT. The intent stays UNRESOLVED on purpose: the order was
-    // submitted, so the entitlement may well be spent, and the next daily run's
-    // recovery will confirm the report once it appears. We do NOT fall back to
-    // the stale report — that is the one thing reportFreshness.js exists to
-    // prevent.
+    // TIMED OUT or the session ended safely. The order WAS confirmed submitted
+    // (we reached mcc_order_post.asp), so the intent stays `submitted` —
+    // UNRESOLVED on purpose — and the next run's recovery confirms the report
+    // once it appears (grace applies because the intent is genuinely submitted).
+    // We never fall back to the stale report and never resubmit.
     return {
         proceedWithCapture: false,
+        evidence: confirmedEvidence,
         response: successResponse({
             ...base,
             result: "WAITING_FOR_FREE_REPORT",
             classification: "WAITING_FOR_FREE_REPORT",
             reportOrdered: true,
             acquisitionIntentOpen: true,
+            intentId: intent.intent.id,
+            intentStatus: INTENT_STATUS.SUBMITTED,
             acquisitionDecision: decisionRecord,
             analyzedOlderReport: false,
             submissionAttempted: true,
-            submissionConfirmed: false,
+            // The submission itself WAS confirmed (mcc_order_post.asp reached);
+            // only the downstream report has not appeared yet.
+            submissionConfirmed: true,
+            reachedOrderPost: true,
             safelyBlocked: false,
             waitingForReportReadiness: true,
+            sessionEndedBeforeReport: chPage.isClosed() || Date.now() >= safeSessionDeadline,
             gateState,
             freeReportEnabled: false,
             nextFreeReportAvailableAt: null,
@@ -1623,9 +1720,9 @@ async function runAcquisitionPath(ctx) {
             paidReportPrice: null,
             temporaryOverrideApplied: false,
             message:
-                "The free report was submitted but no strictly newer report had appeared within " +
-                "the wait window. The acquisition intent remains unresolved and will be " +
-                "reconciled on a later run. The older report was NOT analyzed.",
+                "The free report was submitted (order confirmed at mcc_order_post.asp) but no " +
+                "strictly newer report had appeared before the safe session deadline. The intent " +
+                "stays `submitted` and is reconciled on a later run. The older report was NOT analyzed.",
         }),
     };
 }
