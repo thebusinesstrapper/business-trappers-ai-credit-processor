@@ -512,66 +512,60 @@ async function selectVerifiedFreeOption(frame, optionId) {
 
     const radio = frame.locator(idSelector(optionId)).first();
 
-    // Select the native radio DIRECTLY by #id via .check(). CreditHero
-    // CSS-replaces the radio with a styled control, so the input reports
-    // isVisible() === false while remaining fully actionable — the old
-    // isVisible() gate therefore fell through to a bound <label for>, which this
-    // page does NOT have, so nothing was ever selected and Submit was never
-    // reached. .check() waits for the radio to be actionable (not merely
-    // visible), performs the check, and is a no-op if already checked; we then
-    // PROVE it with isChecked(). Never forced.
-    outcome.via = "native_input_check";
+    // FORCE-SET the native radio. CreditHero CSS-replaces the radio with a styled
+    // control, so the input is not "actionable" by Playwright's normal checks and
+    // both .check() and label clicks fail silently. setChecked(true,{force:true})
+    // sets the checked state directly, bypassing the actionability gate. Then we
+    // dispatch input+change (bubbling) so CreditHero's own JS, which reacts to the
+    // change event to enable/prime Submit, sees the selection.
+    outcome.via = "native_input_force_set";
     outcome.clickAttempted = true;
 
-    const checked = await radio
-        .check({ timeout: SELECT_TIMEOUT })
+    const set = await radio
+        .setChecked(true, { force: true })
         .then(() => true)
         .catch(() => false);
 
-    if (!checked) {
-        // Fall back to a bound <label for> only if the direct check could not
-        // complete — preserves the prior behaviour for pages that DO style via a
-        // real label and leave the input genuinely non-actionable.
-        const labels = frame.locator(labelSelector(optionId));
-        const labelCount = await labels.count().catch(() => 0);
-
-        if (labelCount !== 1) {
-            return {
-                ...outcome,
-                ok: false,
-                reason:
-                    `check() on #${optionId} did not complete and there is no single bound ` +
-                    `<label for="${optionId}"> to fall back to (${labelCount} found). Not selecting.`,
-            };
-        }
-
-        const label = labels.first();
-        if (!(await label.isVisible().catch(() => false))) {
-            return { ...outcome, ok: false,
-                reason: `The label bound to "${optionId}" is present but not visible. Not clicking it.` };
-        }
-
-        outcome.via = "bound_label";
-        const labelDone = await label
-            .click({ timeout: SELECT_TIMEOUT })
-            .then(() => true)
-            .catch(() => false);
-
-        if (!labelDone) {
-            return { ...outcome, ok: false, reason: "The bound-label click did not complete." };
-        }
+    if (!set) {
+        return { ...outcome, ok: false,
+            reason: `setChecked(true,{force:true}) on #${optionId} did not complete. Not submitting.` };
     }
 
-    // POSITIVE PROOF the radio is actually checked. verifyOnlyFreeIsChecked is
-    // the authority: it confirms the FREE option is checked AND is the only one
-    // checked, and reports the actual checkedIds as evidence (so a click that
-    // checked the WRONG option is surfaced, not hidden). Run it unconditionally.
+    // Fire the native events CreditHero's JavaScript listens for.
+    await radio
+        .evaluate((el) => {
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+        })
+        .catch(() => {});
+
+    // POSITIVE PROOF: verifyOnlyFreeIsChecked is the authority — it confirms
+    // exactly one productBuyNew radio is checked, that it is #productBuyNew_01,
+    // and reports the actual checkedIds as evidence (so a force-set that landed
+    // on the WRONG option is surfaced, not hidden). This subsumes a bare
+    // isChecked() on the free radio. Run it first, unconditionally.
     const verification = await verifyOnlyFreeIsChecked(frame, optionId);
     outcome.verification = verification;
 
-    if (!verification.ok) {
-        return { ...outcome, ok: false, reason: verification.reason };
+    if (!verification.ok) return { ...outcome, ok: false, reason: verification.reason };
+
+    // Belt-and-braces: the free radio itself reports checked.
+    const isChecked = await radio.isChecked().catch(() => false);
+    if (!isChecked) {
+        return { ...outcome, ok: false,
+            reason: `#${optionId} did not report isChecked() === true after setChecked. Not submitting.` };
     }
+
+    // POSITIVE PROOF: the checked option's value matches the free-report SKU, so
+    // we never submit a look-alike option that shares the id but not the SKU.
+    const checkedValue = await radio.getAttribute("value").catch(() => null);
+    if (checkedValue !== FREE_OPTION_VALUE) {
+        return { ...outcome, ok: false,
+            reason:
+                `#${optionId} is checked but its value "${checkedValue}" is not the expected free ` +
+                `report SKU "${FREE_OPTION_VALUE}". Not submitting.` };
+    }
+    outcome.checkedValue = checkedValue;
 
     return { ...outcome, ok: true };
 }
@@ -608,6 +602,13 @@ const SUBMIT_CONTROL_SELECTOR = [
 
 /** The only accepted label, after trim / whitespace collapse / lower-casing. */
 const SUBMIT_LABEL = "submit";
+
+/**
+ * The free-report option's exact `value` (SKU) on the live order page. Checked
+ * in addition to the id so a look-alike option that reused productBuyNew_01 but
+ * a different SKU could never be submitted as "free".
+ */
+const FREE_OPTION_VALUE = "CR3B-PROF_FSLLC-0-CPX";
 
 /** Cap a UI label before it travels into a job result. */
 function safeLabel(value) {
@@ -889,7 +890,30 @@ export async function selectAndSubmitFreeReport(page, opts = {}) {
         return report;
     }
 
-    await found.qualifying[0].control.click({ timeout: LINK_TIMEOUT });
+    // The Submit control is an <a onclick="orderSelect();"> — a JavaScript anchor
+    // with no href. Playwright's normal actionability can block a click on a
+    // styled/overlaid anchor, so try a force click and, if that does not fire,
+    // fall back to a direct DOM .click() which invokes the onclick handler.
+    let clickOk = await found.qualifying[0].control
+        .click({ force: true, timeout: LINK_TIMEOUT })
+        .then(() => true)
+        .catch(() => false);
+
+    if (!clickOk) {
+        clickOk = await found.qualifying[0].control
+            .evaluate((el) => el.click())
+            .then(() => true)
+            .catch(() => false);
+    }
+
+    if (!clickOk) {
+        report.error_code = "SUBMIT_CLICK_FAILED";
+        report.failureReason =
+            "The Submit anchor was located but neither a force click nor a DOM click fired. " +
+            "Nothing was submitted; the intent remains unresolved for recovery.";
+        return report;
+    }
+
     report.submitClicked = true;
 
     // ---- DID THE PAGE ACTUALLY MOVE? --------------------------------------
