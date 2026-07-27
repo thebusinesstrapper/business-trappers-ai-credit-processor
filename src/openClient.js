@@ -9,6 +9,7 @@
  */
 
 import { getCrcClientId } from "./crcClientId.js";
+import { searchTermsFor, selectClientRow } from "./clientSearchName.js";
 
 const SEARCH_TIMEOUT = 20000;
 const ROW_TIMEOUT = 15000;
@@ -114,6 +115,56 @@ async function waitForFilteredRow(page, clientName) {
     }
 
     return nameLink;
+}
+
+/**
+ * After the grid has filtered on a search term, collect the visible matching
+ * rows as lightweight { clientName, crcClientId, index } records so the caller
+ * can verify identity (via clientSearchName.selectClientRow) BEFORE opening
+ * anything. crcClientId is left null here: the authoritative id is only read
+ * from the dashboard URL after a row is opened, so row-level id is not relied
+ * upon for the id-based check unless CRC exposes it. Reads only — no clicks.
+ *
+ * Returns { rows, locators } where locators[i] is the clickable name element for
+ * rows[i], or null if that row has no clickable name element.
+ */
+async function collectFilteredRows(page, term) {
+    const rowLocator = page.locator(ROW_SELECTOR, { hasText: term });
+
+    try {
+        await rowLocator.first().waitFor({ state: "visible", timeout: ROW_TIMEOUT });
+    } catch {
+        return { rows: [], locators: [] };
+    }
+
+    const count = await rowLocator.count();
+    const rows = [];
+    const locators = [];
+
+    for (let i = 0; i < count; i += 1) {
+        const rowEl = rowLocator.nth(i);
+        if (!(await rowEl.isVisible().catch(() => false))) continue;
+
+        // Verify on the clickable NAME element's own text, not the whole row
+        // (which also carries status badges, icons, etc.). If the name element
+        // cannot be read, the row keeps a null name and simply will not satisfy
+        // the exact-name checks in selectClientRow — failing closed, not open.
+        const nameLink = await findClientNameLink(rowEl, term);
+        let displayedName = null;
+        if (nameLink) {
+            displayedName = (await nameLink.textContent().catch(() => "")) || "";
+            displayedName = displayedName.replace(/\s+/g, " ").trim() || null;
+        }
+
+        rows.push({
+            clientName: displayedName,
+            crcClientId: null,
+            index: locators.length,
+        });
+        locators.push(nameLink);
+    }
+
+    return { rows, locators };
 }
 
 const DASHBOARD_READY_LABEL = "View CreditHeroScore Account";
@@ -249,7 +300,7 @@ async function captureFailureContext(page, label) {
  *   clientStatus: string | null
  * }>}
  */
-export async function openClient(page, clientName) {
+export async function openClient(page, clientName, knownCrcClientId = null) {
     let searchInput;
 
     try {
@@ -262,11 +313,66 @@ export async function openClient(page, clientName) {
     }
 
     console.log(`Typing client name into Table Search: "${clientName}"`);
-    await searchInput.click();
-    await searchInput.fill(clientName);
+    // SEARCH ORDER: the full authoritative name first, then — ONLY if the name
+    // ends in a recognized personal suffix (Jr/Sr/II/III/IV/V) and the full
+    // search found nothing — the suffix-free base name. CRC's Clients search does
+    // not reliably return a suffixed client, so the base name is the fallback.
+    // The full name remains authoritative for every downstream identity check;
+    // the base name is a transient search string only.
+    const searchTerms = searchTermsFor(clientName);
 
-    console.log("Waiting for the table to filter...");
-    const clientNameLink = await waitForFilteredRow(page, clientName);
+    let clientNameLink = null;
+    let usedFallbackSearch = false;
+
+    // 1. Full-name search — unchanged behavior for ordinary clients.
+    await searchInput.click();
+    await searchInput.fill(searchTerms[0]);
+    console.log(`Waiting for the table to filter on "${searchTerms[0]}"...`);
+    clientNameLink = await waitForFilteredRow(page, searchTerms[0]);
+
+    // 2. Suffix-free fallback — only when the full search missed AND a distinct
+    //    base name exists. Verify the returned rows and fail closed if more than
+    //    one plausible client remains.
+    if (!clientNameLink && searchTerms.length > 1) {
+        const baseTerm = searchTerms[1];
+        usedFallbackSearch = true;
+        console.log(
+            `No exact row for "${clientName}". Retrying CRC search without suffix: "${baseTerm}".`
+        );
+
+        await searchInput.click();
+        await searchInput.fill(baseTerm);
+        console.log(`Waiting for the table to filter on "${baseTerm}"...`);
+
+        const { rows, locators } = await collectFilteredRows(page, baseTerm);
+
+        // Verify by known CRC id (if provided), then exact full name, then exact
+        // base name. Multiple plausible rows fail closed to Manual Review.
+        const selection = selectClientRow(rows, {
+            fullName: clientName,
+            knownCrcClientId,
+        });
+
+        if (selection.matched) {
+            clientNameLink = locators[selection.row.index] ?? null;
+        } else if (selection.ambiguous) {
+            console.log(
+                `Suffix-free search for "${baseTerm}" returned ${selection.candidates} plausible ` +
+                `clients. Failing closed to manual review (ambiguous_client_match).`
+            );
+            await captureFailureContext(page, "ambiguous-client-match");
+            return {
+                clientFound: false,
+                clientOpened: false,
+                blockedReason: "ambiguous_client_match",
+                crcClientId: null,
+                currentUrl: page.url(),
+                pageTitle: await page.title(),
+                clientName: null,
+                clientStatus: null,
+            };
+        }
+    }
 
     if (!clientNameLink) {
         console.log(`No matching client found for "${clientName}".`);
@@ -282,7 +388,10 @@ export async function openClient(page, clientName) {
         };
     }
 
-    console.log(`Match found. Opening client: "${clientName}"`);
+    console.log(
+        `Match found${usedFallbackSearch ? " (via suffix-free fallback)" : ""}. ` +
+        `Opening client: "${clientName}"`
+    );
 
     let dashboardClientName;
     let dashboardClientStatus;
