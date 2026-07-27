@@ -670,7 +670,7 @@ function projectCreditHeroDiagnostics(diag, clientName = null) {
     };
 }
 
-function buildM7Diagnostic(m7, clientName = null) {
+export function buildM7Diagnostic(m7, clientName = null) {
     if (!m7 || typeof m7 !== "object") return null;
 
     const lettersOk = m7.lettersOk === true || m7.letters_ok === true;
@@ -688,6 +688,48 @@ function buildM7Diagnostic(m7, clientName = null) {
             "unspecified";
         withheldReasons[code] = (withheldReasons[code] ?? 0) + 1;
     }
+
+    // READ-ONLY DIAGNOSTIC PROJECTION of the withheld items themselves. The
+    // withheld count and reason histogram above tell you HOW MANY and WHY, but
+    // not WHICH items were held back — so a zero-letter / nonzero-withheld result
+    // (M8 blocked m7_letters_missing) could not be diagnosed from the job JSON
+    // without a live run. This surfaces the four operator-facing fields per item
+    // and nothing else.
+    //
+    // The exact field name each engine uses is not assumed: several plausible
+    // spellings are read and the first present one wins. Values pass through the
+    // existing sanitizers (safeCode caps length; account numbers are never read),
+    // so no PII beyond the creditor label already shown on the dashboard leaves.
+    // This is additive: it does not alter withheld, withheldCount, or any
+    // classification/completion/M8 input.
+    const withheldItems = withheld.slice(0, 50).map((entry) => ({
+        creditor:
+            safeCode(entry?.creditor) ??
+            safeCode(entry?.creditorName) ??
+            safeCode(entry?.furnisher) ??
+            safeCode(entry?.furnisher_norm) ??
+            safeCode(entry?.accountName) ??
+            safeCode(entry?.account_name) ??
+            null,
+        bureau:
+            safeCode(entry?.bureau) ??
+            safeCode(entry?.bureau_name) ??
+            safeCode(entry?.creditBureau) ??
+            null,
+        itemType:
+            safeCode(entry?.itemType) ??
+            safeCode(entry?.item_type) ??
+            safeCode(entry?.type) ??
+            safeCode(entry?.accountType) ??
+            safeCode(entry?.account_type) ??
+            null,
+        withheldReason:
+            safeCode(entry?.reasonCode) ??
+            safeCode(entry?.code) ??
+            safeReason(entry?.reason) ??
+            safeReason(entry?.reasonText) ??
+            "unspecified",
+    }));
 
     // M7 names this object DIFFERENTLY per path: capture_result on its failure
     // branches, capture on the success branch. Read both so the eligibility
@@ -716,6 +758,7 @@ function buildM7Diagnostic(m7, clientName = null) {
         letterCount: letters.length,
         withheldCount: withheld.length,
         withheldReasons,
+        withheldItems,
         // Import-audit / CreditHero state IF the engines already emit one. Read
         // from several spellings because we do not yet know which is populated;
         // absent everywhere, this stays null rather than inventing a category.
