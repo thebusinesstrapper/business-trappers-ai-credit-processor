@@ -670,6 +670,35 @@ function projectCreditHeroDiagnostics(diag, clientName = null) {
     };
 }
 
+/**
+ * Additively surface the sanitized per-item withheld detail on whatever
+ * m7Summary a runProductionClient branch returned.
+ *
+ * Some branches (including the M8-blocked path: M7 success, letterCount 0,
+ * withheldCount > 0) return a COMPACT summary — success/lettersOk/letterCount/
+ * withheldCount only. That object is truthy, so a `summary ?? diagnostic`
+ * coalesce stops at it and the diagnostic's withheldItems is never surfaced.
+ *
+ * This returns a COPY of the compact summary with `withheldItems` and
+ * `withheldReasons` layered on FROM the already-sanitized diagnostic, only when
+ * the summary does not already carry them. No existing field is overwritten.
+ * When there is no compact summary, the full diagnostic is returned as before.
+ * Read-only and additive — no processing/classification/M8 behavior changes.
+ */
+export function enrichM7Summary(summary, diagnostic) {
+    if (!summary || typeof summary !== "object") return diagnostic ?? null;
+    if (!diagnostic || typeof diagnostic !== "object") return summary;
+
+    const enriched = { ...summary };
+    if (enriched.withheldItems === undefined && diagnostic.withheldItems !== undefined) {
+        enriched.withheldItems = diagnostic.withheldItems;
+    }
+    if (enriched.withheldReasons === undefined && diagnostic.withheldReasons !== undefined) {
+        enriched.withheldReasons = diagnostic.withheldReasons;
+    }
+    return enriched;
+}
+
 export function buildM7Diagnostic(m7, clientName = null) {
     if (!m7 || typeof m7 !== "object") return null;
 
@@ -1431,7 +1460,17 @@ async function runJob(job) {
                 // the full M7 object as `m7` and never sets `m7Summary`, so this
                 // key coalesced to null and the reason was discarded. Fall back
                 // to a safe projection of what was there all along.
-                m7Summary: result?.m7Summary ?? m7Diagnostic ?? null,
+                //
+                // FOLLOW-UP FIX (Rashad, CRC 28): several runProductionClient
+                // branches (including the M8-blocked path: M7 success, letterCount
+                // 0, withheldCount 4) DO return a COMPACT m7Summary
+                // (success/lettersOk/letterCount/withheldCount only). Because that
+                // object is present, the `??` above stopped at it and the sanitized
+                // per-item `withheldItems` from buildM7Diagnostic was never
+                // surfaced. Enrich the compact summary with withheldItems (and the
+                // reason histogram) from the diagnostic without changing any
+                // existing field — read-only, additive, no behavior change.
+                m7Summary: enrichM7Summary(result?.m7Summary, m7Diagnostic),
                 m7Diagnostic,
                 creditHeroAccessState: result?.creditHeroAccessState ?? null,
                 inactive: result?.inactive ?? null,
