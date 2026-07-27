@@ -618,29 +618,56 @@ export async function runProductionClient(data = {}) {
         };
     }
 
-    // ---- CORRECTION 2: NO ACTIONABLE DISPUTE ITEMS -------------------------
+    // ---- CORRECTION 2: NO ELIGIBLE NEGATIVE ITEMS (DFY COMPLETION) ---------
     //
-    // M7 can succeed (success:true, lettersOk:true — both already guaranteed
-    // by the "if (!m7 || m7.success === false || !m7LettersOk)" gate above)
-    // and still have generated zero letters and withheld zero items — e.g. no
-    // negative accounts are present, or the only negative item present (such
-    // as a bankruptcy) is intentionally outside the current processing scope
-    // and was never surfaced by M7 as either a letter or a withheld item. That
-    // is a legitimate business outcome, not a capture failure and not a
-    // letter-generation failure. It must never reach M8, which would
-    // otherwise reject it as "m7_letters_missing" — a message meant for a
-    // genuine pipeline defect, not for "there was nothing to dispute".
+    // The DFY service ends after 6 successful rounds OR when there are no
+    // remaining eligible negative items to dispute. This branch handles the
+    // second case: M7 positively confirms there is nothing eligible left, so the
+    // client is COMPLETE rather than a pipeline failure. A zero-letter M7 result
+    // must NOT be treated as an error and must NOT be sent to M8 (which would
+    // reject it as "m7_letters_missing").
     //
-    // NO CRC status change. Current business rules do not define a target CRC
-    // status for this condition, so CRC is left exactly as it was: no
-    // statusOnlyUpdate call, no block_reason write, no crc_client_status
-    // write. current_round is untouched, no delivery lock is taken, and M8 is
-    // never invoked.
-    const letterCount = Array.isArray(m7.letters) ? m7.letters.length : 0;
-    const withheldCount = Array.isArray(m7.withheld) ? m7.withheld.length : 0;
+    // POSITIVE CONFIRMATION REQUIRED (fail closed otherwise):
+    //   * extraction/classification completed successfully — guaranteed by the
+    //     gate above (m7.success !== false && m7LettersOk); M7 fails closed on
+    //     any capture/normalization/identity failure, so reaching here means the
+    //     report was trustworthy.
+    //   * eligible negative item count = 0 — the letters array is PRESENT (a real
+    //     array, so the count is known) and empty.
+    //   * withheld item count = 0 — the withheld array is PRESENT and empty.
+    //   * no unresolved review condition — the only permitted review flag is the
+    //     benign FIRST_PRODUCTION_VALIDATION wording check; any other
+    //     review_required reason is an unresolved condition and blocks.
+    // Credit inquiries do not appear as letters/withheld here, so "inquiries
+    // only, nothing eligible to dispute" satisfies all of the above and
+    // completes. (An inquiry that WAS eligible for a separate inquiry-dispute
+    // workflow would have been surfaced by M7 as a letter or a withheld item,
+    // so it cannot reach this branch silently.)
+    //
+    // FAIL CLOSED: if the letters or withheld arrays are missing (counts
+    // unknown), completion is NOT taken — the result falls through to the
+    // existing M8 path, which blocks it as m7_letters_missing / manual review.
+    //
+    // NO CRC status change beyond COMPLETE. current_round is untouched, no
+    // delivery lock is taken, and M8 is never invoked.
+    const lettersKnown = Array.isArray(m7.letters);
+    const withheldKnown = Array.isArray(m7.withheld);
+    const letterCount = lettersKnown ? m7.letters.length : null;
+    const withheldCount = withheldKnown ? m7.withheld.length : null;
 
-    if (letterCount === 0 && withheldCount === 0) {
-        // ---- APPROVED COMPLETION ROUTE 1: nothing left to dispute ---------
+    // The only review flag that does NOT count as an unresolved condition.
+    const reviewRequired = m7.review_required === true || m7.reviewRequired === true;
+    const reviewReason = m7.review_reason ?? m7.reviewReason ?? null;
+    const reviewResolvedOrBenign =
+        !reviewRequired || reviewReason === "FIRST_PRODUCTION_VALIDATION";
+
+    const noEligibleNegatives =
+        lettersKnown && withheldKnown &&
+        letterCount === 0 && withheldCount === 0 &&
+        reviewResolvedOrBenign;
+
+    if (noEligibleNegatives) {
+        // ---- APPROVED COMPLETION ROUTE: no eligible negative items --------
         //
         // Gated on operationalRoutingApproved exactly like every other CRC
         // write in this module. Unapproved runs report the proposed action and
@@ -649,7 +676,7 @@ export async function runProductionClient(data = {}) {
 
         if (routingApproved) {
             completion = await routeToComplete(
-                clientName, crcClientId, "no_disputable_items",
+                clientName, crcClientId, "no_eligible_negative_items",
                 { negativeItemsRemaining: 0 }
             );
         }
@@ -657,16 +684,17 @@ export async function runProductionClient(data = {}) {
         return {
             ...base,
             ok: true,
-            stage: "no_actionable_dispute_items",
-            outcome: "NO_ACTIONABLE_DISPUTE_ITEMS",
+            stage: "no_eligible_negative_items",
+            outcome: "NO_ELIGIBLE_NEGATIVE_ITEMS",
             blockedReason: null,
             failureReason: null,
             crcClientId,
             proposedAction: routingApproved ? null : "SET_COMPLETE",
-            completionReason: "no_disputable_items",
+            completionReason: "no_eligible_negative_items",
             completion,
             statusUpdated: completion?.status?.statusUpdated === true,
             processComplete: completion?.memory?.ok === true,
+            manualReviewCleared: completion?.memory?.ok === true,
             m7Summary: {
                 success: m7.success !== false,
                 lettersOk: m7LettersOk,
@@ -676,6 +704,12 @@ export async function runProductionClient(data = {}) {
             m8: null,
         };
     }
+
+    // FAIL CLOSED: counts unknown, or withheld/unresolved review present. Do NOT
+    // complete. withheldCount > 0 preserves Manual Review / the correct blocked
+    // state via the existing M8 path below (a withheld-only result still has
+    // zero letters, so M8 blocks it as m7_letters_missing -> manual review,
+    // which is the correct blocked state for "items exist but were withheld").
 
     const m8 = await runMilestone8({
         clientName,

@@ -602,7 +602,7 @@ export async function advanceRoundAfterDelivery(crcClientId, deliveredRound) {
  * already_complete.
  *
  * @param {string|number} crcClientId
- * @param {"final_round_delivered"|"no_disputable_items"} reason
+ * @param {"final_round_delivered"|"no_disputable_items"|"no_eligible_negative_items"} reason
  * @param {object} [opts]
  * @param {number} [opts.expectedRound]         required for final_round_delivered
  * @param {number} [opts.negativeItemsRemaining] persisted when known (0 on the
@@ -615,7 +615,7 @@ export async function markProcessComplete(crcClientId, reason, opts = {}) {
         throw new Error(`markProcessComplete: invalid crcClientId "${crcClientId}".`);
     }
 
-    if (!["final_round_delivered", "no_disputable_items"].includes(reason)) {
+    if (!["final_round_delivered", "no_disputable_items", "no_eligible_negative_items"].includes(reason)) {
         throw new Error(`markProcessComplete: unrecognized reason "${reason}".`);
     }
 
@@ -626,6 +626,16 @@ export async function markProcessComplete(crcClientId, reason, opts = {}) {
         processing_state: "complete",
         last_successful_processing_at: now.toISOString(),
     };
+
+    // Completing the client resolves any active Manual Review for it (DFY is
+    // finished — there is nothing left for a human to action). The delivery
+    // completion (final_round_delivered) comes from a 'waiting' state that is
+    // never Manual Review, but clearing here is harmless and keeps the invariant
+    // "complete implies no active Manual Review" true for every reason.
+    update.manual_review_active = false;
+    update.manual_review_stage = null;
+    update.manual_review_reason = null;
+    update.manual_review_flagged_at = null;
 
     if (reason === "final_round_delivered") {
         update.last_dispute_date = isoDate(now);
