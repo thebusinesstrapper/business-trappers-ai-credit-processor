@@ -1224,6 +1224,30 @@ async function runJob(job) {
                 startedAt: new Date().toISOString(),
             };
 
+            // ---- PERMANENT PRODUCTION EXCLUSION: CRC SAMPLE CLIENT ---------
+            //
+            // CRC client ID "1" is CRC's built-in "Sample Client" demo record. It
+            // is never a real consumer and must never be opened or processed. The
+            // exclusion is keyed on the AUTHORITATIVE CRC client id, not the name
+            // (a real client could be named "Sample Client"), and runs BEFORE any
+            // client-opening or milestone logic: no M6/M7/M8, no notice, no round
+            // change, no failure written. Any stale Manual Review flag on the
+            // record is cleared so it does not linger on the dashboard.
+            if (String(item.crcClientId ?? "") === "1") {
+                await clearManualReview("1").catch(() => {});
+                job.summary.excluded = (job.summary.excluded ?? 0) + 1;
+                job.results.push({
+                    clientName: item.clientName,
+                    crcClientId: "1",
+                    status: "excluded",
+                    blockedReason: "sample_client",
+                    manualReviewActive: false,
+                    ok: true,
+                });
+                job.currentClient = null;
+                continue;
+            }
+
             let result;
 
             try {
