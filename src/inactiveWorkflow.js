@@ -139,7 +139,7 @@ function resolveFirstName(identity, clientName) {
  * @param {boolean} opts.inactiveWorkflowApproved  must be true to act
  */
 export async function runInactiveWorkflow(opts = {}) {
-    const { clientName, crcClientId: suppliedId, inactiveWorkflowApproved } = opts;
+    const { clientName, crcClientId: suppliedId, inactiveWorkflowApproved, noticeDiagnosticOnly } = opts;
     const nowIso = new Date().toISOString();
     let crcClientId = suppliedId;
 
@@ -240,6 +240,43 @@ export async function runInactiveWorkflow(opts = {}) {
     }
 
     try {
+
+    // ---- DIAGNOSTIC-ONLY SHORT PATH (temporary) ---------------------------
+    // When noticeDiagnosticOnly is set, we ONLY read the prefilled recipient and
+    // expose it. We skip the memory write (step 1), the status write (step 2),
+    // and never write a notice timestamp. Nothing about the client changes.
+    if (noticeDiagnosticOnly === true) {
+        report.noticeDiagnosticOnly = true;
+
+        if (decision.action === PLANNED_ACTION.NO_MESSAGE_DUE) {
+            report.failureReason = "DIAGNOSTIC_ONLY — no notice due; recipient not read.";
+            return report;
+        }
+
+        const profile = await readClientProfile(page, crcClientId).catch(() => null);
+        const firstName = resolveFirstName(profile?.identity, clientName);
+        const isReminder = decision.action === PLANNED_ACTION.SEND_REMINDER;
+
+        const diag = await sendClientNotice(page, {
+            clientName,
+            crcClientId,
+            subject: isReminder ? REMINDER_SUBJECT : NOTICE_SUBJECT,
+            // A body is required by sendClientNotice input validation; the run
+            // stops before the body is ever entered. Fall back to a placeholder
+            // only if the first name could not be resolved.
+            body: firstName
+                ? (isReminder ? buildReminderBody(firstName) : buildNoticeBody(firstName))
+                : "diagnostic",
+            submitApproved: false,
+            diagnosticOnly: true,
+        });
+
+        report.recipientDiagnostic = diag.recipientDiagnostic ?? null;
+        report.recipientVerified = diag.recipientVerified === true;
+        report.failureReason =
+            "DIAGNOSTIC_ONLY — recipient read; no status, timestamp, notice, or memory changed.";
+        return report;
+    }
 
     // ---- 1. Record that we looked, before anything can fail ---------------
     try {

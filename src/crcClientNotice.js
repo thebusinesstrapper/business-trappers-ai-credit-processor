@@ -248,6 +248,12 @@ async function verifyRecipient(page, clientName) {
                 selector: RECIPIENT_SELECTOR,
                 matchingElementCount: latest.count,
                 matchedIndex: matched.index,
+                // Diagnostic fields (do not affect the match decision above):
+                // surface WHAT verified, so the job result can expose it.
+                fieldVisible: matched.visible,
+                fieldEnabled: matched.enabled,
+                observedRecipient: sanitizeObserved(matched.value),
+                observedLength: matched.value.length,
             };
         }
 
@@ -329,7 +335,7 @@ async function fillBody(page, body) {
  * @param {boolean} opts.submitApproved  must be true to click Submit
  */
 export async function sendClientNotice(page, opts = {}) {
-    const { clientName, crcClientId, subject, body, submitApproved } = opts;
+    const { clientName, crcClientId, subject, body, submitApproved, diagnosticOnly } = opts;
 
     const report = {
         tool: CLIENT_NOTICE_VERSION,
@@ -372,27 +378,40 @@ export async function sendClientNotice(page, opts = {}) {
 
     const recipient = await verifyRecipient(page, clientName);
 
+    // Always surface the observed recipient evidence (success OR failure), so a
+    // job result can show exactly what CRC prefilled without another live run.
+    report.recipientDiagnostic = {
+        recipientVerificationReason: recipient.ok ? "verified" : (recipient.reason ?? null),
+        selector: recipient.selector ?? null,
+        matchingElementCount: recipient.matchingElementCount ?? null,
+        fieldVisible: recipient.fieldVisible ?? null,
+        fieldEnabled: recipient.fieldEnabled ?? null,
+        expectedClientName: recipient.expectedClientName ?? sanitizeObserved(clientName),
+        observedRecipient: recipient.observedRecipient ?? null,
+        observedLength: recipient.observedLength ?? null,
+    };
+
     if (!recipient.ok) {
         report.failedStage = "recipient";
         report.failureReason =
             `The prefilled recipient did not verify as ${clientName} (${recipient.reason}). ` +
             `Nothing was sent.`;
-        // Sanitized evidence, so a repeat failure is diagnosable from the job
-        // result instead of requiring another live run.
-        report.recipientDiagnostic = {
-            reason: recipient.reason,
-            selector: recipient.selector ?? null,
-            matchingElementCount: recipient.matchingElementCount ?? null,
-            fieldVisible: recipient.fieldVisible ?? null,
-            fieldEnabled: recipient.fieldEnabled ?? null,
-            expectedClientName: recipient.expectedClientName ?? null,
-            observedRecipient: recipient.observedRecipient ?? null,
-            observedLength: recipient.observedLength ?? null,
-        };
         return report;
     }
 
     report.recipientVerified = true;
+
+    // ---- DIAGNOSTIC BOUNDARY (temporary) -----------------------------------
+    // When diagnosticOnly is set, stop immediately after recipient verification:
+    // BEFORE subject/body entry and BEFORE any submit. Nothing is sent, and the
+    // caller writes no status, timestamp, or memory. The recipientDiagnostic
+    // above is the whole point of the run.
+    if (diagnosticOnly === true) {
+        report.stoppedBeforeSubmit = true;
+        report.diagnosticOnly = true;
+        report.failureReason = "DIAGNOSTIC_ONLY — stopped after recipient verification; nothing sent.";
+        return report;
+    }
 
     if (!(await fillSubject(page, subject))) {
         report.failedStage = "subject";

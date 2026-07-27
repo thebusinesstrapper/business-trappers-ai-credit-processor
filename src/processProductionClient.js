@@ -313,6 +313,8 @@ export async function runProductionClient(data = {}) {
             clientName,
             crcClientId: routeCrcId,
             inactiveWorkflowApproved: data.inactiveWorkflowApproved === true,
+            // Temporary diagnostic: read the prefilled recipient and change nothing.
+            noticeDiagnosticOnly: data.noticeDiagnosticOnly === true,
         });
 
         // Persist the exact CRC status runInactiveWorkflow() confirmed it wrote —
@@ -365,6 +367,8 @@ export async function runProductionClient(data = {}) {
             clientName,
             crcClientId: routeCrcId,
             inactiveWorkflowApproved: data.inactiveWorkflowApproved === true,
+            // Temporary diagnostic: read the prefilled recipient and change nothing.
+            noticeDiagnosticOnly: data.noticeDiagnosticOnly === true,
         });
 
         // Same confirmed-status persistence as the CHS_NOT_ACTIVATED branch above.
@@ -414,6 +418,8 @@ export async function runProductionClient(data = {}) {
             clientName,
             crcClientId: routeCrcId,
             inactiveWorkflowApproved: data.inactiveWorkflowApproved === true,
+            // Temporary diagnostic: read the prefilled recipient and change nothing.
+            noticeDiagnosticOnly: data.noticeDiagnosticOnly === true,
         });
 
         // Same confirmed-status persistence as the PAYMENT_REQUIRED branch: only

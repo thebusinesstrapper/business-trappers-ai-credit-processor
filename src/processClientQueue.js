@@ -1299,6 +1299,9 @@ async function runJob(job) {
                         submitApproved: job.submitApproved,
                         inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
                         operationalRoutingApproved: job.operationalRoutingApproved === true,
+                        // Temporary diagnostic: exposes the prefilled recipient
+                        // and changes nothing. Off unless explicitly requested.
+                        noticeDiagnosticOnly: job.noticeDiagnosticOnly === true,
                     });
                 }
             } catch (error) {
@@ -1663,6 +1666,11 @@ export function startClientQueue(data = {}) {
         // inactive workflow nor operational routing can be armed inside one.
         inactiveWorkflowApproved: diagnosticOnly ? false : data.inactiveWorkflowApproved === true,
         operationalRoutingApproved: diagnosticOnly ? false : data.operationalRoutingApproved === true,
+        // Temporary recipient diagnostic. Independent of the queue's M7-only
+        // diagnosticOnly: this flows through the PRODUCTION wrapper into the
+        // inactive-notice path, reads the prefilled recipient, and writes
+        // nothing (no status, timestamp, memory, round, or Manual Review).
+        noticeDiagnosticOnly: data.noticeDiagnosticOnly === true,
         excludedStatuses,
         maxClients,
         delayMs,
