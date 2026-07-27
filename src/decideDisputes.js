@@ -45,6 +45,11 @@ import {
     complianceGateFor,
 } from "./decisionRecords.js";
 
+// Business Trappers HARD protected-inquiry rule. Shared matcher only — no new
+// matching logic here. See reportNormalize.js for the approved set
+// (KCB CREDIT, KCB CREDIT L, KCB CREDIT LLC).
+import { isProtectedInquiryName } from "./reportNormalize.js";
+
 export const DECISION_SCHEMA_VERSION = "BT-DECISION-1.0";
 
 export const OUTCOME = Object.freeze({
@@ -205,6 +210,50 @@ function evidenceFor(mapping) {
  * see the note in decideDisputes().
  */
 function decideItem(item, { mixedFile, observationsByItemKey }) {
+    // ---- BUSINESS TRAPPERS HARD PROTECTED-INQUIRY RULE ---------------------
+    //
+    // Runs FIRST, before any finding is mapped to a dispute decision — the same
+    // "exclude before it can reach the consumer" discipline as the Constitutional
+    // exclusions below. A protected inquiry (KCB CREDIT / KCB CREDIT L /
+    // KCB CREDIT LLC) must never produce a dispute, a removal recommendation, a
+    // Bureau Fidelity action, or a letter. We match ONLY on item.furnisher via
+    // the shared reportNormalize matcher (exact approved set, no new logic). We
+    // do NOT rely on a propagated protected_inquiry flag: analyzeCreditReport
+    // re-projects only { stableItemKey, stableAccountKey, bureau, furnisher,
+    // findings } onto analysis.inquiries and drops the flag, but it preserves
+    // furnisher unchanged, so the matcher is reliable here.
+    //
+    // Mirrors the Constitutional-exclusion return shape so downstream stages
+    // (strategy, chain, letters) treat it identically to any other EXCLUDED item:
+    // no dispute action, no removal, no Manual Review, no letter.
+    if (item.kind === "INQUIRY" && isProtectedInquiryName(item.furnisher)) {
+        return {
+            stableItemKey: item.stableItemKey,
+            stableAccountKey: item.stableAccountKey,
+            bureau: item.bureau,
+            furnisher: item.furnisher ?? null,
+            kind: item.kind,
+            outcome: OUTCOME.EXCLUDED,
+            primaryDecision: DECISION_NO_FURTHER_ACTION,
+            decisionRecords: [],
+            automationTier: null,
+            humanReview: false,
+            humanReviewReasons: [],
+            exclusion: {
+                rule: "BUSINESS_RULE_PROTECTED_INQUIRY",
+                reason: "business_rule_protected_inquiry",
+            },
+            unmappedFindings: [],
+            reasoningChain: [
+                `Inquiry furnisher "${item.furnisher ?? "this inquiry"}" is a Business Trappers ` +
+                    `protected inquiry.`,
+                `EXCLUDED BY BUSINESS_RULE_PROTECTED_INQUIRY.`,
+                `No dispute, removal recommendation, Bureau Fidelity action, or letter is produced ` +
+                    `for this inquiry. Governing record: ${DECISION_NO_FURTHER_ACTION.record}.`,
+            ],
+        };
+    }
+
     // An INQUIRY is not an account. It has no status, no balance, no
     // responsibility, and no observation in the report.
     //
