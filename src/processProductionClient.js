@@ -18,6 +18,57 @@ import {
 } from "./clientMemory.js";
 import { runMilestone8 } from "./milestone8.js";
 
+/**
+ * Read-only, sanitized projection of the raw m7.withheld array into the four
+ * operator-facing fields. Used to surface WHICH items M7 held back on a
+ * zero-letter result (M8 blocks m7_letters_missing), directly from the compact
+ * m7Summary — so the job JSON is diagnosable without a live rerun.
+ *
+ * FIELD NAMES ARE NOT ASSUMED. The engine that builds each withheld entry
+ * (pipeline) is not in this file's tree, so the exact per-item field spelling is
+ * unverifiable here. Several plausible spellings are read and the first present
+ * one wins; a field that is absent projects as null (never guessed). Values are
+ * length-capped and long digit runs are redacted so no account/SSN fragment can
+ * ride out in a diagnostic field. Missing/!array withheld projects as [].
+ */
+function safeWithheldValue(value) {
+    if (typeof value !== "string") return null;
+    const cleaned = value.replace(/\d{9,}/g, "[redacted]").replace(/\s+/g, " ").trim();
+    return cleaned ? cleaned.slice(0, 120) : null;
+}
+
+export function projectWithheldItems(withheld) {
+    if (!Array.isArray(withheld)) return [];
+    return withheld.slice(0, 50).map((entry) => ({
+        creditor:
+            safeWithheldValue(entry?.creditor) ??
+            safeWithheldValue(entry?.creditorName) ??
+            safeWithheldValue(entry?.furnisher) ??
+            safeWithheldValue(entry?.furnisher_norm) ??
+            safeWithheldValue(entry?.accountName) ??
+            safeWithheldValue(entry?.account_name) ??
+            null,
+        bureau:
+            safeWithheldValue(entry?.bureau) ??
+            safeWithheldValue(entry?.bureau_name) ??
+            safeWithheldValue(entry?.creditBureau) ??
+            null,
+        itemType:
+            safeWithheldValue(entry?.itemType) ??
+            safeWithheldValue(entry?.item_type) ??
+            safeWithheldValue(entry?.type) ??
+            safeWithheldValue(entry?.accountType) ??
+            safeWithheldValue(entry?.account_type) ??
+            null,
+        withheldReason:
+            safeWithheldValue(entry?.reasonCode) ??
+            safeWithheldValue(entry?.code) ??
+            safeWithheldValue(entry?.reason) ??
+            safeWithheldValue(entry?.reasonText) ??
+            "unspecified",
+    }));
+}
+
 function findCrcClientId(value, seen = new Set()) {
     if (value == null || typeof value !== "object") return null;
     if (seen.has(value)) return null;
@@ -832,6 +883,9 @@ export async function runProductionClient(data = {}) {
             lettersOk: m7LettersOk,
             letterCount: Array.isArray(m7.letters) ? m7.letters.length : 0,
             withheldCount: Array.isArray(m7.withheld) ? m7.withheld.length : 0,
+            // Read-only per-item detail derived directly from the raw m7.withheld
+            // that still exists on this path. Additive; changes no other field.
+            withheldItems: projectWithheldItems(m7.withheld),
         },
         m8,
     };
