@@ -66,6 +66,27 @@ export function projectWithheldItems(withheld) {
             safeWithheldValue(entry?.reason) ??
             safeWithheldValue(entry?.reasonText) ??
             "unspecified",
+
+        // STRUCTURAL INQUIRY INDICATORS (diagnostic only; not a classification).
+        // The normalized model keys inquiries with stable_item_key prefix
+        // "bt_iq_" and signature tier "I0" (see itemKey.js KEY_PREFIX / I0),
+        // versus accounts ("bt_ac_") and tradelines ("bt_tl_"). itemType was null
+        // for Rashad's four USAA/Experian items, so type alone cannot say whether
+        // they are inquiries. These fields surface the authoritative discriminator
+        // IF the raw withheld entry carries it — read defensively across plausible
+        // spellings, null when absent. This does NOT classify or complete anything;
+        // it lets a future run prove whether each withheld item is an inquiry.
+        stableItemKey:
+            safeWithheldValue(entry?.stable_item_key) ??
+            safeWithheldValue(entry?.stableItemKey) ??
+            safeWithheldValue(entry?.key) ??
+            null,
+        signatureTiers: Array.isArray(entry?.signatures)
+            ? entry.signatures
+                  .map((s) => safeWithheldValue(typeof s === "string" ? s.split("|")[0] : s?.tier))
+                  .filter(Boolean)
+                  .slice(0, 8)
+            : null,
     }));
 }
 
