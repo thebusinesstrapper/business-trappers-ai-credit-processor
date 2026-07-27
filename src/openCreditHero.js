@@ -560,6 +560,52 @@ async function attemptOpen(page, context, attempt) {
             !CRC_HOST_PATTERN.test(currentUrl) &&
             CH_URL_PATH_PATTERN.test(currentUrl);
 
+        // ---- INACTIVE-MARKER CHECK, BEFORE ACCEPTING A LANDING --------------
+        //
+        // A tokenized customer_login.asp?loginToken=...&GUID=... URL matches
+        // CH_URL_PATH_PATTERN and would otherwise be accepted as a successful
+        // CreditHero landing — the processor would then hunt for the report link
+        // and fail to "credit_report_page_unavailable" / Manual Review. But that
+        // page frequently displays "No Active Orders Found", which is Credit
+        // Monitoring INACTIVE, not a healthy dashboard. So on ANY settled
+        // CreditHero page (URL- or content-confirmed), consult the read-only
+        // recognizer FIRST. If it reports an inactive state, return the existing
+        // inactive classification and NEVER search for mcc_creditreports_v2.asp.
+        //
+        // The marker (visible text), not the URL, is what triggers this — a valid
+        // customer_login.asp without the marker recognizes as HEALTHY/UNKNOWN and
+        // continues normally, so there is no false positive from the URL alone.
+        const settled =
+            currentUrl !== "" &&
+            !NON_PAGE_URL_PATTERN.test(currentUrl) &&
+            !CRC_HOST_PATTERN.test(currentUrl);
+
+        if (settled) {
+            const preLanding = await recognizeCreditHeroLanding(landed.page).catch(() => null);
+            if (preLanding && preLanding.state === CH_LANDING_STATE.CREDENTIALS_OR_AUTH_FAILED) {
+                return {
+                    ok: false,
+                    nonActionable: true,
+                    // Maps onto the existing Credit Monitoring Inactive workflow
+                    // (M6 nonActionable branch -> CHS_NOT_ACTIVATED /
+                    // requiresInactiveWorkflow), never Manual Review.
+                    error_code: "CREDENTIALS_OR_AUTH_FAILED",
+                    requiresInactiveWorkflow: true,
+                    reason:
+                        `CreditHero landed on "${currentUrl}" but the page shows an inactive-monitoring ` +
+                        `state (${(preLanding.evidence ?? []).join(", ") || "recognized marker"}). ` +
+                        `Credit monitoring is inactive — routed to the existing inactive workflow, not ` +
+                        `manual review, and the report page is NOT searched.`,
+                    creditHeroAccessState: "CREDENTIALS_OR_AUTH_FAILED",
+                    landingState: preLanding.state,
+                    evidence: preLanding.evidence ?? null,
+                    requiresHumanReview: false,
+                    page: null,
+                    diagnostics,
+                };
+            }
+        }
+
         if (urlIsCreditHero) {
             confirmed = true;
             break;
