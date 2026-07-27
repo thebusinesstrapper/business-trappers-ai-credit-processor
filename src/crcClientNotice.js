@@ -22,6 +22,8 @@
 
 export const CLIENT_NOTICE_VERSION = "BT-NOTICE-1.0";
 
+import { baseSearchName } from "./clientSearchName.js";
+
 const EXACT_SUCCESS_TEXT = "Your message was sent";
 const COMPOSE_RENDER_TIMEOUT_MS = 15000;
 const COMPOSE_POLL_MS = 300;
@@ -65,6 +67,18 @@ async function openComposeForm(page, crcClientId) {
 
     if (!page.url().includes(`/clients/${crcClientId}/dashboard`)) {
         await page.goto(dashboardUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
+    }
+
+    // IDENTITY CONFIRMATION. The recipient acceptance rule downstream depends on
+    // the composer having been opened from THIS exact client's dashboard, keyed
+    // on the already-confirmed CRC Client ID. We confirm the page is actually on
+    // /clients/{crcClientId}/dashboard before opening the composer — a navigation
+    // that silently lands elsewhere must NOT be treated as this client.
+    const dashboardIdentityConfirmed =
+        page.url().includes(`/clients/${crcClientId}/dashboard`);
+
+    if (!dashboardIdentityConfirmed) {
+        return { ok: false, reason: "client_dashboard_identity_not_confirmed", dashboardIdentityConfirmed: false };
     }
 
     const secureBtn = page
@@ -131,7 +145,7 @@ async function openComposeForm(page, crcClientId) {
         return { ok: false, reason: "compose_form_not_confirmed", state };
     }
 
-    return { ok: true };
+    return { ok: true, dashboardIdentityConfirmed: true };
 }
 
 /**
@@ -142,6 +156,29 @@ async function openComposeForm(page, crcClientId) {
  */
 function normalizeName(value) {
     return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * Suffix-safe recipient equality. A prefilled value verifies when it equals the
+ * authoritative name EXACTLY (normalized), OR equals the authoritative name with
+ * a single approved personal suffix removed (Jr/Sr/II/III/IV/V, via the shared
+ * clientSearchName.baseSearchName). This is the ONLY relaxation: CRC drops the
+ * suffix in the recipient field ("Joseph Manning IV" -> "Joseph Manning").
+ *
+ * DELIBERATELY NOT ADDED: prefix/truncation matching, fuzzy matching, and
+ * first-name-only matching. A prefill that is a shortened surname
+ * ("Woodeline Deliss" vs "Woodeline Delissaint") is NOT accepted here — that is
+ * a stored-data defect fixed in client_state, not a matching problem.
+ *
+ * @param {string} observed   the prefilled value read from CRC
+ * @param {string} clientName the full authoritative client name
+ */
+function recipientMatches(observed, clientName) {
+    const obs = normalizeName(observed);
+    if (!obs) return false;
+    if (obs === normalizeName(clientName)) return true;
+    const base = baseSearchName(clientName);
+    return Boolean(base && obs === normalizeName(base));
 }
 
 /** The one field that carries the recipient's display name. */
@@ -225,9 +262,19 @@ async function readRecipientCandidates(page) {
  * window.
  * ---------------------------------------------------------------------------
  */
-async function verifyRecipient(page, clientName) {
-    const expected = normalizeName(clientName);
+async function verifyRecipient(page, clientName, idContext = {}) {
     const deadline = Date.now() + RECIPIENT_VALUE_TIMEOUT_MS;
+
+    // IDENTITY CONTEXT. The permanent fix: when we opened the composer FROM the
+    // confirmed client's dashboard (keyed on the already-confirmed CRC Client
+    // ID), CRC prefills that dashboard's own client into the recipient field.
+    // The prefilled value is therefore authoritative BY CONSTRUCTION — it is
+    // whichever name CRC stores for the client whose dashboard we are on — even
+    // when CRC's Clients grid handed the queue a SHORTENED name. Acceptance is
+    // gated on identity, not on string similarity.
+    const crcClientId = idContext.crcClientId == null ? "" : String(idContext.crcClientId).trim();
+    const dashboardIdentityConfirmed = idContext.dashboardIdentityConfirmed === true;
+    const idContextPresent = /^\d+$/.test(crcClientId) && dashboardIdentityConfirmed;
 
     let latest = { count: 0, candidates: [] };
     let previousSettledValue = null;
@@ -238,22 +285,53 @@ async function verifyRecipient(page, clientName) {
         // Only a visible, enabled field can be the one the user would see.
         const usable = latest.candidates.filter((c) => c.visible && c.enabled);
 
-        const matched = usable.find((c) => normalizeName(c.value) === expected);
+        // ---- EXACT / APPROVED-SUFFIX MATCH (supporting verification) --------
+        // Still the primary path when it succeeds. Unchanged behavior.
+        const matched = usable.find((c) => recipientMatches(c.value, clientName));
 
         if (matched) {
             return {
                 ok: true,
                 recipient: clientName,
                 viaPrefill: true,
+                viaConfirmedClientId: false,
                 selector: RECIPIENT_SELECTOR,
                 matchingElementCount: latest.count,
                 matchedIndex: matched.index,
-                // Diagnostic fields (do not affect the match decision above):
-                // surface WHAT verified, so the job result can expose it.
                 fieldVisible: matched.visible,
                 fieldEnabled: matched.enabled,
                 observedRecipient: sanitizeObserved(matched.value),
                 observedLength: matched.value.length,
+            };
+        }
+
+        // ---- CONFIRMED-CRC-ID ACCEPTANCE (permanent fix) -------------------
+        // Accept the EXISTING prefill without typing/searching/selecting when
+        // ALL of these hold:
+        //   * the CRC Client ID is present and the dashboard identity was
+        //     confirmed (we are provably on THIS client's dashboard),
+        //   * exactly ONE recipient field is visible and enabled,
+        //   * that field is prefilled with a nonblank value.
+        // The name did not exactly match only because CRC's grid shortened it;
+        // the composer's prefill is the client's real stored name. No fuzzy,
+        // prefix, truncation, or first-name matching is used or implied.
+        if (idContextPresent && usable.length === 1 && usable[0].value.trim() !== "") {
+            const only = usable[0];
+            return {
+                ok: true,
+                recipient: sanitizeObserved(only.value),
+                viaPrefill: true,
+                viaConfirmedClientId: true,
+                crcClientId,
+                selector: RECIPIENT_SELECTOR,
+                matchingElementCount: latest.count,
+                matchedIndex: only.index,
+                fieldVisible: only.visible,
+                fieldEnabled: only.enabled,
+                observedRecipient: sanitizeObserved(only.value),
+                observedLength: only.value.length,
+                // Supporting checks recorded for the diagnostic, not required.
+                supportingExactOrSuffixMatch: recipientMatches(only.value, clientName),
             };
         }
 
@@ -269,6 +347,9 @@ async function verifyRecipient(page, clientName) {
     }
 
     // ---- FAILED. REPORT WHAT WAS ACTUALLY THERE. --------------------------
+    // Reaching here means neither the name matched NOR the confirmed-ID
+    // acceptance held. FAIL CLOSED. The reason distinguishes the guard that
+    // stopped acceptance so a job result is diagnosable.
     const usable = latest.candidates.filter((c) => c.visible && c.enabled);
     const observed =
         usable.find((c) => c.value.trim() !== "") ??
@@ -276,9 +357,26 @@ async function verifyRecipient(page, clientName) {
         latest.candidates[0] ??
         null;
 
+    let reason;
+    if (latest.count === 0) {
+        reason = "client_field_not_found";
+    } else if (usable.length > 1) {
+        // Multiple recipient fields: never guess which client — fail closed.
+        reason = "multiple_recipient_fields";
+    } else if (!idContextPresent) {
+        // No confirmed-ID context AND the name did not match: the mismatch is
+        // real from where we stand. (This is what still fails the six shortened
+        // names when the CRC Client ID context is absent.)
+        reason = "recipient_prefill_mismatch";
+    } else if (!observed || observed.value.trim() === "") {
+        reason = "recipient_blank";
+    } else {
+        reason = "recipient_prefill_mismatch";
+    }
+
     return {
         ok: false,
-        reason: latest.count === 0 ? "client_field_not_found" : "recipient_prefill_mismatch",
+        reason,
         selector: RECIPIENT_SELECTOR,
         matchingElementCount: latest.count,
         fieldVisible: observed ? observed.visible : false,
@@ -286,6 +384,7 @@ async function verifyRecipient(page, clientName) {
         expectedClientName: sanitizeObserved(clientName),
         observedRecipient: observed ? sanitizeObserved(observed.value) : null,
         observedLength: observed ? observed.value.length : 0,
+        idContextPresent,
     };
 }
 
@@ -376,7 +475,14 @@ export async function sendClientNotice(page, opts = {}) {
 
     report.composerOpened = true;
 
-    const recipient = await verifyRecipient(page, clientName);
+    // The composer was opened FROM this exact client's dashboard (openComposeForm
+    // navigated to /clients/{crcClientId}/dashboard and confirmed the landing).
+    // Carry that confirmed identity into verification so a CRC-grid-shortened
+    // name does not block a recipient CRC itself prefilled for this client.
+    const recipient = await verifyRecipient(page, clientName, {
+        crcClientId,
+        dashboardIdentityConfirmed: opened.dashboardIdentityConfirmed === true,
+    });
 
     // Always surface the observed recipient evidence (success OR failure), so a
     // job result can show exactly what CRC prefilled without another live run.
@@ -468,3 +574,7 @@ export async function sendClientNotice(page, opts = {}) {
 }
 
 export { EXACT_SUCCESS_TEXT };
+// Exported for unit testing of suffix-safe recipient equality. Pure function.
+export { recipientMatches };
+// Exported for unit testing of the confirmed-CRC-ID recipient acceptance path.
+export { verifyRecipient };
