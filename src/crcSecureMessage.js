@@ -59,6 +59,30 @@ function namesMatch(left, right) {
 }
 
 /**
+ * Verify a PREFILLED client-field label against the full authoritative name.
+ *
+ * CRC's secure-message compose prepopulates the Client field but OMITS the
+ * personal suffix — for "William Harrell IV" the field shows "William Harrell".
+ * A strict exact-equality check wrongly rejects that valid prefill and forces a
+ * needless dropdown search that returns zero options. So a prefill is accepted
+ * when it matches the full name exactly OR the full name with an approved
+ * suffix removed (via clientSearchName.baseSearchName).
+ *
+ * This ONLY governs accepting a prefill (no typing/searching). It does NOT relax
+ * the dropdown-search ambiguity protection, which still runs when the prefill is
+ * blank or does not verify here.
+ *
+ * @param {string} prefilled  the current Client-field label
+ * @param {string} clientName the full authoritative client name
+ * @returns {boolean}
+ */
+function prefillMatches(prefilled, clientName) {
+    if (namesMatch(prefilled, clientName)) return true;
+    const base = baseSearchName(clientName);
+    return Boolean(base && namesMatch(prefilled, base));
+}
+
+/**
  * Choose the correct client option for the M8 recipient selector.
  *
  * The supplied clientName is the FULL authoritative name and is always tried
@@ -231,10 +255,48 @@ async function selectExactClient(page, clientName, crcClientId) {
             return el ? (el.value || "") : "";
         }).catch(() => "")) || "";
     console.log("[M8 client] prefilled client value:", JSON.stringify(prefilled));
-    if (namesMatch(prefilled, clientName)) {
+    if (prefillMatches(prefilled, clientName)) {
         console.log("[M8 client] prefilled client verified; not reselecting.");
         return { ok: true, selectedClient: clientName, resultingValue: prefilled, viaPrefill: true };
     }
+
+    // ---- CONFIRMED-CRC-ID PREFILL ACCEPTANCE ------------------------------
+    // The composer was opened FROM this exact client's dashboard
+    // (/clients/{crcClientId}/dashboard) and M8 already confirmed that dashboard's
+    // CRC id equals the expected id (milestone8.js aborts with wrong_client_opened
+    // otherwise). CRC prefills that dashboard's own client into the recipient
+    // field, so the prefill is authoritative BY CONSTRUCTION even when CRC's
+    // Clients grid handed us a SHORTENED name (e.g. "Jennifer Wise FT"). Accept
+    // the EXISTING prefill without typing/searching/selecting when ALL hold:
+    //   * the CRC Client ID is present and valid (confirmed dashboard context),
+    //   * exactly ONE recipient field is visible AND enabled,
+    //   * that field is prefilled with a nonblank value.
+    // Fails closed (falls through to search) if the id is absent/uncertain, the
+    // field is blank, or more than one recipient field is present. No fuzzy,
+    // prefix, truncation, or first-name matching is used.
+    const confirmedId = /^\d+$/.test(String(crcClientId ?? "").trim());
+    if (confirmedId) {
+        const fields = await page.locator('input[name="client_id"]').evaluateAll((nodes) =>
+            nodes.map((n) => ({
+                value: (n.value || ""),
+                visible: !!(n.offsetParent !== null || n.getClientRects().length),
+                enabled: !n.disabled && n.getAttribute("aria-disabled") !== "true",
+            }))
+        ).catch(() => []);
+        const usable = fields.filter((f) => f.visible && f.enabled);
+        if (usable.length === 1 && usable[0].value.trim() !== "") {
+            console.log("[M8 client] confirmed CRC-ID context; accepting existing prefill without reselecting.");
+            return {
+                ok: true,
+                selectedClient: clientName,
+                resultingValue: usable[0].value,
+                viaPrefill: true,
+                viaConfirmedClientId: true,
+                crcClientId: String(crcClientId).trim(),
+            };
+        }
+    }
+
     console.log("[M8 client] prefill did not match; falling back to type-and-select.");
 
     // Fallback ONLY if the prefill failed verification.
@@ -581,3 +643,7 @@ export { SUBJECT_TEXT, BODY_TEXT, EXACT_SUCCESS_TEXT };
 // Exported for unit testing of the recipient-selection matcher. Pure function;
 // no behavioral effect on the live send path.
 export { pickClientOption };
+// Exported for unit testing of prefill acceptance. Pure function.
+export { prefillMatches };
+// Exported for integration testing that a valid prefill performs no typing.
+export { selectExactClient };
