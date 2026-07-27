@@ -38,7 +38,7 @@
  * it and report it. We do not attempt to resolve it.
  */
 
-import { recognizeCreditHeroLanding, CH_LANDING_STATE } from "./creditHeroLandingState.js";
+import { recognizeCreditHeroLanding, CH_LANDING_STATE, recognizeCrcCredentialModal } from "./creditHeroLandingState.js";
 
 // How long to give CRC to spawn a new tab after the click before we conclude
 // it navigated in the current tab instead.
@@ -722,6 +722,31 @@ export async function openCreditHero(page, context) {
                 `actionable: every attempt found it either positively disabled, or without a ` +
                 `usable destination and unable to navigate. This is an inactive CreditHeroScore ` +
                 `account, not a technical failure.`,
+            attempts: attempts.length,
+            attemptLog: attempts,
+            requiresHumanReview: false,
+            page: null,
+        };
+    }
+
+    // A recognized CRC "Login Credentials no longer valid" modal is an INACTIVE
+    // business state, not a technical fault. Check the CRC page for the exact
+    // marker BEFORE returning the generic CREDIT_HERO_UNAVAILABLE fault. When
+    // present, the caller routes it into the existing inactive workflow (mapped
+    // onto CREDENTIALS_OR_AUTH_FAILED), never Manual Review.
+    const credentialModal = await recognizeCrcCredentialModal(page).catch(() => ({ inactive: false }));
+    if (credentialModal.inactive) {
+        return {
+            ok: false,
+            nonActionable: true,
+            // Mapped by M6 onto the existing inactive path.
+            error_code: "CREDENTIALS_OR_AUTH_FAILED",
+            requiresInactiveWorkflow: true,
+            error:
+                "CRC reports the client's Credit Hero Score login credentials are no longer valid " +
+                "(Login Credentials modal). Credit monitoring is inactive — routed to the existing " +
+                "inactive workflow, not manual review.",
+            evidence: credentialModal.evidence,
             attempts: attempts.length,
             attemptLog: attempts,
             requiresHumanReview: false,

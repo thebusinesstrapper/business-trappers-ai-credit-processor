@@ -25,6 +25,35 @@ export const CH_LANDING_STATE = Object.freeze({
 
 const READ_TIMEOUT = 8000;
 
+// OBSERVED LIVE (production): during the CRC-side attempt to open CreditHero, CRC
+// raises a "Credit Hero Score Login Credentials" modal with the exact message
+// below when the stored credentials no longer work. This is a POSITIVELY
+// recognized Credit Monitoring Inactive state (the client's CreditHero login is
+// invalid), not a technical CREDIT_HERO_UNAVAILABLE fault and not Manual Review.
+//
+// It is a CRC-side modal (openCreditHero owns that page), so it is recognized by
+// its own small function rather than the CreditHero-landing recognizer, but it
+// maps onto the SAME inactive state and existing inactive workflow.
+const CRC_CREDENTIAL_MODAL_MARKER =
+    /login credentials are no longer valid\.?\s*please re-?enter/i;
+
+/**
+ * Recognize the CRC "Credit Hero Score Login Credentials" modal that reports the
+ * stored credentials are no longer valid. READ-ONLY: reads visible text only,
+ * returns a boolean-bearing result. No click, fill, or navigation.
+ *
+ * Returns { inactive: true, evidence } when the exact marker is visible, else
+ * { inactive: false }. The caller maps `inactive:true` onto the existing
+ * CREDENTIALS_OR_AUTH_FAILED inactive state.
+ */
+export async function recognizeCrcCredentialModal(page) {
+    const text = await readVisibleText(page).catch(() => "");
+    if (text && CRC_CREDENTIAL_MODAL_MARKER.test(text)) {
+        return { inactive: true, evidence: ["marker:crc_login_credentials_no_longer_valid"] };
+    }
+    return { inactive: false };
+}
+
 /**
  * Positive markers, from the supplied live DOM. Each state needs corroborating
  * evidence — a single stray phrase is not enough to act on.
@@ -39,6 +68,17 @@ const AUTH_MARKERS = [
     /please\s+login to confirm/i,
     /customer_login\.asp/i,
 ];
+
+// OBSERVED LIVE (16 clients, production): the CreditHeroScore Member Login page
+// states inactive monitoring as an orders line rather than a payment/auth
+// sentence — "No Active Orders Found. If you believe this to be an error,
+// please contact us...". This is a POSITIVELY recognized Credit Monitoring
+// Inactive state (no active monitoring order exists), not an unknown navigation
+// failure. It shares no phrase with the AUTH sentence above, which is why the
+// prior gate could not see it. It routes to the SAME inactive state
+// (CREDENTIALS_OR_AUTH_FAILED) and therefore the SAME existing inactive
+// workflow — it is an additional marker, not a new workflow.
+const NO_ACTIVE_ORDERS_MARKER = /no active orders found/i;
 
 const PAYMENT_MARKERS = [
     /update payment details/i,
@@ -154,6 +194,22 @@ export async function recognizeCreditHeroLanding(page) {
             state: CH_LANDING_STATE.CREDENTIALS_OR_AUTH_FAILED,
             reason: "CreditHero login or authentication confirmation required.",
             evidence: [...auth.matched, ...(authLink ? ["link:customer_login"] : [])],
+        };
+    }
+
+    // ---- 1b. "No Active Orders Found" on the Member Login page -------------
+    //
+    // A positively recognized Credit Monitoring Inactive state: the member has no
+    // active monitoring order, so CRC's stored access resolves to a login page
+    // that reports exactly this. It maps to the SAME inactive state and existing
+    // inactive workflow as the auth/payment cases — NOT Manual Review, and NOT an
+    // unknown navigation failure. The phrase is specific enough to stand on its
+    // own; no second marker is required.
+    if (NO_ACTIVE_ORDERS_MARKER.test(text)) {
+        return {
+            state: CH_LANDING_STATE.CREDENTIALS_OR_AUTH_FAILED,
+            reason: "CreditHeroScore Member Login shows \"No Active Orders Found\" — credit monitoring is inactive.",
+            evidence: ["marker:no_active_orders_found"],
         };
     }
 
