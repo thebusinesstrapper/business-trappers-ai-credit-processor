@@ -80,6 +80,29 @@ const AUTH_MARKERS = [
 // workflow — it is an additional marker, not a new workflow.
 const NO_ACTIVE_ORDERS_MARKER = /no active orders found/i;
 
+// OBSERVED LIVE (Amber Hoover, CRC 101, production): clicking "View
+// CreditHeroScore Account" lands on a CreditHeroScore ENROLLMENT OFFER
+// (/lp/285-ar/index.asp) — a "Get Started" sign-up page quoting a $1.00 access
+// fee and a $19.95 monthly membership. The client is not enrolled/active, so
+// this is a POSITIVELY recognized Credit Monitoring Inactive state, NOT a
+// healthy dashboard and NOT an unknown navigation failure. It maps to the SAME
+// inactive state (CREDENTIALS_OR_AUTH_FAILED) and existing inactive workflow.
+//
+// SAFETY: recognition is READ-ONLY. Nothing here clicks "Get Started",
+// purchases, enrolls, reactivates, or continues to payment. The URL path is
+// corroborating evidence ONLY — it is never sufficient on its own (requirement:
+// fail closed if the URL matches but enrollment markers are not confirmed).
+const ENROLLMENT_OFFER_URL_MARKER = /\/lp\/\d+-[a-z]{1,4}\/index\.asp/i;
+const ENROLLMENT_OFFER_MARKERS = [
+    /get started/i,
+    // A $1.00-style access/activation fee. Amount matched as a pattern.
+    /\$\s*1(?:\.00)?\s*(?:access|activation|today|to get started)/i,
+    /access fee/i,
+    // A recurring monthly membership price, e.g. "$19.95 monthly" / "$19.95 / month".
+    /\$\s*\d{1,3}(?:\.\d{2})?\s*(?:\/\s*mo(?:nth)?\b|monthly|per month|a month)/i,
+    /monthly membership/i,
+];
+
 const PAYMENT_MARKERS = [
     /update payment details/i,
     /your last payment didn.?t go through/i,
@@ -210,6 +233,33 @@ export async function recognizeCreditHeroLanding(page) {
             state: CH_LANDING_STATE.CREDENTIALS_OR_AUTH_FAILED,
             reason: "CreditHeroScore Member Login shows \"No Active Orders Found\" — credit monitoring is inactive.",
             evidence: ["marker:no_active_orders_found"],
+        };
+    }
+
+    // ---- 1c. ENROLLMENT OFFER (\"Get Started\" sign-up landing) --------------
+    //
+    // A positively recognized Credit Monitoring Inactive state: the client is
+    // being asked to ENROLL (access fee + monthly membership), which means they
+    // are not currently active. Routes to the SAME inactive state and existing
+    // inactive workflow — never Manual Review when the markers are confirmed,
+    // and never a click/purchase/enroll.
+    //
+    // FAIL CLOSED ON URL ALONE. The URL path is corroborating only. Acceptance
+    // requires at least TWO independent visible enrollment markers, OR the URL
+    // path plus at least ONE visible marker. A URL match with no visible
+    // enrollment marker falls through to UNKNOWN (existing manual-review path),
+    // exactly as required.
+    const enroll = countMatches(ENROLLMENT_OFFER_MARKERS, text);
+    const currentUrl = typeof page.url === "function" ? (page.url() || "") : "";
+    const enrollUrl = ENROLLMENT_OFFER_URL_MARKER.test(currentUrl);
+
+    if (enroll.n >= 2 || (enrollUrl && enroll.n >= 1)) {
+        return {
+            state: CH_LANDING_STATE.CREDENTIALS_OR_AUTH_FAILED,
+            reason:
+                "CreditHeroScore landed on an enrollment offer (Get Started / access fee / monthly " +
+                "membership) — the client is not enrolled, so credit monitoring is inactive.",
+            evidence: [...enroll.matched, ...(enrollUrl ? ["url:enrollment_landing"] : [])],
         };
     }
 
