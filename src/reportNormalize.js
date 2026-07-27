@@ -57,6 +57,49 @@ import {
 export const MODEL_VERSION = "BT-CRM-1.1";
 
 /**
+ * Business Trappers HARD protected-inquiry rule.
+ *
+ * These specific inquiry furnishers must NEVER be disputed, challenged, removed,
+ * matched to an account, sent to Bureau Fidelity withholding, or included in any
+ * inquiry-removal workflow, and their presence alone must not block
+ * no_eligible_negative_items completion. They are flagged here — the earliest
+ * reliable point where the inquiry furnisher name exists — as protected_inquiry.
+ *
+ * Matching is DELIBERATELY EXACT, not fuzzy. The furnisher is normalized only
+ * for case, leading/trailing spaces, repeated spaces, and hyphens-as-spaces,
+ * then compared for EQUALITY against the approved set. This intentionally does
+ * NOT reuse furnisherNorm(), which strips legal suffixes (LLC, CO, ...) and
+ * applies aliases — that would collapse "KCB CREDIT CO" / "KCB CREDIT SERVICES"
+ * onto a protected value and over-match. No prefix, substring, or token match:
+ * "KCB", "KCB CREDITS", "KCB CREDIT LOAN", "KCB CREDIT SERVICES",
+ * "KCB CREDIT CORPORATION", "KCB CREDIT CO" all correctly DO NOT match.
+ */
+const PROTECTED_INQUIRY_REASON = "business_rule_protected_inquiry";
+
+const PROTECTED_INQUIRY_NAMES = new Set([
+    "KCB CREDIT",
+    "KCB CREDIT L",
+    "KCB CREDIT LLC",
+]);
+
+/** Normalize ONLY case, trim, repeated spaces, and hyphens-as-spaces. */
+function normalizeProtectedName(name) {
+    if (typeof name !== "string") return null;
+    const n = name
+        .replace(/-/g, " ")   // hyphens-as-spaces
+        .replace(/\s+/g, " ") // collapse repeated whitespace
+        .trim()
+        .toUpperCase();
+    return n || null;
+}
+
+/** True only for an exact normalized match against the approved protected set. */
+export function isProtectedInquiryName(name) {
+    const n = normalizeProtectedName(name);
+    return n !== null && PROTECTED_INQUIRY_NAMES.has(n);
+}
+
+/**
  * How strongly an observed value is attributable to ONE bureau.
  *
  * This is the whole amendment. It is not metadata — it GATES what a letter may
@@ -1157,12 +1200,21 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
 
             const resolved = resolveKey(sigs, tradelineRegistry, KEY_PREFIX.INQUIRY);
 
+            // HARD protected-inquiry rule (business_rule_protected_inquiry).
+            // Additive flag only: it does not alter this inquiry's key, bureau,
+            // furnisher, signatures, or any other inquiry. Downstream logic that
+            // decides letters / removal / withholding / completion reads this
+            // flag to exclude the item; unflagged inquiries are unchanged.
+            const protectedInquiry = isProtectedInquiryName(furnisher);
+
             return {
                 stable_item_key: resolved.key,
                 bureau,
                 furnisher,
                 inquiry_date: date,
                 signatures: sigs.map((s) => s.value),
+                protected_inquiry: protectedInquiry,
+                protected_reason: protectedInquiry ? PROTECTED_INQUIRY_REASON : null,
                 raw: inq,
             };
         })
