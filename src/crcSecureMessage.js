@@ -22,6 +22,8 @@
 
 export const SECURE_MESSAGE_VERSION = "BT-M8-SECURE-MESSAGE-1.1";
 
+import { baseSearchName } from "./clientSearchName.js";
+
 
 const SUBJECT_TEXT = "Your Credit Dispute Letters Are Ready";
 const BODY_TEXT =
@@ -54,6 +56,71 @@ function namesMatch(left, right) {
     const a = normalizeClientName(left);
     const b = normalizeClientName(right);
     return Boolean(a && b && a === b);
+}
+
+/**
+ * Choose the correct client option for the M8 recipient selector.
+ *
+ * The supplied clientName is the FULL authoritative name and is always tried
+ * first. CRC's option labels are sometimes TRUNCATED ("Adriana Ellis-Fo",
+ * "Michael Allen Gu", "Jennifer Wise FT") or drop a personal suffix
+ * ("William Harrell IV" -> "William Harrell"), so an exact-equality match finds
+ * nothing. This adds two SEARCH-ONLY fallbacks after the exact match:
+ *
+ *   1. CRC client ID — if the options expose an id (data-value / value / id),
+ *      an option whose id equals the verified crcClientId is authoritative.
+ *   2. Safe normalized name — the suffix-free base name (via clientSearchName)
+ *      and a truncation-tolerant prefix: an option label that is a PREFIX of the
+ *      full name (CRC truncated it) or vice-versa. Whitespace/case-normalized.
+ *
+ * NEVER selects blindly. If more than one option remains plausible after these
+ * tiers, returns { ambiguous: true } so the caller fails closed. The full name
+ * is never mutated; matching is on transient normalized copies only.
+ *
+ * @param {Array<{text:string, id:string|null}>} options
+ * @param {string} clientName   full authoritative name
+ * @param {string|number|null} crcClientId  verified CRC id (may be null)
+ * @returns {{ matched:true, option:object } | { matched:false, ambiguous:boolean, candidates:number }}
+ */
+function pickClientOption(options, clientName, crcClientId) {
+    const list = Array.isArray(options) ? options.filter((o) => o && o.text) : [];
+    if (list.length === 0) return { matched: false, ambiguous: false, candidates: 0 };
+
+    // Tier 1: exact full-name equality (unchanged behavior for normal clients).
+    const exact = list.filter((o) => namesMatch(o.text, clientName));
+    if (exact.length === 1) return { matched: true, option: exact[0] };
+    if (exact.length > 1) return { matched: false, ambiguous: true, candidates: exact.length };
+
+    // Tier 2: verified CRC client ID, when options expose one.
+    const wantId = crcClientId == null ? "" : String(crcClientId).trim();
+    if (wantId) {
+        const byId = list.filter((o) => o.id != null && String(o.id).trim() === wantId);
+        if (byId.length === 1) return { matched: true, option: byId[0] };
+        if (byId.length > 1) return { matched: false, ambiguous: true, candidates: byId.length };
+    }
+
+    // Tier 3: safe normalized fallback — suffix-free base name and truncation.
+    const full = normalizeClientName(clientName);
+    const base = normalizeClientName(baseSearchName(clientName) || "");
+
+    const plausible = list.filter((o) => {
+        const opt = normalizeClientName(o.text);
+        if (!opt) return false;
+        // Suffix-free exact base-name match.
+        if (base && opt === base) return true;
+        // Truncation: the option label is a leading prefix of the full name
+        // (CRC cut it off), or the full name is a prefix of the option. Require a
+        // meaningful length so a 1-2 char stub cannot match many clients.
+        if (opt.length >= 5 && full.startsWith(opt)) return true;
+        if (base && opt.length >= 5 && base.startsWith(opt)) return true;
+        if (opt.length >= 5 && opt.startsWith(full)) return true;
+        return false;
+    });
+
+    if (plausible.length === 1) return { matched: true, option: plausible[0] };
+    if (plausible.length > 1) return { matched: false, ambiguous: true, candidates: plausible.length };
+
+    return { matched: false, ambiguous: false, candidates: 0 };
 }
 
 async function openComposeForm(page, crcClientId) {
@@ -151,7 +218,7 @@ async function openComposeForm(page, crcClientId) {
     return true;
 }
 
-async function selectExactClient(page, clientName) {
+async function selectExactClient(page, clientName, crcClientId) {
     const combo = page.locator('input[name="client_id"]').first();
     if (!(await combo.count())) return fail("client_select", "Client combobox not found.");
 
@@ -175,41 +242,83 @@ async function selectExactClient(page, clientName) {
     await combo.fill("").catch(() => {});
     await combo.type(clientName, { delay: 25 }).catch(() => {});
 
-    // Wait for filtered options; require exactly one exact match.
+    // Collect filtered options as { text, id }. The id (data-value / value / id
+    // / data-id) lets us verify by the authoritative CRC client id even when the
+    // visible label is truncated or drops a suffix.
+    const readOptions = () =>
+        page.getByRole("option").evaluateAll((nodes) =>
+            nodes.map((n) => ({
+                text: (n.textContent || "").replace(/\s+/g, " ").trim(),
+                id:
+                    n.getAttribute("data-value") ||
+                    n.getAttribute("data-id") ||
+                    n.getAttribute("value") ||
+                    n.getAttribute("id") ||
+                    null,
+            }))
+        ).catch(() => []);
+
+    // Wait for filtered options; stop as soon as a plausible match exists so we
+    // do not spin the full window on the common (fast) case.
     let options = [];
     const deadline = Date.now() + 8000;
     while (Date.now() < deadline) {
-        options = await page.getByRole("option").evaluateAll((nodes) =>
-            nodes.map((n) => (n.textContent || "").replace(/\s+/g, " ").trim())
-        ).catch(() => []);
-        if (options.some((o) => namesMatch(o, clientName))) break;
+        options = await readOptions();
+        if (pickClientOption(options, clientName, crcClientId).matched) break;
+        // Also stop early if options are present but none will ever match, so an
+        // ambiguous/absent result is returned promptly rather than after 8s.
+        if (options.length > 0 && !pickClientOption(options, clientName, crcClientId).ambiguous
+            && pickClientOption(options, clientName, crcClientId).candidates === 0
+            && options.some((o) => o.text)) {
+            // options rendered but no tier matched yet; keep polling briefly.
+        }
         await page.waitForTimeout(250);
     }
-    const exact = options.filter((o) => namesMatch(o, clientName));
-    if (exact.length !== 1) {
+
+    // Choose the correct option: exact name -> CRC id -> safe normalized/truncation.
+    // NEVER select the first result blindly; fail closed on ambiguity.
+    const pick = pickClientOption(options, clientName, crcClientId);
+
+    if (!pick.matched) {
+        if (pick.ambiguous) {
+            return fail("client_select",
+                `Multiple plausible options for "${clientName}"; found ${pick.candidates}. ` +
+                `Failing closed to avoid selecting the wrong client.`,
+                { blockedReason: "ambiguous_client_match", optionsSample: options.slice(0, 10) });
+        }
         return fail("client_select",
-            `Expected exactly one "${clientName}" option; found ${exact.length}.`,
+            `Expected exactly one "${clientName}" option; found ${pick.candidates}.`,
             { optionsSample: options.slice(0, 10) });
     }
-    // Click the exact option.
-    const matchingOptionText = exact[0];
+
+    // Click the chosen option by its EXACT displayed text (the label CRC shows,
+    // which may be truncated) — never by the full supplied name, which may not
+    // equal the visible option.
+    const matchingOptionText = pick.option.text;
     await page.getByRole("option", { name: matchingOptionText, exact: true }).first()
         .click({ timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(400);
 
-    // Verify the resulting selected value equals the client name.
+    // Verify the resulting selected value equals the client name OR the chosen
+    // option label (a truncated/suffix-free label is the authoritative selection
+    // when it was matched by CRC id or the safe fallback).
     const val = (await combo.inputValue().catch(() => "")) || "";
     const selectedText = await page.evaluate(() => {
-        // MUI often shows the chosen value in the input or an adjacent chip.
         const el = document.querySelector('input[name="client_id"]');
         return el ? (el.value || "") : "";
     }).catch(() => "");
-    const confirmed = namesMatch(val, clientName) || namesMatch(selectedText, clientName);
+    const resulting = val || selectedText;
+    const confirmed =
+        namesMatch(resulting, clientName) ||
+        namesMatch(resulting, matchingOptionText);
     if (!confirmed) {
         return fail("client_verify",
-            `Selected client value "${val || selectedText}" does not equal "${clientName}".`);
+            `Selected client value "${resulting}" does not equal "${clientName}" ` +
+            `or the chosen option "${matchingOptionText}".`);
     }
-    return { ok: true, selectedClient: clientName, resultingValue: val || selectedText };
+    // resultingValue is the CRC-side selection; selectedClient stays the FULL
+    // authoritative name for identity/reporting.
+    return { ok: true, selectedClient: clientName, resultingValue: resulting };
 }
 
 /** Fill subject via input[name="subject"] and confirm the value stuck. */
@@ -309,6 +418,7 @@ export async function sendSecureMessage(page, opts, deps) {
         messageSuccessConfirmed: false,
         failedStage: null,
         failureReason: null,
+        blockedReason: null,
     };
 
     // HARD identity-input guard. The authoritative CRC Client ID was already
@@ -351,8 +461,15 @@ export async function sendSecureMessage(page, opts, deps) {
         }
 
         // 2) Select the exact client + verify.
-        const sel = await selectExactClient(page, clientName);
-        if (!sel.ok) { report.failedStage = sel.failedStage; report.failureReason = sel.failureReason; return report; }
+        const sel = await selectExactClient(page, clientName, crcClientId);
+        if (!sel.ok) {
+            report.failedStage = sel.failedStage;
+            report.failureReason = sel.failureReason;
+            // Surface the fail-closed reason so the orchestrator can route to
+            // manual review as an ambiguous match rather than a generic failure.
+            if (sel.blockedReason) report.blockedReason = sel.blockedReason;
+            return report;
+        }
         report.selectedRecipient = sel.selectedClient;
 
         // 3) Subject.
@@ -461,3 +578,6 @@ export async function sendSecureMessage(page, opts, deps) {
 }
 
 export { SUBJECT_TEXT, BODY_TEXT, EXACT_SUCCESS_TEXT };
+// Exported for unit testing of the recipient-selection matcher. Pure function;
+// no behavioral effect on the live send path.
+export { pickClientOption };
