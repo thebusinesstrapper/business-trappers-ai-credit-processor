@@ -417,6 +417,44 @@ const SPEC = {
         standard: "A single authorization supports a single inquiry.",
         authority: AUTH.REINVESTIGATION,
     },
+
+    // BANKRUPTCY VERIFICATION DISPUTE — individualized wording inside the
+    // existing Bureau Reinvestigation blueprint (BT-BP-0001). NOT a static
+    // template: the requested-verification list is built from whichever record
+    // fields are actually present, so absent fields are simply not named (no
+    // invented facts). CONSTRAINTS (enforced by test): §611 reinvestigation
+    // authority ONLY (never §623(a)(5) for a bankruptcy); never states that
+    // bankruptcy reporting is prohibited; never calls the court an "original
+    // creditor"; never claims court or LexisNexis documentation.
+    PR_BANKRUPTCY_VERIFICATION_REQUIRED: {
+        bureauLocal: true,
+        defect: (e) => {
+            // Build the verification request from the fields present, in the
+            // approved order. A field that was not reported is not named.
+            const asks = [];
+            asks.push("the source from which this public record was obtained");
+            asks.push("the method used to verify it");
+            asks.push("that the record is correctly matched to me");
+            if (e && e.court)          asks.push("the court name");
+            if (e && e.case_number)    asks.push("the case number");
+            if (e && e.chapter)        asks.push("the bankruptcy chapter");
+            if (e && e.filing_date)    asks.push("the filing date");
+            if (e && e.disposition)    asks.push("the disposition");
+            if (e && e.discharge_date) asks.push("the discharge or dismissal date");
+            const recordType = (e && e.record_type) ? e.record_type : "bankruptcy public record";
+            return (
+                `I dispute the accuracy and completeness of the ${recordType} reported on my file ` +
+                `and request that you verify ${asks.join(", ")}. ` +
+                `Bankruptcy courts do not furnish or validate consumer credit-report entries to ` +
+                `credit reporting agencies; this information is obtained independently by the agency ` +
+                `or a third-party public-record vendor.`
+            );
+        },
+        standard:
+            "Correct or delete this record if you cannot verify it as accurate, complete, and " +
+            "properly matched to me, and provide the procedure used to determine its accuracy.",
+        authority: AUTH.REINVESTIGATION,
+    },
 };
 
 /**
@@ -643,6 +681,81 @@ export async function generateLetters(chain, analysis, context = {}) {
                         AUTH.PERMISSIBLE_PURPOSE,
                         ``,
                         `Requested action: ${item.requestedRemedy ?? INQUIRY_REMEDY}`,
+                    ].join("\n"),
+                });
+                continue;
+            }
+
+            // ---- BANKRUPTCY VERIFICATION (PUBLIC RECORD) -------------------
+            //
+            // A bankruptcy public record is NOT a tradeline: it has no creditor
+            // furnisher and no masked account number, so both tradeline guards
+            // below would withhold every bankruptcy dispute for reasons that do
+            // not apply. It is identified to the bureau by its COURT and CASE
+            // NUMBER (real reported data captured in the finding evidence at
+            // analysis time), never by an invented creditor name. Scoped strictly
+            // to PR_BANKRUPTCY_VERIFICATION_REQUIRED; every other public-record
+            // finding keeps its existing behavior.
+            const bkFinding = source?.findings?.find(
+                (f) => f.code === "PR_BANKRUPTCY_VERIFICATION_REQUIRED"
+            );
+
+            if (bkFinding) {
+                const ev = bkFinding.evidence ?? {};
+                const spec = SPEC.PR_BANKRUPTCY_VERIFICATION_REQUIRED;
+
+                // The record must be identifiable to the bureau by SOMETHING real:
+                // a court, a case number, or the record type. With none of these
+                // the dispute cannot say what it disputes -> fail closed.
+                const identifier =
+                    ev.court || ev.case_number || ev.record_type || null;
+
+                if (!identifier) {
+                    withheld.push({
+                        stableItemKey: item.stableItemKey,
+                        bureau,
+                        furnisher: null,
+                        reason:
+                            "A bankruptcy public record was flagged for verification but carries no " +
+                            "court, case number, or record type to identify it to the bureau. Withheld " +
+                            "for human review rather than sent unidentifiable.",
+                    });
+                    continue;
+                }
+
+                const label = ev.court
+                    ? `${ev.record_type ?? "Bankruptcy"} — ${ev.court}${ev.case_number ? `, Case No. ${ev.case_number}` : ""}`
+                    : `${ev.record_type ?? "Bankruptcy public record"}${ev.case_number ? `, Case No. ${ev.case_number}` : ""}`;
+
+                sections.push({
+                    stableItemKey: item.stableItemKey,
+                    stableAccountKey: item.stableAccountKey,
+                    bureau,
+                    furnisher: null,
+                    round: item.round,
+                    escalated: item.escalated,
+                    requestedRemedy: item.requestedRemedy,
+                    strategy: item.strategy?.strategy ?? null,
+                    decisionRecord: item.decisionRecord,
+                    reason: item.reason?.reason ?? null,
+                    instruction: item.instruction?.instruction ?? null,
+                    blueprint: item.blueprint?.blueprint ?? null,
+                    baseline: false,
+                    complianceGated: false,
+                    unspeccedFindings: [],
+                    findingCodes: ["PR_BANKRUPTCY_VERIFICATION_REQUIRED"],
+                    // A public record is neither a tradeline nor an inquiry;
+                    // reconciliation balances ACCOUNT sections against disputed
+                    // tradelines, so this is marked out of that population.
+                    isPublicRecord: true,
+                    text: [
+                        `${label}`,
+                        ``,
+                        spec.defect(ev),
+                        ``,
+                        spec.standard,
+                        ``,
+                        spec.authority,
                     ].join("\n"),
                 });
                 continue;
@@ -964,9 +1077,12 @@ export async function generateLetters(chain, analysis, context = {}) {
             itemCount: sections.length,
             stableItemKeys: sections.map((s) => s.stableItemKey),
             // Account sections only — the population reconciliation balances against
-            // disputed tradelines. Inquiry sections are reported separately.
-            accountSections: sections.filter((sec) => !sec.isInquiry),
+            // disputed tradelines. Inquiry AND public-record sections are neither
+            // tradelines nor accounts, so they are reported separately and excluded
+            // from the account population reconciliation balances against.
+            accountSections: sections.filter((sec) => !sec.isInquiry && !sec.isPublicRecord),
             inquirySections: sections.filter((sec) => sec.isInquiry),
+            publicRecordSections: sections.filter((sec) => sec.isPublicRecord),
             body,
 
             // Audit: Kris can reproduce this letter's voice from the combination alone.

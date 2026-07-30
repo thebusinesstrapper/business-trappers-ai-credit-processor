@@ -1058,6 +1058,54 @@ function detectPublicRecordFindings(report, asOf) {
                 }
             }
 
+            // ---- BANKRUPTCY VERIFICATION DISPUTE (Business Trappers rule) ----
+            // Every positively-identified bankruptcy public record is eligible
+            // for a bureau verification dispute. This is SEPARATE from any
+            // bankruptcy-related TRADELINE (an account "included in bankruptcy"),
+            // which is analyzed on its own in the tradeline path — the public
+            // record and the tradeline are distinct items and never merged here.
+            //
+            // FAIL CLOSED: a bankruptcy whose type is confirmable but whose
+            // required source data (filing date) is missing/unusable is routed to
+            // human review (PR_BANKRUPTCY_SOURCE_UNUSABLE) rather than disputed on
+            // invented facts. When the record type itself is unknown we cannot
+            // even assert it is a bankruptcy, so the existing PR_RECORD_TYPE_UNKNOWN
+            // finding already governs and we assert nothing here.
+            const isBankruptcyRecord =
+                recordTypeKnown && BANKRUPTCY_PATTERN.test(String(record.record_type ?? ""));
+
+            if (isBankruptcyRecord) {
+                if (filed) {
+                    findings.push(
+                        finding(
+                            "PR_BANKRUPTCY_VERIFICATION_REQUIRED",
+                            `${tradeline.bureau} reports a ${record.record_type} public record. ` +
+                                `The consumer is entitled to a reasonable reinvestigation of the record's ` +
+                                `source, accuracy, completeness, and identity match.`,
+                            {
+                                record_type: record.record_type ?? null,
+                                filing_date: obs.filing_date ?? obs.date_filed ?? null,
+                                case_number: obs.case_number ?? obs.reference_number ?? null,
+                                court: obs.court ?? obs.court_name ?? null,
+                                chapter: obs.chapter ?? null,
+                                disposition: obs.disposition ?? obs.status ?? null,
+                                discharge_date: obs.discharge_date ?? obs.date_resolved ?? null,
+                            }
+                        )
+                    );
+                } else {
+                    findings.push(
+                        finding(
+                            "PR_BANKRUPTCY_SOURCE_UNUSABLE",
+                            `${tradeline.bureau} reports a ${record.record_type} public record, but the ` +
+                                `filing date required to verify it is missing. Routed to human review ` +
+                                `rather than disputing on unverified facts.`,
+                            { record_type: record.record_type ?? null }
+                        )
+                    );
+                }
+            }
+
             // Re-code cross-bureau differences under the public-record code.
             const xb = crossBureau.get(tradeline.stable_item_key) ?? [];
 

@@ -463,6 +463,30 @@ export const FINDING_CODES = Object.freeze({
         summary: "The public record is beyond its lawful reporting period and is still reported.",
     },
 
+    // BANKRUPTCY VERIFICATION. Every positively-identified bankruptcy public
+    // record is eligible for a bureau verification dispute (Business Trappers
+    // bankruptcy rule). This is NOT an assertion that bankruptcy reporting is
+    // prohibited or obsolete — it asserts the consumer's right to a reasonable
+    // reinvestigation of the record's source, accuracy, completeness, and
+    // identity match. Maps to BT-DM-0035 (Bankruptcy Review) -> BT-RN-0022
+    // (Cannot Verify) -> BT-IN-0016 -> BT-BP-0001.
+    PR_BANKRUPTCY_VERIFICATION_REQUIRED: {
+        level: LEVEL.ITEM,
+        severity: SEVERITY.HIGH,
+        requires: REQUIRES.REPORT_ONLY,
+        summary: "A reported bankruptcy public record is eligible for a bureau verification dispute.",
+    },
+
+    // FAIL CLOSED. A bankruptcy whose required source data is missing or unusable
+    // (no record type confirmable, no filing date) cannot be disputed on invented
+    // facts. It routes to human review rather than producing a letter.
+    PR_BANKRUPTCY_SOURCE_UNUSABLE: {
+        level: LEVEL.ITEM,
+        severity: SEVERITY.HIGH,
+        requires: REQUIRES.REPORT_ONLY,
+        summary: "A reported bankruptcy is missing required source data; routed to human review.",
+    },
+
     // =======================================================================
     // HISTORY-DEPENDENT
     //

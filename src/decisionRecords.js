@@ -414,6 +414,18 @@ export const FINDING_TO_DECISION = Object.freeze({
     TL_BEYOND_REPORTING_PERIOD: { record: "BT-DM-0051", name: "Obsolete Derogatory Reporting", evidence: "SELF_EVIDENT" },
     PR_BEYOND_REPORTING_PERIOD: { record: "BT-DM-0051", name: "Obsolete Derogatory Reporting", evidence: "SELF_EVIDENT" },
 
+    // BANKRUPTCY VERIFICATION -> BT-DM-0035 (Bankruptcy Review), the approved
+    // chain BT-DM-0035 -> BT-RN-0022 (Cannot Verify) -> BT-IN-0016 -> BT-BP-0001.
+    // CONSUMER_DISPUTE: this is the consumer's reinvestigation right, not a
+    // self-evident contradiction. Every positively-identified bankruptcy is
+    // eligible for this dispute.
+    PR_BANKRUPTCY_VERIFICATION_REQUIRED: { record: "BT-DM-0035", name: "Bankruptcy Review", evidence: "CONSUMER_DISPUTE" },
+
+    // FAIL CLOSED. Missing/unusable bankruptcy source data has no Decision Record
+    // path (we will not dispute on invented facts); it is a real finding with no
+    // mapping, so it routes to human review via the library-gap path.
+    PR_BANKRUPTCY_SOURCE_UNUSABLE: { record: null, gap: true, reason: "Bankruptcy present but required source data (record type / filing date) is missing or unusable; a person must review rather than disputing on invented facts." },
+
     TL_OBSOLESCENCE_INDETERMINATE: { record: "BT-DM-0051", name: "Obsolete Derogatory Reporting", evidence: "INDETERMINATE" },
 
     // ---- NEW: stale inquiries ----------------------------------------------
