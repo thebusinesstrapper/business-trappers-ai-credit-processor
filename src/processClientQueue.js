@@ -20,7 +20,12 @@ import { runMilestone7 } from "./milestone7.js";
 import {
     recordCreditHeroState, recordManualReview, clearManualReview,
     requiresManualReview, manualReviewWritesAllowed,
+    listInactiveClients, recordMonitoringReactivated, recordNextEligibleDate,
 } from "./clientMemory.js";
+import { runMilestone6 } from "./milestone6.js";
+import { statusOnlyUpdate } from "./statusOnlyUpdate.js";
+import { runInactiveRecheckSweep } from "./inactiveRecheckSweep.js";
+import { recognizeCreditHeroLanding, CH_LANDING_STATE } from "./creditHeroLandingState.js";
 
 const jobs = new Map();
 
@@ -80,6 +85,47 @@ function normalize(value) {
 
 function normalizedKey(value) {
     return normalize(value).toLocaleLowerCase("en-US");
+}
+
+/**
+ * READ-ONLY live recheck of one inactive client's CreditHero access.
+ *
+ * Opens the EXISTING account via M6 (which owns login, client open, identity,
+ * CreditHero navigation, and read-only report selection/capture). M6 NEVER
+ * orders a report, reactivates monitoring, or incurs a charge, so this recheck
+ * is safe by construction.
+ *
+ * Maps the M6 result to a landing state the pure decision layer understands:
+ *   - PAYMENT_REQUIRED / CREDENTIALS_OR_AUTH_FAILED -> still inactive.
+ *   - CAPTURED / WAITING_FOR_FREE_REPORT            -> positively active
+ *     (the account was accessible past every inactive gate).
+ *   - anything else                                 -> UNKNOWN (fail closed).
+ */
+async function recheckInactiveClient(client) {
+    const m6 = await runMilestone6({
+        clientName: client.clientName,
+        crcClientId: client.crcClientId,
+    });
+
+    const result = m6?.result ?? null;
+    let landingState = CH_LANDING_STATE.UNKNOWN;
+
+    if (result === "PAYMENT_REQUIRED" || result === "CREDENTIALS_OR_AUTH_FAILED") {
+        landingState = result; // still inactive
+    } else if (result === "CAPTURED" || result === "WAITING_FOR_FREE_REPORT") {
+        landingState = CH_LANDING_STATE.HEALTHY_MEMBER_DASHBOARD; // positively active
+    }
+
+    // Newest report date when M6 surfaced one (healthy path). Memory only;
+    // recording it never triggers disputes.
+    const reportDate =
+        m6?.reportDateAfter ?? m6?.reportDate ?? m6?.newestReportDate ?? null;
+
+    return {
+        landing: { state: landingState, reason: m6?.classificationReason ?? null },
+        reportDate,
+        m6Result: result,
+    };
 }
 
 function publicJob(job) {
@@ -1242,6 +1288,11 @@ async function runJob(job) {
         } else {
             const scan = await readEligibleQueue(job.excludedStatuses);
 
+            // Stash ALL positively observed rows (including the denylisted
+            // "Credit Monitoring Inactive" ones) so the inactive-recheck sweep can
+            // use them as its CRC cross-check source after the normal loop.
+            job.observations = scan.observations ?? [];
+
             job.summary.scannedRows = scan.scannedRows;
             job.summary.eligibleRows = scan.eligibleRows;
             job.summary.ambiguousNames = scan.ambiguous.length;
@@ -1522,6 +1573,50 @@ async function runJob(job) {
 
             if (index < job.queue.length - 1 && job.delayMs > 0) {
                 await new Promise((resolve) => setTimeout(resolve, job.delayMs));
+            }
+        }
+
+        // ---- INACTIVE-CLIENT READ-ONLY RECHECK SWEEP ----------------------
+        //
+        // "Credit Monitoring Inactive" clients are denylisted from the normal
+        // queue above (we must never dispute while access is inactive). This
+        // separate sweep is how they are still looked at every production day,
+        // so a reactivation cannot be missed. It opens the EXISTING CreditHero
+        // account read-only via M6 — it never orders a report, reactivates
+        // monitoring, or incurs a charge — and it runs ONLY on an approved,
+        // non-diagnostic operational run, exactly like the write-capable paths
+        // above.
+        if (job.operationalRoutingApproved === true && job.diagnosticOnly !== true) {
+            try {
+                job.summary.inactiveRecheck = await runInactiveRecheckSweep({
+                    listInactiveClients,
+                    crcObservations: job.summary?.observations ?? job.observations ?? [],
+                    recheckClient: (client) => recheckInactiveClient(client),
+                    writers: {
+                        recordMonitoringReactivated,
+                        recordCreditHeroState,
+                        recordNextEligibleDate,
+                    },
+                    setCrcStatus: (client, targetStatus) =>
+                        statusOnlyUpdate({
+                            clientName: client.clientName,
+                            crcClientId: client.crcClientId,
+                            targetStatus,
+                        }),
+                    // Only a genuinely eligible reactivated client is processed
+                    // this run, under every existing safeguard.
+                    processEligible: (client) =>
+                        runProductionClient({
+                            clientName: client.clientName,
+                            crcClientId: client.crcClientId,
+                            processingApproved: true,
+                            submitApproved: job.submitApproved,
+                            operationalRoutingApproved: job.operationalRoutingApproved === true,
+                            inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
+                        }),
+                });
+            } catch (error) {
+                job.summary.inactiveRecheck = { error: error.message };
             }
         }
 
