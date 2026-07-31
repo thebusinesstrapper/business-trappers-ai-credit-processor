@@ -520,6 +520,41 @@ function normalizeName(name) {
     return String(name).toUpperCase().replace(/[^A-Z ]/g, "").replace(/\s+/g, " ").trim();
 }
 
+// Address normalizer for the CRC-of-record vs reported comparison. clientIdentity
+// only collapses whitespace; a street/reported address needs more to compare
+// fairly WITHOUT rewriting: expand nothing, only canonicalize equivalent forms
+// (Street/St, directionals, unit designators, ZIP+4 -> ZIP5, punctuation, case).
+// This decides SAMENESS only — it never edits the address that goes into a letter.
+const ADDRESS_ABBR = {
+    STREET: "ST", ST: "ST", ROAD: "RD", RD: "RD", AVENUE: "AVE", AVE: "AVE",
+    BOULEVARD: "BLVD", BLVD: "BLVD", DRIVE: "DR", DR: "DR", LANE: "LN", LN: "LN",
+    COURT: "CT", CT: "CT", CIRCLE: "CIR", CIR: "CIR", PLACE: "PL", PL: "PL",
+    TERRACE: "TER", TER: "TER", HIGHWAY: "HWY", HWY: "HWY", PARKWAY: "PKWY", PKWY: "PKWY",
+    NORTH: "N", SOUTH: "S", EAST: "E", WEST: "W",
+    NORTHEAST: "NE", NORTHWEST: "NW", SOUTHEAST: "SE", SOUTHWEST: "SW",
+    APARTMENT: "APT", APT: "APT", SUITE: "STE", STE: "STE", UNIT: "UNIT", NUMBER: "",
+};
+
+function normalizeAddressForCompare(raw) {
+    let s = String(raw ?? "").toUpperCase().replace(/[.,#]/g, " ").replace(/\s+/g, " ").trim();
+    if (!s) return "";
+    s = s.split(" ").map((w) => (w in ADDRESS_ABBR ? ADDRESS_ABBR[w] : w)).filter(Boolean).join(" ");
+    s = s.replace(/\b(\d{5})-\d{4}\b/g, "$1"); // ZIP+4 -> ZIP5
+    return s.replace(/\s+/g, " ").trim();
+}
+
+// Build the CRC address-of-record into one comparable string from its structured
+// fields. Returns null if any REQUIRED part is missing (fail closed -> review).
+function crcAddressOfRecord(identity) {
+    const line1 = identity.address_line_1 ?? null;
+    const city = identity.city ?? null;
+    const state = identity.state ?? null;
+    const zip = identity.postal_code ?? null;
+    if (!line1 || !city || !state || !zip) return null; // incomplete -> unusable
+    const line2 = identity.address_line_2 ?? "";
+    return normalizeAddressForCompare(`${line1} ${line2} ${city} ${state} ${zip}`);
+}
+
 function detectPersonalInformationFindings(report, clientIdentity) {
     const findings = [];
     const pi = report.reported_personal_information ?? {};
@@ -606,9 +641,121 @@ function detectPersonalInformationFindings(report, clientIdentity) {
                 })
             );
         }
+
+        // ADDRESS comparison. Bureau-reported CONSUMER addresses were captured at
+        // the M6 capture stage from the Credit Hero "Copy As HTML" report and
+        // attached as reported_personal_information.addresses = [{value,bureaus,raw}].
+        // Only run when they were captured (null means "not captured", which the
+        // capture stage already fails closed on — so here null simply means this
+        // path did not supply them, e.g. a pure-pipeline test without addresses).
+        const reportedAddresses = Array.isArray(pi.addresses) ? pi.addresses : null;
+        if (reportedAddresses && reportedAddresses.length) {
+            const ofRecord = crcAddressOfRecord(clientIdentity);
+            if (!ofRecord) {
+                // CRC address of record is missing/incomplete: we cannot say a
+                // reported address is "incorrect" without something to compare to.
+                // FAIL CLOSED to human review rather than dispute blindly.
+                findings.push(
+                    finding(
+                        "PI_ADDRESS_SOURCE_UNUSABLE",
+                        `Reported addresses are present but the address of record is missing or ` +
+                            `incomplete, so they cannot be verified. Routed to human review.`,
+                        { reported_count: reportedAddresses.length }
+                    )
+                );
+            } else {
+                // Never dispute the verified address of record. Emit one finding
+                // per reported address that does NOT match it.
+                for (const addr of reportedAddresses) {
+                    const normalized = normalizeAddressForCompare(addr.value);
+                    if (!normalized) continue;
+                    if (normalized !== ofRecord) {
+                        findings.push(
+                            finding(
+                                "PI_ADDRESS_MISMATCH_VS_CRC",
+                                `A reported address does not match the address of record.`,
+                                {
+                                    identity_of_record: {
+                                        address_line_1: clientIdentity.address_line_1,
+                                        address_line_2: clientIdentity.address_line_2 ?? null,
+                                        city: clientIdentity.city,
+                                        state: clientIdentity.state,
+                                        postal_code: clientIdentity.postal_code,
+                                    },
+                                    reported_value: addr.value,
+                                    reported_bureaus: addr.bureaus ?? [],
+                                    reported_raw: addr.raw ?? addr.value,
+                                }
+                            )
+                        );
+                    }
+                }
+            }
+        }
     }
 
     return findings;
+}
+
+// Build ITEM-LEVEL incorrect-address disputes. NARROW BY DESIGN: this converts
+// ONLY PI_ADDRESS_MISMATCH_VS_CRC into dispute items — name/DOB/SSN mismatches
+// stay report-level. One item is emitted per (mismatched address, bureau) so the
+// correct bureau receives its own address-deletion section. The verified address
+// of record is never emitted. If the address of record is incomplete, NO items
+// are produced (the fail-closed PI_ADDRESS_SOURCE_UNUSABLE finding, emitted by
+// detectPersonalInformationFindings, routes that to Manual Review with no letter).
+//
+// stableItemKey is deterministic: normalized reported address + bureau + code.
+function buildPersonalInformationAddressItems(report, clientIdentity) {
+    const items = [];
+    if (!clientIdentity) return items;
+
+    const pi = report.reported_personal_information ?? {};
+    const reportedAddresses = Array.isArray(pi.addresses) ? pi.addresses : null;
+    if (!reportedAddresses || !reportedAddresses.length) return items;
+
+    const ofRecord = crcAddressOfRecord(clientIdentity);
+    if (!ofRecord) return items; // incomplete of-record -> fail closed, no items
+
+    for (const addr of reportedAddresses) {
+        const normalized = normalizeAddressForCompare(addr.value);
+        if (!normalized) continue;
+        if (normalized === ofRecord) continue; // never dispute the verified address
+
+        const bureaus = Array.isArray(addr.bureaus) && addr.bureaus.length ? addr.bureaus : [null];
+        for (const bureau of bureaus) {
+            // Deterministic key: normalized address + bureau + finding code.
+            const stableItemKey =
+                `pi_addr|${normalized.replace(/\s+/g, "_")}|${bureau ?? "unknown"}|PI_ADDRESS_MISMATCH_VS_CRC`;
+
+            items.push({
+                stableItemKey,
+                stableAccountKey: null, // personal information is not an account
+                bureau: bureau ?? null,
+                furnisher: null, // personal information has no furnisher
+                findings: [
+                    finding(
+                        "PI_ADDRESS_MISMATCH_VS_CRC",
+                        `A reported address does not match the address of record.`,
+                        {
+                            identity_of_record: {
+                                address_line_1: clientIdentity.address_line_1,
+                                address_line_2: clientIdentity.address_line_2 ?? null,
+                                city: clientIdentity.city,
+                                state: clientIdentity.state,
+                                postal_code: clientIdentity.postal_code,
+                            },
+                            reported_value: addr.value,
+                            reported_bureaus: addr.bureaus ?? [],
+                            reported_raw: addr.raw ?? addr.value,
+                            bureau: bureau ?? null,
+                        }
+                    ),
+                ],
+            });
+        }
+    }
+    return items;
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,6 +1420,7 @@ export async function analyzeCreditReport(report, context = {}) {
             errors,
             clientSummary: {},
             personalInformation: [],
+            personalInformationItems: [],
             tradelines: [],
             collections: [],
             inquiries: [],
@@ -1321,6 +1469,7 @@ export async function analyzeCreditReport(report, context = {}) {
 
     // ---- Personal information (report level) ------------------------------
     const personalInformation = sortFindings(detectPersonalInformationFindings(report, clientIdentity));
+    const personalInformationItems = buildPersonalInformationAddressItems(report, clientIdentity);
 
     // ---- Bureau tradelines -------------------------------------------------
     const duplicateFindings = detectDuplicatesWithinBureau(accounts);
@@ -1494,6 +1643,7 @@ export async function analyzeCreditReport(report, context = {}) {
 
         clientSummary,
         personalInformation,
+        personalInformationItems,
         tradelines: sortItems(tradelines),
         collections: sortItems(collections),
         inquiries,

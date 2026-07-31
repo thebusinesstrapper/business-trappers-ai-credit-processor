@@ -390,6 +390,8 @@ export const FINDING_TO_DECISION = Object.freeze({
     PI_NAME_MISMATCH_VS_CRC: { record: "BT-DM-0004", name: "Incorrect Name", evidence: "IDENTITY" },
     PI_DOB_MISMATCH_VS_CRC:  { record: "BT-DM-0028", name: "Personal Information Conflict", evidence: "IDENTITY" },
     PI_SSN_MISMATCH_VS_CRC:  { record: "BT-DM-0028", name: "Personal Information Conflict", evidence: "IDENTITY" },
+    PI_ADDRESS_MISMATCH_VS_CRC: { record: "BT-DM-0005", name: "Incorrect Address", evidence: "IDENTITY" },
+    PI_ADDRESS_SOURCE_UNUSABLE: { record: null, gap: true, reason: "Address of record missing/incomplete; reported addresses cannot be verified. Human review." },
     PI_EMPLOYER_INCONSISTENT_ACROSS_BUREAUS: { record: "BT-DM-0006", name: "Incorrect Employer", evidence: "CROSS_BUREAU" },
     PI_NAME_VARIANTS:        { record: null, reason: "Name variants alone are not an inaccuracy. Context only." },
 

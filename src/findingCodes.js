@@ -146,6 +146,20 @@ export const FINDING_CODES = Object.freeze({
         summary: "No reported SSN matches the identity of record.",
     },
 
+    PI_ADDRESS_MISMATCH_VS_CRC: {
+        level: LEVEL.REPORT,
+        severity: SEVERITY.MEDIUM,
+        requires: REQUIRES.CLIENT_IDENTITY,
+        summary: "A reported address does not match the address of record.",
+    },
+
+    PI_ADDRESS_SOURCE_UNUSABLE: {
+        level: LEVEL.REPORT,
+        severity: SEVERITY.MEDIUM,
+        requires: REQUIRES.CLIENT_IDENTITY,
+        summary: "The address of record is missing or incomplete; cannot verify reported addresses. Human review.",
+    },
+
     PI_EMPLOYER_INCONSISTENT_ACROSS_BUREAUS: {
         level: LEVEL.REPORT,
         severity: SEVERITY.LOW,

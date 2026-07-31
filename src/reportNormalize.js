@@ -926,7 +926,7 @@ function consolidateCrossGroupDuplicates(accounts, warnings, keyResolution) {
  * @param {string} options.crcClientId          tag only; CRC is authoritative for identity
  * @param {object|null} options.previousReport  previous BT Credit Report Model (the key registry)
  */
-export function normalizeReport(payload, { crcClientId, previousReport = null } = {}) {
+export function normalizeReport(payload, { crcClientId, previousReport = null, reportedAddresses = null } = {}) {
     const response = payload?.CREDIT_RESPONSE ?? payload;
 
     if (!response || typeof response !== "object") {
@@ -1306,8 +1306,15 @@ export function normalizeReport(payload, { crcClientId, previousReport = null } 
 
             // EVIDENCE ONLY. NOT identity. CRC is authoritative for identity, and
             // nothing downstream may populate a letter header from this block.
+            //
+            // addresses: bureau-reported CONSUMER addresses captured at the M6
+            // capture stage from the Credit Hero "Copy As HTML" report (they are
+            // NOT present in the JSON payload). Shape: [{ value, bureaus, raw }].
+            // Attached only when the capture succeeded; omitted (null) otherwise,
+            // so the analyzer can tell "none reported" from "not captured".
             reported_personal_information: {
                 raw: response.BORROWER ?? null,
+                addresses: Array.isArray(reportedAddresses) ? reportedAddresses : null,
             },
 
             accounts: consolidatedAccounts,

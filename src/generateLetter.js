@@ -455,6 +455,27 @@ const SPEC = {
             "properly matched to me, and provide the procedure used to determine its accuracy.",
         authority: AUTH.REINVESTIGATION,
     },
+
+    // INCORRECT ADDRESS — personal-information correction. The address of record
+    // is authoritative (CRC profile); a reported address that does not match it
+    // is inaccurate personal information and is requested for deletion. Wording
+    // is built from the reported value only; the address of record is NOT printed
+    // into the dispute body (we ask for deletion of the wrong one, not insertion
+    // of the right one). §611 reinvestigation authority.
+    PI_ADDRESS_MISMATCH_VS_CRC: {
+        bureauLocal: true,
+        defect: (e) => {
+            const reported = (e && e.reported_value) ? e.reported_value : "an address";
+            return (
+                `The following address is reported in my personal information and is not my address: ` +
+                `${reported}. This address does not belong to me and is inaccurate personal information.`
+            );
+        },
+        standard:
+            "Delete this address from my personal information, and provide the procedure used to " +
+            "determine its accuracy.",
+        authority: AUTH.REINVESTIGATION,
+    },
 };
 
 /**
@@ -510,6 +531,7 @@ export async function generateLetters(chain, analysis, context = {}) {
         ...(analysis.collections ?? []),
         ...(analysis.inquiries ?? []),
         ...(analysis.publicRecords ?? []),
+        ...(analysis.personalInformationItems ?? []),
     ]) {
         findingsByItem.set(item.stableItemKey, item);
     }
@@ -750,6 +772,70 @@ export async function generateLetters(chain, analysis, context = {}) {
                     isPublicRecord: true,
                     text: [
                         `${label}`,
+                        ``,
+                        spec.defect(ev),
+                        ``,
+                        spec.standard,
+                        ``,
+                        spec.authority,
+                    ].join("\n"),
+                });
+                continue;
+            }
+
+            // ---- INCORRECT ADDRESS (PERSONAL INFORMATION) -----------------
+            //
+            // A personal-information address is NOT a tradeline: it has no creditor
+            // furnisher and no masked account number, so the tradeline guards below
+            // would withhold every address dispute for reasons that do not apply.
+            // It is identified to the bureau by the reported address value itself
+            // (real captured data in the finding evidence), never by an invented
+            // furnisher. Scoped strictly to PI_ADDRESS_MISMATCH_VS_CRC.
+            const addrFinding = source?.findings?.find(
+                (f) => f.code === "PI_ADDRESS_MISMATCH_VS_CRC"
+            );
+
+            if (addrFinding) {
+                const ev = addrFinding.evidence ?? {};
+                const spec = SPEC.PI_ADDRESS_MISMATCH_VS_CRC;
+
+                // The dispute must name a real reported address -> fail closed if
+                // there is nothing to identify.
+                if (!ev.reported_value) {
+                    withheld.push({
+                        stableItemKey: item.stableItemKey,
+                        bureau,
+                        furnisher: null,
+                        reason:
+                            "An incorrect-address finding carried no reported address value to identify " +
+                            "it to the bureau. Withheld for human review rather than sent unidentifiable.",
+                    });
+                    continue;
+                }
+
+                sections.push({
+                    stableItemKey: item.stableItemKey,
+                    stableAccountKey: item.stableAccountKey,
+                    bureau,
+                    furnisher: null,
+                    round: item.round,
+                    escalated: item.escalated,
+                    requestedRemedy: item.requestedRemedy,
+                    strategy: item.strategy?.strategy ?? null,
+                    decisionRecord: item.decisionRecord,
+                    reason: item.reason?.reason ?? null,
+                    instruction: item.instruction?.instruction ?? null,
+                    blueprint: item.blueprint?.blueprint ?? null,
+                    baseline: false,
+                    complianceGated: false,
+                    unspeccedFindings: [],
+                    findingCodes: ["PI_ADDRESS_MISMATCH_VS_CRC"],
+                    // Personal information is neither a tradeline nor an inquiry;
+                    // reconciliation balances ACCOUNT sections against disputed
+                    // tradelines, so this is marked out of that population.
+                    isPersonalInformation: true,
+                    text: [
+                        `Personal Information — Address`,
                         ``,
                         spec.defect(ev),
                         ``,
@@ -1080,9 +1166,10 @@ export async function generateLetters(chain, analysis, context = {}) {
             // disputed tradelines. Inquiry AND public-record sections are neither
             // tradelines nor accounts, so they are reported separately and excluded
             // from the account population reconciliation balances against.
-            accountSections: sections.filter((sec) => !sec.isInquiry && !sec.isPublicRecord),
+            accountSections: sections.filter((sec) => !sec.isInquiry && !sec.isPublicRecord && !sec.isPersonalInformation),
             inquirySections: sections.filter((sec) => sec.isInquiry),
             publicRecordSections: sections.filter((sec) => sec.isPublicRecord),
+            personalInformationSections: sections.filter((sec) => sec.isPersonalInformation),
             body,
 
             // Audit: Kris can reproduce this letter's voice from the combination alone.

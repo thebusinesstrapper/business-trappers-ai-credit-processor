@@ -37,7 +37,7 @@ const REASON_BY_DECISION = Object.freeze({
     "BT-DM-0002": { reason: "BT-RN-0004", name: "Unauthorized Hard Inquiry" },
     "BT-DM-0003": { reason: "BT-RN-0017", name: "Identity Theft" },
     "BT-DM-0004": { reason: "BT-RN-0001", name: "Incorrect Name" },
-    "BT-DM-0005": { reason: "BT-RN-0001", name: "Incorrect Name" },
+    "BT-DM-0005": { reason: "BT-RN-0002", name: "Incorrect Address" },
     "BT-DM-0006": { reason: "BT-RN-0001", name: "Incorrect Name" },
     "BT-DM-0007": { reason: "BT-RN-0016", name: "Mixed File" },
     "BT-DM-0008": { reason: "BT-RN-0007", name: "Third-Party Collection" },
@@ -139,6 +139,7 @@ const INSTRUCTION_BY_REASON = Object.freeze({
     // GOVERNED Reason -> Instruction — derived from the governed decision rows
     // (Code Alignment Map v1.0 / Instruction Library v2.0). Internally consistent.
     "BT-RN-0001": { instruction: "BT-IN-0001", name: "Remove Incorrect Name" },
+    "BT-RN-0002": { instruction: "BT-IN-0002", name: "Remove Incorrect Address" },
     "BT-RN-0004": { instruction: "BT-IN-0004", name: "Investigate Unauthorized Inquiry" },
     "BT-RN-0007": { instruction: "BT-IN-0006", name: "Validate Collection" },
     "BT-RN-0010": { instruction: "BT-IN-0011", name: "Correct Balance" },
@@ -184,6 +185,7 @@ export function selectInstruction(reason) {
 const BLUEPRINT_BY_INSTRUCTION = Object.freeze({
     // GOVERNED Instruction -> Blueprint — Code Alignment Map v1.0 / Letter Blueprint Library v2.0.
     "BT-IN-0001": { blueprint: "BT-BP-0001", name: "Bureau Reinvestigation" },
+    "BT-IN-0002": { blueprint: "BT-BP-0003", name: "Personal Information Correction" },
     "BT-IN-0004": { blueprint: "BT-BP-0004", name: "Unauthorized Inquiry" },
     "BT-IN-0006": { blueprint: "BT-BP-0006", name: "Charge-Off Investigation" },
     "BT-IN-0009": { blueprint: "BT-BP-0009", name: "Mixed File Resolution" },

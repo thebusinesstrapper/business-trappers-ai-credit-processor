@@ -684,6 +684,10 @@ export async function decideDisputes(analysis, context = {}) {
     for (const f of analysis.personalInformation ?? []) {
         const mapping = FINDING_TO_DECISION[f.code];
         if (!mapping?.record || mapping.record === DECISION_MIXED_FILE.record) continue;
+        // Incorrect addresses are handled as ITEM-LEVEL disputes (see allItems
+        // below), not as a report-level decision. Skip here to avoid double-
+        // processing. Name/DOB/SSN mismatches remain report-level.
+        if (f.code === "PI_ADDRESS_MISMATCH_VS_CRC") continue;
 
         const evidence = evidenceFor(mapping);
 
@@ -707,6 +711,12 @@ export async function decideDisputes(analysis, context = {}) {
         ...(analysis.collections ?? []).map((i) => ({ ...i, kind: "COLLECTION" })),
         ...(analysis.inquiries ?? []).map((i) => ({ ...i, kind: "INQUIRY" })),
         ...(analysis.publicRecords ?? []).map((i) => ({ ...i, kind: "PUBLIC_RECORD" })),
+        // NARROW: only incorrect-address personal-information disputes are
+        // item-level. Kind PERSONAL_INFO is neither account-like (Constitutional
+        // exclusions do not apply) nor an inquiry (the KCB protected-inquiry guard
+        // does not apply). It flows through decideItem like a public record:
+        // finding -> BT-DM-0005 -> chain -> letter.
+        ...(analysis.personalInformationItems ?? []).map((i) => ({ ...i, kind: "PERSONAL_INFO" })),
     ];
 
     const itemDecisions = allItems
