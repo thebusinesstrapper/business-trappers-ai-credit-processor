@@ -129,6 +129,14 @@ async function captureAndNormalize(data = {}, identityState = {}) {
     try {
         const clientName = data.clientName || "Elizabeth Kelley";
 
+        // Narrow, explicit fact: has CreditHero access been POSITIVELY verified
+        // active on this run? Set true ONLY after verifyActiveReport() confirms
+        // the selected report is live on screen (below). It is preserved onto
+        // later fail-closed responses so a downstream extraction/normalization
+        // failure cannot erase the already-confirmed access fact. It never comes
+        // from stored state, a URL shape, or a guess.
+        let creditHeroAccessVerified = false;
+
         const session = await launchBrowser();
         browser = session.browser;
 
@@ -838,6 +846,12 @@ async function captureAndNormalize(data = {}, identityState = {}) {
 
         console.log(`VERIFIED ACTIVE: ${target.text}`);
 
+        // Access to the live CreditHero member report is now positively confirmed.
+        // Record the fact separately from the report-processing outcome: if a
+        // later stage (address capture, normalization) fails closed, this fact
+        // must survive so the inactive-recovery sweep still reactivates the client.
+        creditHeroAccessVerified = true;
+
         // ---- 7. LET THE SELECTED REPORT'S PAYLOAD ARRIVE --------------------
         //
         // Selecting a report triggers a fresh fetch. The listener is already
@@ -856,7 +870,8 @@ async function captureAndNormalize(data = {}, identityState = {}) {
                     `(none carried tradeline/bureau/liability structure). The Normalization Engine is ` +
                     `NOT written against a guess — this run returns what it saw so the real payload can ` +
                     `be identified. Candidates: ` +
-                    captured.map((c) => `${c.url.slice(0, 80)} [${c.topLevelKeys?.join(",") ?? "?"}]`).join(" | ")
+                    captured.map((c) => `${c.url.slice(0, 80)} [${c.topLevelKeys?.join(",") ?? "?"}]`).join(" | "),
+                { milestone: "M6_CAPTURE", creditHeroAccessVerified }
             );
         }
 
@@ -888,6 +903,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
                     stage: `address_capture:${addressCapture.stage}`,
                     crcClientId: client.crcClientId,
                     requiresHumanReview: true,
+                    creditHeroAccessVerified,
                 });
         }
         console.log(`Captured ${addressCapture.addresses.length} bureau-reported address(es).`);
@@ -926,6 +942,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
                     completeness: normalized.completeness,
                     counts: normalized.counts,
                     requiresHumanReview: true,
+                    creditHeroAccessVerified,
 
                     // ---- THE RAW PAYLOAD SURVIVES THE FAILURE -----------------
                     //
@@ -951,6 +968,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
         return successResponse({
             milestone: "M6_CAPTURE",
             result: "CAPTURED",
+            creditHeroAccessVerified,
 
             crcClientId: client.crcClientId,
             identity,
@@ -1083,7 +1101,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
             });
         }
 
-        return errorResponse("MILESTONE_6_ERROR", error.message, { milestone: "M6_CAPTURE" });
+        return errorResponse("MILESTONE_6_ERROR", error.message, { milestone: "M6_CAPTURE", creditHeroAccessVerified });
 
     } finally {
         if (browser) await browser.close();

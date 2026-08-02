@@ -26,6 +26,7 @@ import { runMilestone6 } from "./milestone6.js";
 import { statusOnlyUpdate } from "./statusOnlyUpdate.js";
 import { runInactiveRecheckSweep } from "./inactiveRecheckSweep.js";
 import { recognizeCreditHeroLanding, CH_LANDING_STATE } from "./creditHeroLandingState.js";
+import { classifyRecheckLandingFromM6 } from "./inactiveRecheckDecision.js";
 
 const jobs = new Map();
 
@@ -107,24 +108,17 @@ async function recheckInactiveClient(client) {
         crcClientId: client.crcClientId,
     });
 
-    const result = m6?.result ?? null;
-    let landingState = CH_LANDING_STATE.UNKNOWN;
+    const landingState = classifyRecheckLandingFromM6(m6);
 
-    if (result === "PAYMENT_REQUIRED" || result === "CREDENTIALS_OR_AUTH_FAILED") {
-        landingState = result; // still inactive
-    } else if (result === "CAPTURED" || result === "WAITING_FOR_FREE_REPORT") {
-        landingState = CH_LANDING_STATE.HEALTHY_MEMBER_DASHBOARD; // positively active
-    }
-
-    // Newest report date when M6 surfaced one (healthy path). Memory only;
-    // recording it never triggers disputes.
+    // Newest report date when M6 surfaced one (healthy or verified path).
+    // Memory only; recording it never triggers disputes.
     const reportDate =
-        m6?.reportDateAfter ?? m6?.reportDate ?? m6?.newestReportDate ?? null;
+        m6?.reportSelected?.date ?? m6?.reportDateAfter ?? m6?.reportDate ?? m6?.newestReportDate ?? null;
 
     return {
         landing: { state: landingState, reason: m6?.classificationReason ?? null },
         reportDate,
-        m6Result: result,
+        m6Result: m6?.result ?? null,
     };
 }
 

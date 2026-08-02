@@ -69,6 +69,10 @@ const DASHBOARD_FIELDS = [
     "manual_review_stage",
     "manual_review_reason",
     "manual_review_flagged_at",
+    // When monitoring was confirmed active again after being inactive. Written
+    // once by clientMemory.recordMonitoringReactivated() on the inactive->active
+    // transition. Operational state only; this endpoint remains select-only.
+    "monitoring_reactivated_date",
 ];
 
 const SELECT_COLUMNS = DASHBOARD_FIELDS.join(", ");
@@ -123,11 +127,94 @@ export function authorizeDashboardRequest(providedSecret) {
 }
 
 /**
+ * Maximum read attempts for a transient Supabase/PostgREST failure. The dashboard
+ * read is idempotent and read-only, so a bounded retry is safe.
+ */
+const MAX_READ_ATTEMPTS = 3;
+
+/** Modest fixed-plus-linear backoff between attempts (ms). Attempt 1 -> 150ms, 2 -> 300ms. */
+function backoffMs(attempt) {
+    return 150 * attempt;
+}
+
+/**
+ * Is this error worth retrying? Transient transport/timeout/availability errors
+ * are; a permanent schema or permission error is NOT (retrying it just delays the
+ * same 500). Classification is best-effort and defaults to "transient" only for
+ * recognized transient signals — an unknown error is treated as permanent so we
+ * fail fast rather than hammer a broken dependency.
+ */
+function isRetryableReadError(error) {
+    const code = String(error?.code ?? "").toUpperCase();
+    const msg = String(error?.message ?? "").toLowerCase();
+
+    // Permanent PostgREST/Postgres errors: undefined table (42P01), undefined
+    // column (42703), permission denied (42501), and PostgREST schema errors
+    // (PGRST...). Never retried.
+    if (/^(42P01|42703|42501)$/.test(code) || code.startsWith("PGRST")) return false;
+
+    // Recognized transient signals.
+    const transient =
+        /(timeout|timed out|econn|etimedout|socket hang up|network|fetch failed|503|502|504|too many connections|temporarily unavailable)/.test(
+            msg
+        );
+    return transient;
+}
+
+/**
+ * Sanitized server-side log line for a dashboard read attempt. Emits ONLY the
+ * endpoint, attempt number, and a safe error code/short message. Never logs the
+ * Supabase key, connection string, request secret, consumer data, or query
+ * results. The message is truncated and stripped of anything that could carry a
+ * value, and long digit runs are redacted defensively.
+ */
+function logDashboardReadFailure(attempt, error) {
+    const code = String(error?.code ?? "UNKNOWN").slice(0, 40);
+    const safeMessage = String(error?.message ?? "read failed")
+        .replace(/\d{4,}/g, "#") // redact any long digit run (ids, numbers)
+        .slice(0, 160);
+    console.error(
+        `[dashboard-data] read attempt ${attempt}/${MAX_READ_ATTEMPTS} failed: ` +
+            `code=${code} message="${safeMessage}"`
+    );
+}
+
+/**
  * Read every client_state row, newest first, paging past the 1000-row cap.
+ *
+ * Hardened with a bounded retry (max ${MAX_READ_ATTEMPTS}) for TRANSIENT read
+ * failures. Permanent schema/permission errors are not retried. After the final
+ * failure it still throws, so the endpoint fails closed with HTTP 500 exactly as
+ * before. Strictly read-only: the only Supabase verb here remains .select().
  *
  * @returns {Promise<{ok: boolean, recordCount: number, generatedAt: string, records: object[]}>}
  */
 export async function getDashboardData() {
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= MAX_READ_ATTEMPTS; attempt += 1) {
+        try {
+            return await readAllClientStateRows();
+        } catch (error) {
+            lastError = error;
+            logDashboardReadFailure(attempt, error);
+
+            // Do not retry a permanent error, and do not delay after the last try.
+            if (!isRetryableReadError(error) || attempt === MAX_READ_ATTEMPTS) break;
+
+            await new Promise((resolve) => setTimeout(resolve, backoffMs(attempt)));
+        }
+    }
+
+    // Fail closed: the route handler maps a throw to the existing generic 500.
+    throw new Error(`Failed to read ${CLIENT_STATE_TABLE}: ${lastError?.message ?? "unknown error"}`);
+}
+
+/**
+ * The actual paged read. Kept separate so getDashboardData() can wrap it in the
+ * retry loop without duplicating the paging logic. Read-only (.select only).
+ */
+async function readAllClientStateRows() {
     const supabase = getSupabase();
     const records = [];
 
@@ -144,7 +231,11 @@ export async function getDashboardData() {
             .range(from, to);
 
         if (error) {
-            throw new Error(`Failed to read ${CLIENT_STATE_TABLE}: ${error.message}`);
+            // Throw the raw Supabase error so getDashboardData() can classify it
+            // (retryable vs permanent) and log it sanitized.
+            const e = new Error(error.message);
+            e.code = error.code;
+            throw e;
         }
 
         const batch = Array.isArray(data) ? data : [];

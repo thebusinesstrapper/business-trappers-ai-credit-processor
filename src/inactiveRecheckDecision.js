@@ -62,6 +62,29 @@ export function isLandingPositivelyActive(landing) {
 }
 
 /**
+ * PURE. Map an M6 result object to the landing state the recheck understands.
+ * Lives here (browser-free) so the exact classification is unit-testable, and is
+ * imported by processClientQueue.recheckInactiveClient().
+ *
+ * AUTHORITY ORDER:
+ *   1. creditHeroAccessVerified === true  -> positively active. M6 sets this the
+ *      moment verifyActiveReport() confirms the live report, and preserves it on
+ *      later fail-closed responses, so a post-verification extraction failure can
+ *      no longer be misread as UNKNOWN (the Anthony Pee defect).
+ *   2. PAYMENT_REQUIRED / CREDENTIALS_OR_AUTH_FAILED -> still inactive.
+ *   3. CAPTURED / WAITING_FOR_FREE_REPORT -> positively active.
+ *   4. anything else -> UNKNOWN (fail closed).
+ */
+export function classifyRecheckLandingFromM6(m6) {
+    const result = m6?.result ?? null;
+
+    if (m6?.creditHeroAccessVerified === true) return CH_LANDING_STATE.HEALTHY_MEMBER_DASHBOARD;
+    if (result === "PAYMENT_REQUIRED" || result === "CREDENTIALS_OR_AUTH_FAILED") return result;
+    if (result === "CAPTURED" || result === "WAITING_FOR_FREE_REPORT") return CH_LANDING_STATE.HEALTHY_MEMBER_DASHBOARD;
+    return CH_LANDING_STATE.UNKNOWN;
+}
+
+/**
  * Decide what the recheck sweep should do for one inactive client.
  *
  * @param {object} params
