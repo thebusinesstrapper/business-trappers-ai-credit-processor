@@ -27,10 +27,18 @@
 const COPY_AS_HTML_LABEL = "Copy As HTML";
 const COPY_SUCCESS_TEXT = "Copied to clipboard successfully";
 
+// Bounded retry / polling for making the CLIPBOARD (not the toast) authoritative.
+const MAX_CAPTURE_ATTEMPTS = 3;         // click/read sequences before Manual Review
+const TOAST_ADVISORY_MS = 2000;         // best-effort, non-fatal wait for the toast
+const CLIPBOARD_POLL_MS = 3000;         // bounded poll window per attempt
+const CLIPBOARD_POLL_INTERVAL_MS = 250; // poll cadence within an attempt
+
 /**
- * Orchestrate the capture: click "Copy As HTML", wait for the success
- * confirmation, read the clipboard, and parse the Personal Information table in
- * the browser context via DOMParser.
+ * Orchestrate the capture: click "Copy As HTML", then read the CLIPBOARD as the
+ * authority (the success toast is advisory only), and parse the Personal
+ * Information table in the browser context via DOMParser. Retries the
+ * click/read sequence up to MAX_CAPTURE_ATTEMPTS with bounded clipboard polling;
+ * returns Manual Review only after all bounded attempts fail.
  *
  * @param {import('playwright').Page} page  The report page (mcc_creditreports_v2.asp).
  * @returns {Promise<{ok:true, addresses:Array}|{ok:false, reason:string, stage:string}>}
@@ -55,77 +63,127 @@ export async function captureReportedAddresses(page) {
         return { ok: false, stage: "locate", reason: `Could not locate "${COPY_AS_HTML_LABEL}": ${error.message}` };
     }
 
-    // ---- 2. Grant clipboard-read for this origin ---------------------------
-    // navigator.clipboard.readText() requires the clipboard-read permission.
-    // Granting here is idempotent and does not depend on how the context was
-    // built. If the API is unavailable, the clipboard read below fails closed.
+    // ---- 2. Grant clipboard read + write for this origin -------------------
+    // "Copy As HTML" WRITES the clipboard; navigator.clipboard.readText() READS
+    // it. Grant both so neither is silently blocked by the browser. Idempotent
+    // and independent of how the context was built. If granting fails, the
+    // bounded clipboard reads below fail closed with a clear reason.
     try {
         const origin = new URL(page.url()).origin;
-        await page.context().grantPermissions(["clipboard-read"], { origin });
+        await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin });
     } catch {
-        // Non-fatal here: if the permission can't be granted, the read fails
-        // closed with a clear reason at the evaluate step.
+        // Non-fatal: a failed grant surfaces as an unreadable clipboard below.
     }
 
-    // ---- 3. Click the control and wait for the success confirmation --------
-    // Wait for Credit Hero's own "Copied to clipboard successfully" toast — an
-    // actual browser state change, not an arbitrary sleep.
-    try {
-        await control.click();
-    } catch (error) {
-        return { ok: false, stage: "click", reason: `Clicking "${COPY_AS_HTML_LABEL}" failed: ${error.message}` };
+    // ---- 3/4/5/6. Click, then read the CLIPBOARD as the authority ----------
+    // The clipboard content — not the toast — is authoritative. The visible
+    // "Copied to clipboard successfully" toast is treated as advisory only: a
+    // brief best-effort wait to let the copy settle on the happy path, never a
+    // failure condition. Across production this toast is sometimes missed within
+    // 15s even though the copy succeeded, which wrongly routed clients to Manual
+    // Review; reading valid report HTML from the clipboard proves success
+    // regardless of whether the toast was observed.
+    //
+    // Up to MAX_CAPTURE_ATTEMPTS attempts. Each attempt re-clicks, then polls the
+    // clipboard for up to CLIPBOARD_POLL_MS in short CLIPBOARD_POLL_INTERVAL_MS
+    // steps, accepting the first read that VALIDATES as report HTML and parses.
+    // Manual Review is returned only after every bounded attempt fails.
+    let lastFailure = { ok: false, stage: "clipboard", reason: "Clipboard never yielded valid report HTML." };
+
+    for (let attempt = 1; attempt <= MAX_CAPTURE_ATTEMPTS; attempt += 1) {
+        // Re-click on each attempt (the copy is the only side effect; it is
+        // read-only with respect to the client account).
+        try {
+            await control.click();
+        } catch (error) {
+            lastFailure = { ok: false, stage: "click", reason: `Clicking "${COPY_AS_HTML_LABEL}" failed: ${error.message}` };
+            continue;
+        }
+
+        // Advisory toast wait: bounded and non-fatal. Its absence never fails.
+        try {
+            await page
+                .getByText(COPY_SUCCESS_TEXT, { exact: false })
+                .first()
+                .waitFor({ state: "visible", timeout: TOAST_ADVISORY_MS });
+        } catch {
+            // Toast not seen — proceed to read the clipboard anyway.
+        }
+
+        // Bounded clipboard poll + validate + parse, all inside the page so the
+        // HTML never leaves the browser (and is never logged).
+        let result;
+        try {
+            result = await page.evaluate(
+                async ({ coreSource, pollMs, intervalMs }) => {
+                    // Validate that a clipboard string looks like the report HTML
+                    // the parser expects: a non-trivial string containing an HTML
+                    // table and the Personal Information section marker. This
+                    // gates parsing without trusting the toast.
+                    const looksLikeReportHtml = (s) => {
+                        if (!s || typeof s !== "string" || s.length < 200) return false;
+                        const lower = s.toLowerCase();
+                        return lower.includes("<table") && lower.includes("personal information");
+                    };
+                    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+                    const deadline = Date.now() + pollMs;
+                    let html = null;
+                    // Poll until we read valid-looking HTML or the deadline passes.
+                    // (First iteration runs immediately.)
+                    // eslint-disable-next-line no-constant-condition
+                    while (true) {
+                        let candidate = null;
+                        try {
+                            candidate = await navigator.clipboard.readText();
+                        } catch (e) {
+                            candidate = null; // unreadable this tick; keep polling
+                        }
+                        if (looksLikeReportHtml(candidate)) {
+                            html = candidate;
+                            break;
+                        }
+                        if (Date.now() >= deadline) break;
+                        await sleep(intervalMs);
+                    }
+
+                    if (!html) {
+                        return { ok: false, stage: "clipboard", reason: "Clipboard did not contain valid report HTML." };
+                    }
+
+                    let doc;
+                    try {
+                        doc = new DOMParser().parseFromString(html, "text/html");
+                    } catch (e) {
+                        return { ok: false, stage: "domparser", reason: "DOMParser failed: " + (e && e.message ? e.message : String(e)) };
+                    }
+                    if (!doc || !doc.body) {
+                        return { ok: false, stage: "domparser", reason: "DOMParser produced no document." };
+                    }
+                    // Reconstitute the shared parse core in the page and run it.
+                    // eslint-disable-next-line no-new-func
+                    const core = new Function("return (" + coreSource + ")")();
+                    return core(doc);
+                },
+                { coreSource: PARSE_CORE_SOURCE, pollMs: CLIPBOARD_POLL_MS, intervalMs: CLIPBOARD_POLL_INTERVAL_MS }
+            );
+        } catch (error) {
+            lastFailure = { ok: false, stage: "evaluate", reason: `Reading/parsing the copied HTML failed: ${error.message}` };
+            continue;
+        }
+
+        if (result && result.ok === true) {
+            return { ok: true, addresses: result.addresses };
+        }
+
+        // This attempt failed (empty/invalid clipboard or parse failure). Keep
+        // the reason and retry.
+        lastFailure = { ok: false, stage: result?.stage ?? "parse", reason: result?.reason ?? "Unknown parse failure." };
     }
 
-    try {
-        await page.getByText(COPY_SUCCESS_TEXT, { exact: false }).first().waitFor({ state: "visible", timeout: 15000 });
-    } catch (error) {
-        return {
-            ok: false,
-            stage: "confirm",
-            reason: `Did not observe "${COPY_SUCCESS_TEXT}" after clicking "${COPY_AS_HTML_LABEL}": ${error.message}`,
-        };
-    }
-
-    // ---- 4/5/6. Read the clipboard + parse in the browser via DOMParser ----
-    // The parse runs INSIDE page.evaluate so it uses the browser's own DOMParser
-    // (no jsdom / no Node HTML package). PARSE_CORE_SOURCE carries the shared,
-    // Node-tested parse core into the page context, where it operates on the
-    // DOMParser document.
-    let result;
-    try {
-        result = await page.evaluate(async (coreSource) => {
-            let html;
-            try {
-                html = await navigator.clipboard.readText();
-            } catch (e) {
-                return { ok: false, stage: "clipboard", reason: "Clipboard read failed: " + (e && e.message ? e.message : String(e)) };
-            }
-            if (!html || typeof html !== "string" || html.length < 50) {
-                return { ok: false, stage: "clipboard", reason: "Clipboard did not contain the report HTML." };
-            }
-            let doc;
-            try {
-                doc = new DOMParser().parseFromString(html, "text/html");
-            } catch (e) {
-                return { ok: false, stage: "domparser", reason: "DOMParser failed: " + (e && e.message ? e.message : String(e)) };
-            }
-            if (!doc || !doc.body) {
-                return { ok: false, stage: "domparser", reason: "DOMParser produced no document." };
-            }
-            // Reconstitute the shared parse core in the page and run it.
-            // eslint-disable-next-line no-new-func
-            const core = new Function("return (" + coreSource + ")")();
-            return core(doc);
-        }, PARSE_CORE_SOURCE);
-    } catch (error) {
-        return { ok: false, stage: "evaluate", reason: `Reading/parsing the copied HTML failed: ${error.message}` };
-    }
-
-    if (!result || result.ok !== true) {
-        return { ok: false, stage: result?.stage ?? "parse", reason: result?.reason ?? "Unknown parse failure." };
-    }
-
-    return { ok: true, addresses: result.addresses };
+    // All bounded attempts failed -> Manual Review, with the real last reason
+    // (never "confirm"; the toast is no longer a failure condition).
+    return lastFailure;
 }
 
 /**
