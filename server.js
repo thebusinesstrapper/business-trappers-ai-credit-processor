@@ -22,6 +22,8 @@ import { runStatusOnlyVerification } from "./src/verifyStatusOnly.js"; // TEMPOR
 import { runControlledClient } from "./src/processControlledClient.js"; // TEMPORARY — five-client controlled validation
 import { startClientQueue, getClientQueueJob } from "./src/processClientQueue.js"; // Production CRC queue
 import { extractSkeletonNode, buildLiabilityMap, buildFieldMap, buildCollisionMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
+import { probePublicRecordSchema } from "./src/reportSchemaProbe.js"; // TEMPORARY — public-record schema discovery
+import { readClientState } from "./src/clientMemory.js"; // read-only client_state lookup for debug schema route
 
 dotenv.config();
 
@@ -724,6 +726,126 @@ app.post("/debug/collision-map", async (req, res) => {
 });
 
 /**
+ * =========================================================================
+ * TEMPORARY — PUBLIC-RECORD / BANKRUPTCY SCHEMA DISCOVERY ONLY.
+ * DELETE ONCE reportNormalize.js reads public records.
+ *
+ * POST /debug/report-public-record-schema
+ *   header: x-debug-token: <DEBUG_TOKEN>
+ *   body:   { "crcClientId": "171" }
+ *
+ * WHY: reportNormalize.js never reads or emits public records, so bankruptcies
+ * are dropped. Before fixing normalization we must learn the EXACT raw MISMO key
+ * structure for public records — without guessing, and without any consumer value
+ * leaving the app.
+ *
+ * WHAT IT DOES:
+ *   1. Resolves the client NAME from client_state by crc_client_id (READ ONLY).
+ *   2. Runs the EXISTING M6 capture (runMilestone6) with that clientName — no new
+ *      browser, no navigation M6 would not do, spends nothing.
+ *   3. Walks the capturedPayload.skeleton (structure only) and returns ONLY the
+ *      schema paths whose key contains PUBLIC / RECORD / BANKRUPT / COURT /
+ *      CHAPTER / CASE / FILED / DISCHARGE.
+ *
+ * READ ONLY. It performs exactly one Supabase READ (no writes). It does not order
+ * a report, create acquisition intents, generate letters, send messages, write
+ * client state, change CRC status, or advance a round.
+ *
+ * VALUE-FREE. probePublicRecordSchema() emits only path/key/type/length/
+ * firstElementKeys and never the skeleton's `sample` field, so no name, address,
+ * date, case number, court, or other value is ever returned or logged.
+ *
+ * FAIL-CLOSED. Stops (rather than probing the wrong client) if the crc_client_id
+ * is not found, the display name is blank, or the CRC id resolved AFTER opening
+ * does not equal the requested id.
+ *
+ * FAILS CLOSED on auth: with no DEBUG_TOKEN configured this route returns 404.
+ * =========================================================================
+ */
+app.post("/debug/report-public-record-schema", async (req, res) => {
+
+    if (!debugGateOpen(req, res, "/debug/report-public-record-schema")) return;
+
+    const requestedId = (req.body?.crcClientId ?? "").toString().trim();
+
+    if (!requestedId) {
+        return res.status(400).json({ ok: false, error: 'Supply a "crcClientId", e.g. { "crcClientId": "171" }.' });
+    }
+
+    try {
+
+        // ---- 1. READ-ONLY resolve the client name from client_state ----------
+        const state = await readClientState(requestedId);
+
+        if (!state) {
+            return res.status(404).json({
+                ok: false,
+                crcClientId: requestedId,
+                error: "No client_state row for that crc_client_id. Refusing to probe.",
+            });
+        }
+
+        const clientName = (state.client_display_name ?? "").trim();
+
+        if (!clientName) {
+            return res.status(422).json({
+                ok: false,
+                crcClientId: requestedId,
+                error: "client_display_name is blank for that client. Refusing to probe.",
+            });
+        }
+
+        // ---- 2. Reuse the EXISTING M6 capture with the resolved name ---------
+        const result = await runMilestone6({ clientName });
+
+        // FAIL CLOSED: the client actually opened must be the one we asked for.
+        // runMilestone6 resolves crcClientId from the opened client; if it does
+        // not equal the requested id we stop rather than probe the wrong report.
+        const openedId = (result?.crcClientId ?? "").toString().trim();
+
+        if (!openedId || openedId !== requestedId) {
+            return res.status(409).json({
+                ok: false,
+                crcClientId: requestedId,
+                error: "Resolved CRC client id after opening did not match the requested id. Refusing to probe.",
+            });
+        }
+
+        if (!result.success) {
+            return res.json({
+                ok: false,
+                crcClientId: requestedId,
+                reason: "The M6 capture did not succeed, so there is no report skeleton to inspect.",
+                milestone_error: result,
+            });
+        }
+
+        const skeleton = result.capturedPayload?.skeleton;
+
+        if (!skeleton) {
+            return res.json({
+                ok: false,
+                crcClientId: requestedId,
+                reason: "M6 succeeded but returned no capturedPayload.skeleton.",
+            });
+        }
+
+        // ---- 3. Schema-only, value-free probe -------------------------------
+        const matches = probePublicRecordSchema(skeleton);
+
+        return res.json({ ok: true, crcClientId: requestedId, matches });
+
+    } catch (error) {
+
+        console.error(error);
+
+        return res.status(500).json({ ok: false, error: error.message });
+
+    }
+
+});
+
+/**
  * GET /dashboard-data — READ-ONLY export of client_state for the Google Sheets
  * Executive Operations Dashboard.
  *
@@ -808,6 +930,7 @@ app.listen(PORT, () => {
         "POST /debug/liability-map",
         "POST /debug/field-map",
         "POST /debug/collision-map",
+        "POST /debug/report-public-record-schema",
         "GET /debug/routes",
     ];
 
