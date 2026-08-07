@@ -231,6 +231,67 @@ async function captureAndNormalize(data = {}, identityState = {}) {
             console.log(`Initialized client_state for CRC client ${client.crcClientId}.`);
         }
 
+        // ---- 1b. CREDIT HERO ACCESS STATE — CHECKED FIRST, TERMINAL --------
+        //
+        // PRECEDENCE RULE. CreditHero access is evaluated BEFORE any identity or
+        // profile validation. A client whose CreditHero monitoring is inactive
+        // cannot process at all, so an inactive banner must STOP the run here —
+        // before readClientProfile / verifyIdentity — rather than letting a
+        // missing profile field (e.g. Mailing Address) route her to identity
+        // Manual Review. She belongs in the inactive workflow, not Manual Review.
+        //
+        // This is the SAME dashboard-blocker check and the SAME CHS_NOT_ACTIVATED
+        // return as before; only its ORDER changed. It needs only the opened CRC
+        // page and the crcClientId already grounded from openClient() above, and
+        // the client_state row ensured just above (which the inactive workflow's
+        // later Supabase writes key on). It does NOT read or freeze identity, so
+        // an inactive client is never subjected to identity validation.
+        //
+        // Read the dashboard BEFORE trying to open CreditHero. A client who never
+        // enrolled has a greyed control that is not detectably disabled —
+        // openCreditHero's isEnabled() check does not catch CRC's styling, so the
+        // link is clicked three times and reported as "click did not navigate".
+        // That is indistinguishable from a slow page, and it is the wrong answer:
+        // nothing was slow, there is no account.
+        //
+        // The BANNER is the evidence. This mirrors the rule already stated in
+        // importAuditState.js, that the page MESSAGE is authoritative and the
+        // button carries no signal.
+        //
+        // Positive banner only. Greyed styling, aria-disabled, isEnabled(), a
+        // click that does not navigate, and CREDIT_HERO_UNAVAILABLE all remain
+        // technical results routed to manual review.
+        const blocker = await recognizeDashboardBlocker(page);
+
+        if (blocker.blocked) {
+            console.log("Credit Hero Score is not activated for this client. Not attempting to open it.");
+
+            // Stop here. No profile read, no identity validation, no CreditHero
+            // click, no report capture, no M7, no M8, no message, no status write,
+            // no Supabase write, no round change.
+            return errorResponse(
+                "CHS_NOT_ACTIVATED",
+                "Credit Hero Score monitoring is not active for this client. The client dashboard " +
+                    "shows the invite banner, so there is no monitoring account to import from.",
+                {
+                    milestone: "M6_CAPTURE",
+                    stage: "credit_hero",
+
+                    // The inactive workflow keys its Supabase writes on this. It is
+                    // already grounded from openClient() above; omitting it made the
+                    // whole result unaddressable.
+                    crcClientId: client.crcClientId,
+
+                    creditHeroAccessState: "CHS_NOT_ACTIVATED",
+                    importAuditState: blocker.state,
+                    observed: blocker.observed,
+                    requiresInactiveWorkflow: true,
+                    openCreditHeroAttempted: false,
+                    requiresHumanReview: true,
+                }
+            );
+        }
+
         const profile = await readClientProfile(page, client.crcClientId);
 
         if (!profile.ok) {
@@ -321,52 +382,6 @@ async function captureAndNormalize(data = {}, identityState = {}) {
         // been watching an idle page the entire time. A context-level listener sees
         // every page in the session, including tabs that do not exist yet.
         const captured = capturePayloads(context);
-
-        // ---- 2b. CREDIT HERO ACCESS STATE (dashboard, read-only) -----------
-        //
-        // Read the dashboard BEFORE trying to open CreditHero. A client who never
-        // enrolled has a greyed control that is not detectably disabled —
-        // openCreditHero's isEnabled() check does not catch CRC's styling, so the
-        // link is clicked three times and reported as "click did not navigate".
-        // That is indistinguishable from a slow page, and it is the wrong answer:
-        // nothing was slow, there is no account.
-        //
-        // The BANNER is the evidence. This mirrors the rule already stated in
-        // importAuditState.js, that the page MESSAGE is authoritative and the
-        // button carries no signal.
-        //
-        // Positive banner only. Greyed styling, aria-disabled, isEnabled(), a
-        // click that does not navigate, and CREDIT_HERO_UNAVAILABLE all remain
-        // technical results routed to manual review.
-        const blocker = await recognizeDashboardBlocker(page);
-
-        if (blocker.blocked) {
-            console.log("Credit Hero Score is not activated for this client. Not attempting to open it.");
-
-            // Stop here. No CreditHero click, no report capture, no M7, no M8, no
-            // message, no status write, no Supabase write, no round change.
-            return errorResponse(
-                "CHS_NOT_ACTIVATED",
-                "Credit Hero Score monitoring is not active for this client. The client dashboard " +
-                    "shows the invite banner, so there is no monitoring account to import from.",
-                {
-                    milestone: "M6_CAPTURE",
-                    stage: "credit_hero",
-
-                    // The inactive workflow keys its Supabase writes on this. It is
-                    // already grounded from openClient() above; omitting it made the
-                    // whole result unaddressable.
-                    crcClientId: client.crcClientId,
-
-                    creditHeroAccessState: "CHS_NOT_ACTIVATED",
-                    importAuditState: blocker.state,
-                    observed: blocker.observed,
-                    requiresInactiveWorkflow: true,
-                    openCreditHeroAttempted: false,
-                    requiresHumanReview: true,
-                }
-            );
-        }
 
         // ---- 3. CREDIT HERO ------------------------------------------------
         const creditHero = await openCreditHero(page, context);
