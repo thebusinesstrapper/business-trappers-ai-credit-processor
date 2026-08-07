@@ -125,17 +125,19 @@ async function captureAndNormalize(data = {}, identityState = {}) {
     // Evidence collected during acquisition, kept OUTSIDE the try so a later
     // page-closure can still surface it instead of losing it to the catch.
     let acquisitionEvidence = null;
+    // Narrow, explicit fact: has CreditHero access been POSITIVELY verified
+    // active on this run? Set true ONLY after verifyActiveReport() confirms
+    // the selected report is live on screen (below). It is preserved onto
+    // later fail-closed responses so a downstream extraction/normalization
+    // failure cannot erase the already-confirmed access fact. It never comes
+    // from stored state, a URL shape, or a guess. Declared at FUNCTION scope
+    // (not inside the try) so the catch block can read it — the catch's
+    // MILESTONE_6_ERROR return references it, and a try-scoped `let` is not
+    // visible there.
+    let creditHeroAccessVerified = false;
 
     try {
         const clientName = data.clientName || "Elizabeth Kelley";
-
-        // Narrow, explicit fact: has CreditHero access been POSITIVELY verified
-        // active on this run? Set true ONLY after verifyActiveReport() confirms
-        // the selected report is live on screen (below). It is preserved onto
-        // later fail-closed responses so a downstream extraction/normalization
-        // failure cannot erase the already-confirmed access fact. It never comes
-        // from stored state, a URL shape, or a guess.
-        let creditHeroAccessVerified = false;
 
         const session = await launchBrowser();
         browser = session.browser;
