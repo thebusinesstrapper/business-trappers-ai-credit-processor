@@ -427,6 +427,166 @@ function normalizeBureau(sourceType) {
 }
 
 // ---------------------------------------------------------------------------
+// PUBLIC RECORDS (CREDIT_PUBLIC_RECORD)
+//
+// reportNormalize previously read CREDIT_LIABILITY / CREDIT_INQUIRY /
+// CREDIT_SCORE but NOT CREDIT_PUBLIC_RECORD, so report.public_records was never
+// emitted and the analyzer never saw a bankruptcy. This section reads the same
+// `response` object and produces the exact internal shape the analyzer already
+// consumes (record_type + bureau_tradelines[].observation.normalized).
+//
+// Bureau attribution reuses normalizeBureau(CREDIT_REPOSITORY.@_SourceType) —
+// the identical mechanism tradelines/inquiries use — and FAILS CLOSED (no
+// bureau_tradeline, a completeness warning) when no bureau is recognizable. It
+// never guesses a bureau.
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive the bankruptcy chapter ("7"/"11"/"13") from TEXT already present in the
+ * record's @_Type / @_DispositionType. Never inferred from disposition or dates.
+ * Returns null when no chapter appears in supported text.
+ */
+function deriveChapter(...texts) {
+    for (const t of texts) {
+        const m = String(t ?? "").match(/chapter\s*(7|11|13)\b/i);
+        if (m) return m[1];
+    }
+    return null;
+}
+
+/**
+ * The grouping key for a raw public-record row, strongest identity first:
+ *   1. @PubrecHashSimple          (stable, shared across a record's bureaus)
+ *   2. @CreditTradeReferenceID    (present + stable)
+ *   3. @_DocketIdentifier + @_FiledDate + @_CourtName (composite)
+ * @PubrecHashComplex is NEVER used for identity (it encodes volatile fields).
+ * Returns null when no supported identity evidence exists, so the caller can
+ * treat the row as its own singleton group rather than merging on nothing.
+ */
+function publicRecordGroupKey(rec) {
+    const simple = String(rec?.["@PubrecHashSimple"] ?? "").trim();
+    if (simple) return `hash_simple:${simple}`;
+
+    const tradeRef = String(rec?.["@CreditTradeReferenceID"] ?? "").trim();
+    if (tradeRef) return `trade_ref:${tradeRef}`;
+
+    const docket = String(rec?.["@_DocketIdentifier"] ?? "").trim();
+    const filed = String(rec?.["@_FiledDate"] ?? "").trim();
+    const court = String(rec?.["@_CourtName"] ?? "").trim();
+    if (docket || filed || court) return `composite:${docket}|${filed}|${court}`;
+
+    return null; // no supported identity -> singleton group (never merge on nothing)
+}
+
+/**
+ * Normalize CREDIT_PUBLIC_RECORD into the internal shape the analyzer consumes.
+ *
+ * @param {object} response  the raw CREDIT_RESPONSE object (same one used for
+ *                           CREDIT_LIABILITY/INQUIRY/SCORE)
+ * @param {string[]} warnings  completeness.warnings sink (existing convention)
+ * @returns {Array} normalized public records
+ */
+function normalizePublicRecords(response, warnings) {
+    const rawRecords = toArray(response?.CREDIT_PUBLIC_RECORD);
+    if (rawRecords.length === 0) return [];
+
+    // ---- 1. group raw rows by supported identity evidence ------------------
+    // A row with no supported identity is its OWN group (never merged on nothing).
+    const groups = new Map(); // groupKey -> { rows: [{ index, rec }] }
+    rawRecords.forEach((rec, index) => {
+        const key = publicRecordGroupKey(rec) ?? `singleton:${index}`;
+        if (!groups.has(key)) groups.set(key, { rows: [] });
+        groups.get(key).rows.push({ index, rec });
+    });
+
+    const publicRecords = [];
+
+    for (const { rows } of groups.values()) {
+        // The group's descriptive fields come from its first row; grouped rows
+        // denote the SAME underlying record, so these are shared.
+        const first = rows[0].rec;
+
+        const recordType = first?.["@_Type"] ?? null;
+        const court = first?.["@_CourtName"] ?? null;
+        const filingDate = toDate(first?.["@_FiledDate"]);
+        const caseNumber = first?.["@_DocketIdentifier"] ?? null;
+        const disposition = first?.["@_DispositionType"] ?? null;
+
+        // discharge_date only when the disposition indicates discharged.
+        const isDischarged = /discharge/i.test(String(disposition ?? ""));
+        const dischargeDate = isDischarged ? toDate(first?.["@_DispositionDate"]) : null;
+
+        const chapter = deriveChapter(recordType, disposition);
+
+        // ---- 2. one bureau_tradeline per DISTINCT recognized bureau --------
+        // Each raw row's CREDIT_REPOSITORY may name one or more bureaus. Dedupe
+        // by bureau within the group (requirement F). Fail closed when a row
+        // names no recognizable bureau: warn, emit nothing for it.
+        const tradelinesByBureau = new Map(); // bureau -> tradeline
+
+        for (const { index, rec } of rows) {
+            const repositories = toArray(rec?.CREDIT_REPOSITORY);
+            const bureaus = repositories
+                .map((r) => normalizeBureau(r?.["@_SourceType"]))
+                .filter(Boolean);
+
+            if (bureaus.length === 0) {
+                warnings.push(
+                    `Public record row ${index} names no recognisable bureau ` +
+                    `(CREDIT_PUBLIC_RECORD.CREDIT_REPOSITORY.@_SourceType). ` +
+                    `It is not emitted as a bureau tradeline — a public record with no bureau ` +
+                    `cannot be disputed with anyone.`
+                );
+                continue;
+            }
+
+            for (const bureau of bureaus) {
+                if (tradelinesByBureau.has(bureau)) continue; // dedupe within group
+
+                tradelinesByBureau.set(bureau, {
+                    stable_item_key: mintKey(KEY_PREFIX.PUBLIC_RECORD),
+                    bureau,
+                    source_row_index: index,
+                    observation: {
+                        normalized: {
+                            filing_date: filingDate,
+                            case_number: caseNumber,
+                            court,
+                            chapter,
+                            disposition,
+                            discharge_date: dischargeDate,
+                        },
+                        // Layer 2 (reported) mirrors the same source values; letters
+                        // assert from here. filing_date is the field the analyzer
+                        // requires to verify, so it is the one carried explicitly.
+                        reported: {
+                            filing_date: filingDate,
+                        },
+                    },
+                    // Unsupported / vendor / audit values live ONLY in raw. No new
+                    // downstream meaning is invented for them.
+                    raw: rec,
+                });
+            }
+        }
+
+        // A group whose rows named no recognizable bureau produces no tradelines.
+        // Fail closed: do not emit a bureau-less public record (nothing to dispute).
+        const bureauTradelines = [...tradelinesByBureau.values()];
+        if (bureauTradelines.length === 0) continue;
+
+        publicRecords.push({
+            stable_account_key: mintKey(KEY_PREFIX.PUBLIC_RECORD),
+            record_type: recordType,
+            bureau_tradelines: bureauTradelines,
+            raw: rows.map((r) => r.rec),
+        });
+    }
+
+    return publicRecords;
+}
+
+// ---------------------------------------------------------------------------
 // OBSERVATION
 // ---------------------------------------------------------------------------
 
@@ -1232,6 +1392,13 @@ export function normalizeReport(payload, { crcClientId, previousReport = null, r
         if (bureau) scores[bureau] = toNumber(score?.["@_Value"]);
     }
 
+    // ---- Public records (bankruptcies, judgments, liens) ---------------------
+    // Reads response.CREDIT_PUBLIC_RECORD (the sibling of CREDIT_LIABILITY /
+    // CREDIT_INQUIRY / CREDIT_SCORE) and emits the internal shape the analyzer
+    // consumes. Empty/absent -> []. Fails closed (with a completeness warning)
+    // on unrecognized bureau attribution; never guesses a bureau.
+    const publicRecords = normalizePublicRecords(response, warnings);
+
     // ---- Required fields -----------------------------------------------------
     //
     // GENUINELY missing = the key was never located under any candidate, on any
@@ -1320,6 +1487,7 @@ export function normalizeReport(payload, { crcClientId, previousReport = null, r
             accounts: consolidatedAccounts,
             inquiries,
             scores,
+            public_records: publicRecords,
 
             key_index: {
                 accounts: consolidatedAccounts.map((a) => ({
