@@ -996,33 +996,36 @@ function classifyResult(result) {
         return "noActionableItems";
     }
 
-    // Successful CHS_NOT_ACTIVATED inactive-routing outcome: CRC was CONFIRMED
-    // updated to "Credit Monitoring Inactive" by runInactiveWorkflow(). This is
-    // a successful operational-routing outcome, not a manual-review condition,
-    // and must not fall into the generic manualReview bucket below — mirroring
-    // routedWaiting / noActionableItems above.
+    // Confirmed CHS_NOT_ACTIVATED / PAYMENT_REQUIRED inactive-routing outcome.
+    // Credit Monitoring Inactive is an EXPECTED BLOCKED STATE — a routed
+    // operational outcome, not a manual-review condition — so it must not fall
+    // into the generic manualReview bucket below (mirroring routedWaiting /
+    // noActionableItems above).
     //
-    // Deliberately gated on result.inactive.statusUpdated, NOT on result.ok
-    // alone: processProductionClient.js sets
-    //   ok = inactive.noticeSent || inactive.reminderSent || inactive.statusUpdated
-    // so `ok` can be true from a notice alone even when the CRC status write
-    // failed. Requiring statusUpdated === true reserves this classification for
-    // a CONFIRMED CRC status change specifically.
+    // NO LONGER gated on result.inactive.statusUpdated === true (nor on
+    // result.ok). The previous gate meant an already-inactive client whose CRC
+    // status text did not need rewriting (statusUpdated false/absent) — or a run
+    // whose inactive notice/reminder failed (ok false) — fell through to the
+    // generic manualReview bucket and was wrongly flagged manual_review_active,
+    // stage credit_hero_inactive, reason credit_monitoring_inactive (Patience
+    // Shelby, CRC 175). The client is INACTIVE whether or not the status write
+    // changed anything, so the classification keys on the confirmed inactive
+    // ROUTING signal that every inactive-branch return carries unconditionally:
+    //   stage ∈ { credit_hero_inactive, payment_required }  (both route through
+    //   runInactiveWorkflow and both set CRC "Credit Monitoring Inactive"), AND
+    //   blockedReason === "credit_monitoring_inactive".
+    // Because creditMonitoringInactive is excluded from MANUAL_REVIEW_
+    // CLASSIFICATIONS, a stale manual-review flag is CLEARED via the existing
+    // clearManualReview path below on the next run.
     //
     // A FAILED NOTICE DOES NOT HIDE HERE. recipient_prefill_mismatch /
     // NOTICE_SEND_FAILED live on result.inactive (noticeSent, error_code,
     // failureReason) and are still returned in full on every job.results entry
-    // below — this classification describes the CRC status change, and erases
-    // nothing about the notice.
+    // below — this classification describes the inactive routing state, and
+    // erases nothing about the notice.
     if (
-        result?.ok === true &&
-        // BOTH stages route through runInactiveWorkflow() and both set CRC to
-        // "Credit Monitoring Inactive". Matching only "credit_hero_inactive"
-        // meant every PAYMENT_REQUIRED client — Brittney Jones among them — was
-        // counted as generic manual review despite its CRC status having been
-        // confirmed written. The stage string differed; the outcome did not.
         (result?.stage === "credit_hero_inactive" || result?.stage === "payment_required") &&
-        result?.inactive?.statusUpdated === true
+        result?.blockedReason === "credit_monitoring_inactive"
     ) {
         return "creditMonitoringInactive";
     }
