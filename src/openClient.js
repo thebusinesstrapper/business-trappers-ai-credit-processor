@@ -14,6 +14,16 @@ import { searchTermsFor, selectClientRow } from "./clientSearchName.js";
 const SEARCH_TIMEOUT = 20000;
 const ROW_TIMEOUT = 15000;
 const DASHBOARD_TIMEOUT = 30000;
+// How long to wait for the client-name click to actually navigate to the client
+// dashboard URL, BEFORE the (longer) dashboard-content readiness wait. A click
+// that resolves to a non-navigating element leaves the page on /app/clients;
+// this bounds that case to a fast, clearly-attributed failure instead of a
+// misleading 30s CreditHero-readiness timeout.
+const NAVIGATION_TIMEOUT = 15000;
+// The client dashboard URL reached after opening a row: /app/clients/<id>/dashboard.
+// Same "/clients/<numeric-id>" convention as crcClientId.js, plus the required
+// "/dashboard" segment.
+const CLIENT_DASHBOARD_URL_PATTERN = /\/clients\/\d+\/dashboard(?:[/?#]|$)/;
 
 /**
  * Locate the "Table Search" input using a few fallback strategies,
@@ -48,33 +58,43 @@ async function getTableSearchInput(page) {
 const ROW_SELECTOR = '[role="row"]:visible, table tr:visible';
 
 /**
- * Resolve the clickable blue client-name element inside an already-matched row.
+ * Resolve the clickable blue client-name NAVIGATION link inside an already-matched
+ * row. Returns ONLY an element positively identified as this client's name link.
  *
  * IMPORTANT: we deliberately do NOT lead with getByRole("link"). An <a> only
  * carries the ARIA "link" role when it has an href. CRC renders the client
- * name as an href-less <a>/<span> that navigates via a JS onClick handler —
- * it looks and behaves like a link, but has no role, so every role-based
- * query returns zero matches. Tag- and text-based lookups find it; role-based
- * ones silently do not.
+ * name as an href-less <a> that navigates via a JS onClick handler — it looks
+ * and behaves like a link, but has no role, so a role-based query alone can
+ * return zero matches. The tag-based `a:visible` + hasText lookup finds it;
+ * because hasText matches the element's whole subtree, a name split across child
+ * <span>s inside the real anchor still matches.
  *
- * Returns the name element, or null. Never returns the row container: the row
- * has no click handler, so clicking it is a silent no-op.
+ * We do NOT fall back to "any visible anchor" or "the name text node": both can
+ * resolve to a non-navigating element (an unrelated action/avatar anchor, or
+ * plain text with no click handler), producing a click that succeeds while the
+ * page never leaves /app/clients. If no positively-identified client-name link
+ * exists, this returns null and the caller fails closed — it never guesses.
+ *
+ * Never returns the row container: the row has no click handler, so clicking it
+ * is a silent no-op.
  */
 async function findClientNameLink(row, clientName) {
+    // ONLY positively-identified CLIENT-NAME navigation links are valid click
+    // targets. A production failure (CRC 74) showed that falling back to "any
+    // visible anchor" or "the name text node" resolves to a non-navigating
+    // element — an unrelated action/avatar anchor, or plain text with no click
+    // handler — so the click succeeds but the page never leaves /app/clients.
+    // Both are removed. We keep only candidates whose match is tied to THIS
+    // client's name:
     const candidates = [
-        // 1. A visible anchor in this row whose own text is the client's name.
-        //    Tag-based, so href-less anchors still match.
+        // 1. A visible anchor in this row whose own subtree text is the client's
+        //    name. Tag-based, so CRC's href-less <a> still matches; hasText tests
+        //    the element's whole subtree, so a name split across child <span>s
+        //    INSIDE the real anchor still matches here.
         row.locator("a:visible", { hasText: clientName }).first(),
 
-        // 2. Any visible anchor in the row (name may be wrapped in a child
-        //    <span>, which can break the hasText match above).
-        row.locator("a:visible").first(),
-
-        // 3. The name may be a styled clickable <div>/<span> rather than an <a>.
-        //    Click the name text element itself — still not the row container.
-        row.getByText(clientName, { exact: false }).first(),
-
-        // 4. Role-based, kept last: only matches if CRC does supply an href.
+        // 2. Role-based, kept last: only matches if CRC does supply an href, and
+        //    is still bound to the client's name.
         row.getByRole("link", { name: clientName, exact: false }).first(),
     ];
 
@@ -84,6 +104,9 @@ async function findClientNameLink(row, clientName) {
         }
     }
 
+    // No positively-identified client-name link. Return null and let the caller
+    // fail closed through the existing client-open path — never click a bare
+    // anchor or text node that may not navigate.
     return null;
 }
 
@@ -399,6 +422,26 @@ export async function openClient(page, clientName, knownCrcClientId = null) {
     try {
         // Click the client's blue name hyperlink, not the row container.
         await clientNameLink.click();
+
+        // ---- POST-CLICK NAVIGATION VERIFICATION --------------------------
+        // The click is only meaningful if it actually navigated to the client
+        // dashboard. A click that resolves to a non-navigating element (which
+        // findClientNameLink now refuses to return, but we verify regardless)
+        // would otherwise leave the page on /app/clients and surface 30s later
+        // as a misleading "View CreditHeroScore Account" timeout inside
+        // waitForDashboardLoad. Verify the URL FIRST and fail closed here, with
+        // a message that clearly attributes the failure to client navigation —
+        // NOT to CreditHero. Do not continue to dashboard readiness, profile,
+        // identity, or CreditHero processing when navigation did not occur.
+        try {
+            await page.waitForURL(CLIENT_DASHBOARD_URL_PATTERN, { timeout: NAVIGATION_TIMEOUT });
+        } catch {
+            throw new Error(
+                `Clicked the client-name link for "${clientName}" but the client dashboard did not ` +
+                `open — the page is still at ${page.url()} (expected /app/clients/<id>/dashboard). ` +
+                `This is a client-navigation failure, not a CreditHero problem.`
+            );
+        }
 
         console.log(`Waiting for client dashboard to finish loading ("${DASHBOARD_READY_LABEL}")...`);
         await waitForDashboardLoad(page);
