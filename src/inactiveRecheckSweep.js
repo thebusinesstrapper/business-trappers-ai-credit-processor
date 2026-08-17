@@ -105,6 +105,14 @@ export async function runInactiveRecheckSweep(deps) {
         writers,
         setCrcStatus,
         processEligible = null,
+        // Existing inactive notice/reminder workflow, injected so the sweep can
+        // (re)attempt an owed initial notice for a STILL_INACTIVE client without
+        // duplicating any notice-decision logic. runInactiveWorkflow stays
+        // authoritative for SEND_INITIAL_NOTICE / SEND_REMINDER / NO_MESSAGE_DUE,
+        // the timestamps, and the errors. Optional: when absent (or not approved),
+        // the notice step is simply skipped and the sweep behaves as before.
+        runInactiveWorkflow = null,
+        inactiveWorkflowApproved = false,
         todayIso = new Date().toISOString().slice(0, 10),
         nowIso = new Date().toISOString(),
     } = deps;
@@ -146,12 +154,46 @@ export async function runInactiveRecheckSweep(deps) {
             entry.reason = decision.reason;
 
             if (decision.action === RECHECK_ACTION.STILL_INACTIVE) {
-                // Keep inactive; preserve notice/reminder flow (untouched here);
-                // only stamp the check time and re-assert inactive access.
+                // Keep inactive; stamp the check time and re-assert inactive access.
                 await writers.recordCreditHeroState(client.crcClientId, {
                     credit_hero_access_state: "inactive",
                     last_credit_hero_check_at: nowIso,
                 }).catch(() => {});
+
+                // Then run the EXISTING inactive notice/reminder workflow so an
+                // owed initial notice is attempted (Marcelo/Unique: never sent) or
+                // retried (Patience: prior composer failure). The sweep does NOT
+                // decide whether a notice is due — runInactiveWorkflow ->
+                // decideNoticeAction is authoritative: it sends the initial notice
+                // only when inactive_notice_sent_at is null (so a successful notice
+                // is never duplicated), records inactive_notice_last_error on
+                // failure while leaving the timestamp null (so it retries next run),
+                // and only considers a reminder after a successful initial notice.
+                //
+                // Gated exactly like the write-capable inactive path: it runs only
+                // when a real runInactiveWorkflow is injected AND the run is
+                // approved. A missing dependency or an unapproved/diagnostic run
+                // skips it and the sweep behaves exactly as before.
+                if (typeof runInactiveWorkflow === "function" && inactiveWorkflowApproved === true) {
+                    try {
+                        const notice = await runInactiveWorkflow({
+                            clientName: client.clientName,
+                            crcClientId: client.crcClientId,
+                            inactiveWorkflowApproved: true,
+                        });
+                        entry.notice = {
+                            plannedAction: notice?.plannedAction ?? null,
+                            noticeSent: notice?.noticeSent === true,
+                            reminderSent: notice?.reminderSent === true,
+                            error_code: notice?.error_code ?? null,
+                        };
+                    } catch (error) {
+                        // A notice-workflow failure never fails the sweep for this
+                        // client — inactive state was already recorded above.
+                        entry.notice = { error: error.message };
+                    }
+                }
+
                 summary.stillInactive += 1;
                 summary.results.push(entry);
                 continue;

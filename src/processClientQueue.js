@@ -25,6 +25,7 @@ import {
 import { runMilestone6 } from "./milestone6.js";
 import { statusOnlyUpdate } from "./statusOnlyUpdate.js";
 import { runInactiveRecheckSweep } from "./inactiveRecheckSweep.js";
+import { runInactiveWorkflow } from "./inactiveWorkflow.js";
 import { recognizeCreditHeroLanding, CH_LANDING_STATE } from "./creditHeroLandingState.js";
 import { classifyRecheckLandingFromM6 } from "./inactiveRecheckDecision.js";
 
@@ -1600,6 +1601,13 @@ async function runJob(job) {
                             crcClientId: client.crcClientId,
                             targetStatus,
                         }),
+                    // Existing inactive notice/reminder workflow + the SAME approval
+                    // gate the write-capable inactive path uses. The sweep invokes
+                    // it for STILL_INACTIVE clients so an owed initial notice is
+                    // (re)attempted; runInactiveWorkflow stays authoritative for the
+                    // notice/reminder decision, timestamps, and errors. No new flag.
+                    runInactiveWorkflow,
+                    inactiveWorkflowApproved: job.inactiveWorkflowApproved === true,
                     // Only a genuinely eligible reactivated client is processed
                     // this run, under every existing safeguard.
                     processEligible: (client) =>
