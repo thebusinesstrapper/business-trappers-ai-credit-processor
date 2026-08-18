@@ -445,6 +445,12 @@ export async function sendClientNotice(page, opts = {}) {
         attachmentsUploaded: 0,
         attachmentPathExists: false,
         composerOpened: false,
+        // Per-field composer-open attestation, populated ONLY on an open_compose
+        // failure so the persisted error shows WHICH field the confirmation gate
+        // was missing (hasClient/hasSubject/hasBody/hasSubmit/replyVisible).
+        // Observability only — it does not affect any selector, the confirmation
+        // logic, or send behavior.
+        composeState: null,
         recipientVerified: false,
         messageSubmitted: false,
         messageSuccessConfirmed: false,
@@ -469,7 +475,19 @@ export async function sendClientNotice(page, opts = {}) {
 
     if (!opened.ok) {
         report.failedStage = "open_compose";
-        report.failureReason = `Could not open the secure-message composer (${opened.reason}).`;
+        // Carry the per-field confirmation state (when openComposeForm provided
+        // it) so the next run records exactly which field was missing. This is
+        // read-only diagnostic detail; the selectors, the confirmation gate, and
+        // the send behavior are unchanged.
+        report.composeState = opened.state ?? null;
+        const stateSummary = opened.state
+            ? " Composer field state: " +
+              `hasClient=${opened.state.hasClient}, hasSubject=${opened.state.hasSubject}, ` +
+              `hasBody=${opened.state.hasBody}, hasSubmit=${opened.state.hasSubmit}, ` +
+              `replyVisible=${opened.state.replyVisible}.`
+            : "";
+        report.failureReason =
+            `Could not open the secure-message composer (${opened.reason}).${stateSummary}`;
         return report;
     }
 
