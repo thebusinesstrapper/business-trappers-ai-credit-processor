@@ -78,6 +78,30 @@ const ROW_SELECTOR = '[role="row"]:visible, table tr:visible';
  * Never returns the row container: the row has no click handler, so clicking it
  * is a silent no-op.
  */
+/**
+ * The ORDERED client-name-link candidate list — the single source of truth for
+ * which elements count as a positively-identified, navigable client-name link.
+ * Both findClientNameLink() (production click target) and the read-only
+ * inspectClientNameResolution() diagnostic iterate THIS list, so the diagnostic
+ * can never drift from production selection.
+ *
+ * Each entry is { strategy, locator } where locator is already `.first()`.
+ * Order is significant: findClientNameLink returns the first with count > 0.
+ */
+function clientNameLinkCandidates(row, clientName) {
+    return [
+        // 1. A visible anchor in this row whose own subtree text is the client's
+        //    name. Tag-based, so CRC's href-less <a> still matches; hasText tests
+        //    the element's whole subtree, so a name split across child <span>s
+        //    INSIDE the real anchor still matches here.
+        { strategy: "a_visible_hasText", locator: row.locator("a:visible", { hasText: clientName }).first() },
+
+        // 2. Role-based, kept last: only matches if CRC does supply an href, and
+        //    is still bound to the client's name.
+        { strategy: "role_link_name", locator: row.getByRole("link", { name: clientName, exact: false }).first() },
+    ];
+}
+
 async function findClientNameLink(row, clientName) {
     // ONLY positively-identified CLIENT-NAME navigation links are valid click
     // targets. A production failure (CRC 74) showed that falling back to "any
@@ -85,22 +109,10 @@ async function findClientNameLink(row, clientName) {
     // element — an unrelated action/avatar anchor, or plain text with no click
     // handler — so the click succeeds but the page never leaves /app/clients.
     // Both are removed. We keep only candidates whose match is tied to THIS
-    // client's name:
-    const candidates = [
-        // 1. A visible anchor in this row whose own subtree text is the client's
-        //    name. Tag-based, so CRC's href-less <a> still matches; hasText tests
-        //    the element's whole subtree, so a name split across child <span>s
-        //    INSIDE the real anchor still matches here.
-        row.locator("a:visible", { hasText: clientName }).first(),
-
-        // 2. Role-based, kept last: only matches if CRC does supply an href, and
-        //    is still bound to the client's name.
-        row.getByRole("link", { name: clientName, exact: false }).first(),
-    ];
-
-    for (const candidate of candidates) {
-        if (await candidate.count()) {
-            return candidate;
+    // client's name (see clientNameLinkCandidates):
+    for (const { locator } of clientNameLinkCandidates(row, clientName)) {
+        if (await locator.count()) {
+            return locator;
         }
     }
 
@@ -472,4 +484,157 @@ export async function openClient(page, clientName, knownCrcClientId = null) {
         pageTitle: await page.title(),
         clientName: dashboardClientName,
     };
+}
+
+/**
+ * =========================================================================
+ * READ-ONLY DIAGNOSTIC — client-name link resolution inspector.
+ *
+ * Reports what findClientNameLink() WOULD resolve to for a filtered client row,
+ * WITHOUT clicking, navigating, or writing anything. It reuses this module's
+ * own getTableSearchInput(), ROW_SELECTOR, clientNameLinkCandidates(), and
+ * CLIENT_DASHBOARD_URL_PATTERN, so it mirrors production selection exactly with
+ * no duplicated logic.
+ *
+ * Value-free: returns only structural metadata (tag names, roles, booleans,
+ * counts, lengths, and hrefs) — never the client's name text, address, or any
+ * report content. The only page interaction is filling the list search box (a
+ * client-side filter), identical to what openClient already does; it performs
+ * NO click, NO client navigation, NO CRC write, NO Supabase write.
+ *
+ * Assumes the caller has already logged in and is on /app/clients.
+ * =========================================================================
+ *
+ * @param {import('playwright').Page} page
+ * @param {string} clientName  used only to fill the search box + hasText match
+ * @returns {Promise<object>} sanitized resolution metadata
+ */
+export async function inspectClientNameResolution(page, clientName) {
+    const report = {
+        pageUrlPath: safeUrlPath(page.url()),
+        rowMatched: false,
+        rowCount: 0,
+        rowVisibleTextLength: null,
+        candidates: [],
+        wouldResolveStrategy: null,
+        selected: null,
+        otherRowLinks: [],
+    };
+
+    // Filter the grid exactly as openClient does (search box fill only).
+    const searchInput = await getTableSearchInput(page);
+    await searchInput.click();
+    await searchInput.fill(clientName);
+
+    const row = page.locator(ROW_SELECTOR, { hasText: clientName }).first();
+    try {
+        await row.waitFor({ state: "visible", timeout: ROW_TIMEOUT });
+    } catch {
+        return report; // no matching visible row
+    }
+
+    report.rowMatched = true;
+    report.rowCount = await page.locator(ROW_SELECTOR, { hasText: clientName }).count();
+    // Length only — never the text value itself.
+    report.rowVisibleTextLength = ((await row.innerText().catch(() => "")) || "").length;
+
+    // Per-candidate resolution, using the SAME builder production uses.
+    const candidates = clientNameLinkCandidates(row, clientName);
+    let resolved = null;
+    for (const { strategy, locator } of candidates) {
+        const count = await locator.count().catch(() => 0);
+        const entry = { strategy, count, resolved: null };
+        if (count > 0) {
+            entry.resolved = await describeElementReadOnly(locator);
+            if (!resolved) {
+                resolved = { strategy, locator, describe: entry.resolved };
+                report.wouldResolveStrategy = strategy; // first match wins, mirrors findClientNameLink
+            }
+        }
+        report.candidates.push(entry);
+    }
+
+    if (resolved) {
+        const href = resolved.describe.href;
+        report.selected = {
+            strategy: resolved.strategy,
+            ...resolved.describe,
+            hrefClassification: classifyHref(href),
+        };
+    }
+
+    // Read-only survey of EVERY visible anchor in the row (no click): does any
+    // OTHER element clearly point to this row's /clients/<id>/dashboard? Reports
+    // only structural metadata + href, never the name text.
+    const anchorLocator = row.locator("a:visible");
+    const anchorCount = await anchorLocator.count().catch(() => 0);
+    for (let i = 0; i < anchorCount; i++) {
+        const a = anchorLocator.nth(i);
+        const desc = await describeElementReadOnly(a);
+        report.otherRowLinks.push({
+            tag: desc.tag,
+            role: desc.role,
+            hasHref: desc.hasHref,
+            href: desc.href,
+            visibleTextLength: desc.visibleTextLength,
+            pointsToADashboard: typeof desc.href === "string" && CLIENT_DASHBOARD_URL_PATTERN.test(desc.href),
+        });
+    }
+
+    return report;
+}
+
+/** Structural, value-free description of a single element (no click). */
+async function describeElementReadOnly(locator) {
+    return locator.evaluate((el) => {
+        const dataKeys = [];
+        for (const attr of el.attributes || []) {
+            if (attr.name.startsWith("data-")) dataKeys.push(attr.name);
+        }
+        const rawHref = el.getAttribute ? el.getAttribute("href") : null;
+        const onclickAttr = el.getAttribute ? el.getAttribute("onclick") : null;
+        const outer = (el.outerHTML || "");
+        return {
+            tag: (el.tagName || "").toLowerCase(),
+            role: el.getAttribute ? el.getAttribute("role") : null,
+            hasHref: rawHref != null && rawHref !== "",
+            href: rawHref,                                   // structural (URL), not consumer data
+            hasOnclick: onclickAttr != null || typeof el.onclick === "function",
+            target: el.getAttribute ? el.getAttribute("target") : null,
+            className: el.className || null,
+            dataAttributeKeys: dataKeys,                      // keys only, not values
+            isInsideAnchor: !!(el.closest && el.closest("a") && el.closest("a") !== el),
+            closestAnchorHasHref: !!(el.closest && el.closest("a") && el.closest("a").getAttribute("href")),
+            visibleTextLength: ((el.innerText || el.textContent || "").trim()).length, // length only
+            // Truncated, tag-only skeleton of outerHTML (attributes kept, but the
+            // element's text nodes are the client name so we cap length hard).
+            outerHtmlTruncated: outer.length > 300 ? outer.slice(0, 300) + "…" : outer,
+        };
+    }).catch(() => ({
+        tag: null, role: null, hasHref: false, href: null, hasOnclick: false, target: null,
+        className: null, dataAttributeKeys: [], isInsideAnchor: false, closestAnchorHasHref: false,
+        visibleTextLength: null, outerHtmlTruncated: null,
+    }));
+}
+
+/** Classify an href into a navigation category (no consumer data). */
+function classifyHref(href) {
+    if (href == null || href === "") return "empty_or_missing";
+    const h = String(href).trim();
+    if (/^javascript:/i.test(h)) return "javascript";
+    if (/^#/.test(h)) return "hash_only";
+    if (CLIENT_DASHBOARD_URL_PATTERN.test(h)) return "client_dashboard";
+    if (/\/clients\/\d+(?:[/?#]|$)/.test(h)) return "client_url_non_dashboard";
+    if (/\/(profile|admin|owner|account|settings|users?)\b/i.test(h)) return "profile_admin_owner";
+    return "other";
+}
+
+/** Host + path only from a URL (never query/hash which could carry data). */
+function safeUrlPath(url) {
+    try {
+        const u = new URL(url);
+        return `${u.host}${u.pathname}`;
+    } catch {
+        return null;
+    }
 }

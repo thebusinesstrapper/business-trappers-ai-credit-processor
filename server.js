@@ -24,6 +24,9 @@ import { startClientQueue, getClientQueueJob } from "./src/processClientQueue.js
 import { extractSkeletonNode, buildLiabilityMap, buildFieldMap, buildCollisionMap } from "./src/debugSkeleton.js"; // TEMPORARY — remove with M7
 import { probePublicRecordSchema } from "./src/reportSchemaProbe.js"; // TEMPORARY — public-record schema discovery
 import { readClientState } from "./src/clientMemory.js"; // read-only client_state lookup for debug schema route
+import { launchBrowser } from "./src/browserbase.js"; // read-only client-open probe: session
+import { loginToCRC } from "./src/crcLogin.js"; // read-only client-open probe: login
+import { inspectClientNameResolution } from "./src/openClient.js"; // read-only client-open probe: row inspector
 
 dotenv.config();
 
@@ -846,6 +849,111 @@ app.post("/debug/report-public-record-schema", async (req, res) => {
 });
 
 /**
+ * =========================================================================
+ * TEMPORARY — READ-ONLY CLIENT-OPEN NAVIGATION DIAGNOSTIC.
+ * DELETE once the CRC 74 client-navigation defect is understood/fixed.
+ *
+ * POST /debug/client-open-probe
+ *   header: x-debug-token: <DEBUG_TOKEN>
+ *   body:   { "crcClientId": "74" }
+ *
+ * WHY: openClient clicks a positively-identified client-name link but for CRC 74
+ * the page stays on /app/clients. This probe reports EXACTLY what
+ * findClientNameLink() would resolve to for that client's filtered row — tag,
+ * role, href, onclick, whether it is inside an anchor, and whether any other row
+ * link points to /clients/<id>/dashboard — WITHOUT clicking or navigating. It
+ * inspects CRC 74 and ONE ordinary comparison client for contrast.
+ *
+ * READ ONLY. Opens a CRC session and logs in, fills the list SEARCH box (a
+ * client-side filter), and inspects the row via inspectClientNameResolution()
+ * (openClient.js). It performs NO click, NO client navigation, NO report order,
+ * NO CreditHero access, NO Supabase write, NO CRC status change, NO message, NO
+ * round change. Only client_state READS (readClientState) resolve names.
+ *
+ * VALUE-FREE beyond display name: the inspector returns structural metadata only
+ * (tags/roles/booleans/counts/lengths/hrefs), never report content.
+ *
+ * FAILS CLOSED: unknown crc_client_id -> 404; blank display name -> 422. With no
+ * DEBUG_TOKEN configured the route 404s (debugGateOpen).
+ * =========================================================================
+ */
+app.post("/debug/client-open-probe", async (req, res) => {
+
+    if (!debugGateOpen(req, res, "/debug/client-open-probe")) return;
+
+    const requestedId = (req.body?.crcClientId ?? "").toString().trim();
+
+    if (!requestedId) {
+        return res.status(400).json({ ok: false, error: 'Supply a "crcClientId", e.g. { "crcClientId": "74" }.' });
+    }
+
+    // The single ordinary comparison client (CRC id). Overridable via body for
+    // flexibility, defaulting to a known-normal client.
+    const comparisonId = (req.body?.comparisonCrcClientId ?? "5").toString().trim();
+
+    // READ-ONLY name resolution from client_state (no writes).
+    const resolveName = async (id) => {
+        const state = await readClientState(id);
+        if (!state) return { ok: false, status: 404, error: "No client_state row for that crc_client_id." };
+        const name = (state.client_display_name ?? "").trim();
+        if (!name) return { ok: false, status: 422, error: "client_display_name is blank for that client." };
+        return { ok: true, name };
+    };
+
+    let browser;
+    try {
+
+        const target = await resolveName(requestedId);
+        if (!target.ok) {
+            return res.status(target.status).json({ ok: false, crcClientId: requestedId, error: target.error });
+        }
+
+        const comparison = await resolveName(comparisonId);
+        // A missing comparison client is non-fatal — still probe the target.
+        const comparisonName = comparison.ok ? comparison.name : null;
+
+        // ---- Open ONE session, log in, inspect both rows read-only ----------
+        const session = await launchBrowser();
+        browser = session.browser;
+        const page = session.page;
+
+        await loginToCRC(page); // lands on /app/clients
+
+        const targetProbe = await inspectClientNameResolution(page, target.name);
+
+        let comparisonProbe = null;
+        if (comparisonName) {
+            // Re-inspect on the same page; inspectClientNameResolution re-fills the
+            // search box, so the grid re-filters to the comparison client.
+            comparisonProbe = await inspectClientNameResolution(page, comparisonName);
+        }
+
+        return res.json({
+            ok: true,
+            target: { crcClientId: requestedId, probe: targetProbe },
+            comparison: comparisonName
+                ? { crcClientId: comparisonId, probe: comparisonProbe }
+                : { crcClientId: comparisonId, error: comparison.error ?? "comparison client not resolved" },
+        });
+
+    } catch (error) {
+
+        console.error(error);
+
+        return res.status(500).json({ ok: false, error: error.message });
+
+    } finally {
+
+        // Always tear the session down — this probe owns it.
+        if (browser) {
+            try { await browser.close(); } catch { /* ignore teardown errors */ }
+        }
+
+    }
+
+});
+
+/**
  * GET /dashboard-data — READ-ONLY export of client_state for the Google Sheets
  * Executive Operations Dashboard.
  *
@@ -931,6 +1039,7 @@ app.listen(PORT, () => {
         "POST /debug/field-map",
         "POST /debug/collision-map",
         "POST /debug/report-public-record-schema",
+        "POST /debug/client-open-probe",
         "GET /debug/routes",
     ];
 
