@@ -180,11 +180,31 @@ async function collectFilteredRows(page, term) {
         const rowEl = rowLocator.nth(i);
         if (!(await rowEl.isVisible().catch(() => false))) continue;
 
-        // Verify on the clickable NAME element's own text, not the whole row
-        // (which also carries status badges, icons, etc.). If the name element
-        // cannot be read, the row keeps a null name and simply will not satisfy
-        // the exact-name checks in selectClientRow — failing closed, not open.
-        const nameLink = await findClientNameLink(rowEl, term);
+        // POSITIVE DASHBOARD-LINK IDENTIFICATION. CRC renders the client name in
+        // MULTIPLE places per row — the real client-name hyperlink
+        // (href="/app/clients/<id>/dashboard") AND, for other clients, an
+        // Assigned Team column that shows this person's name with an onclick and
+        // NO href. Matching "first anchor containing the name" can select the
+        // Assigned-Team anchor of an unrelated client's row, which does not
+        // navigate. So we identify the row by its DASHBOARD link specifically and
+        // read the CRC id straight from that href — the authoritative signal that
+        // selectClientRow can match against knownCrcClientId.
+        const dashboardLink = rowEl.locator('a[href*="/clients/"][href*="/dashboard"]:visible').first();
+        let hrefId = null;
+        let clickTarget = null;
+        if (await dashboardLink.count()) {
+            const href = (await dashboardLink.getAttribute("href").catch(() => null)) || "";
+            const m = href.match(/\/clients\/(\d+)\/dashboard/);
+            if (m) {
+                hrefId = m[1];
+                clickTarget = dashboardLink; // the element that actually navigates
+            }
+        }
+
+        // Fallback name element (used only when the row exposes no dashboard link
+        // — e.g. an older DOM). Verify on the clickable NAME element's own text,
+        // not the whole row (which also carries status badges, icons, etc.).
+        const nameLink = clickTarget ?? (await findClientNameLink(rowEl, term));
         let displayedName = null;
         if (nameLink) {
             displayedName = (await nameLink.textContent().catch(() => "")) || "";
@@ -193,7 +213,7 @@ async function collectFilteredRows(page, term) {
 
         rows.push({
             clientName: displayedName,
-            crcClientId: null,
+            crcClientId: hrefId, // from the dashboard href — enables id-authoritative selection
             index: locators.length,
         });
         locators.push(nameLink);
@@ -358,12 +378,62 @@ export async function openClient(page, clientName, knownCrcClientId = null) {
 
     let clientNameLink = null;
     let usedFallbackSearch = false;
+    let usedKnownIdSelection = false;
 
-    // 1. Full-name search — unchanged behavior for ordinary clients.
+    // 1. Full-name search.
     await searchInput.click();
     await searchInput.fill(searchTerms[0]);
     console.log(`Waiting for the table to filter on "${searchTerms[0]}"...`);
-    clientNameLink = await waitForFilteredRow(page, searchTerms[0]);
+
+    // 1a. KNOWN-ID PATH (authoritative). When the caller already knows the CRC id
+    //     (e.g. an existing client_state row), the full-name search can return
+    //     MANY rows because the name also appears in other clients' Assigned Team
+    //     column. "First visible anchor containing the name" then selects a
+    //     non-navigating Assigned-Team anchor of the wrong row. So when a known id
+    //     is supplied we reuse the SAME id-verified selection the suffix fallback
+    //     uses (collectFilteredRows + selectClientRow) against the full-name
+    //     results, selecting the row whose dashboard href is /clients/<knownId>/…
+    //     This is not a second matching system — it is the existing one, applied
+    //     to the primary search. Ordinary clients (no known id) keep the original
+    //     first-match behavior below unchanged.
+    const knownIdProvided =
+        knownCrcClientId != null && /^\d+$/.test(String(knownCrcClientId).trim());
+
+    if (knownIdProvided) {
+        const { rows, locators } = await collectFilteredRows(page, searchTerms[0]);
+        const selection = selectClientRow(rows, {
+            fullName: clientName,
+            knownCrcClientId,
+        });
+
+        if (selection.matched) {
+            clientNameLink = locators[selection.row.index] ?? null;
+            usedKnownIdSelection = true;
+        } else if (selection.ambiguous) {
+            console.log(
+                `Full-name search for "${searchTerms[0]}" returned ${selection.candidates} plausible ` +
+                `clients and none uniquely matched CRC id ${knownCrcClientId}. ` +
+                `Failing closed to manual review (ambiguous_client_match).`
+            );
+            await captureFailureContext(page, "ambiguous-client-match");
+            return {
+                clientFound: false,
+                clientOpened: false,
+                blockedReason: "ambiguous_client_match",
+                ambiguous: true,
+                candidates: selection.candidates,
+            };
+        }
+        // selection.matched === false && !ambiguous -> fall through to the normal
+        // first-match path below (e.g. the known id was not present in this
+        // filtered set), preserving existing behavior rather than failing.
+    }
+
+    // 1b. Ordinary first-match path — unchanged behavior for clients with no
+    //     known id (and the no-unique-match fall-through above).
+    if (!clientNameLink) {
+        clientNameLink = await waitForFilteredRow(page, searchTerms[0]);
+    }
 
     // 2. Suffix-free fallback — only when the full search missed AND a distinct
     //    base name exists. Verify the returned rows and fail closed if more than
@@ -424,7 +494,7 @@ export async function openClient(page, clientName, knownCrcClientId = null) {
     }
 
     console.log(
-        `Match found${usedFallbackSearch ? " (via suffix-free fallback)" : ""}. ` +
+        `Match found${usedKnownIdSelection ? " (via known-CRC-id selection)" : usedFallbackSearch ? " (via suffix-free fallback)" : ""}. ` +
         `Opening client: "${clientName}"`
     );
 

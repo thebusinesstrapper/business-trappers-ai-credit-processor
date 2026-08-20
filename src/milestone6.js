@@ -156,7 +156,12 @@ async function captureAndNormalize(data = {}, identityState = {}) {
         // ---- 1. IDENTITY (frozen, authoritative) ---------------------------
         await loginToCRC(page);
 
-        const client = await openClient(page, clientName);
+        // Pass the known CRC id (from the job/client_state) so openClient can use
+        // it as the authoritative row discriminator: the full-name search can
+        // return many rows when the name also appears in other clients' Assigned
+        // Team column, and only the id positively identifies the right dashboard
+        // link. Absent/blank id -> openClient keeps its ordinary first-match path.
+        const client = await openClient(page, clientName, data.crcClientId ?? null);
 
         if (!client.clientFound || !client.clientOpened) {
             return errorResponse("CLIENT_NOT_OPENED", `Could not open client "${clientName}".`, { milestone: "M6_CAPTURE" });
