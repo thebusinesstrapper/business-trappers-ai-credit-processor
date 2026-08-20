@@ -27,6 +27,12 @@ import { baseSearchName } from "./clientSearchName.js";
 const EXACT_SUCCESS_TEXT = "Your message was sent";
 const COMPOSE_RENDER_TIMEOUT_MS = 15000;
 const COMPOSE_POLL_MS = 300;
+// Bounded click->confirm retry for opening the composer. A lost/early MUI click
+// (or a click that resolved to a non-actionable node) is retried by re-querying
+// the control. Total wait stays capped by COMPOSE_RENDER_TIMEOUT_MS across all
+// attempts; each attempt gets a slice to let the composer render before retrying.
+const MAX_COMPOSE_OPEN_ATTEMPTS = 3;
+const COMPOSE_OPEN_ATTEMPT_MS = 5000;
 const FIELD_TIMEOUT = 10000;
 
 /** Approved subject lines. */
@@ -81,18 +87,24 @@ async function openComposeForm(page, crcClientId) {
         return { ok: false, reason: "client_dashboard_identity_not_confirmed", dashboardIdentityConfirmed: false };
     }
 
-    const secureBtn = page
-        .getByRole("button", { name: "Send Secure Message", exact: true })
-        .or(page.getByText("Send Secure Message", { exact: true }))
-        .first();
+    // Resolve the "Send Secure Message" control, PREFERRING the positively
+    // actionable role button. The bare-text fallback is used ONLY when no role
+    // button exists, so a non-actionable text label is never clicked when a real
+    // button is present. Re-resolved on each attempt (below).
+    const resolveSecureBtn = () => {
+        const roleBtn = page.getByRole("button", { name: "Send Secure Message", exact: true });
+        // .or() keeps the text fallback available for DOMs with no role button,
+        // but the role button is listed first so it wins whenever it exists.
+        return roleBtn.or(page.getByText("Send Secure Message", { exact: true })).first();
+    };
 
-    const found = (await secureBtn.count()) > 0 && await secureBtn.isVisible().catch(() => false);
+    const found =
+        (await resolveSecureBtn().count()) > 0 &&
+        await resolveSecureBtn().isVisible().catch(() => false);
 
     if (!found) {
         return { ok: false, reason: "send_secure_message_button_not_found" };
     }
-
-    await secureBtn.click({ timeout: FIELD_TIMEOUT }).catch(() => {});
 
     const readState = async () => {
         // NOT .first(). MUI can render a hidden input sharing this name ahead of
@@ -133,12 +145,35 @@ async function openComposeForm(page, crcClientId) {
         };
     };
 
-    const deadline = Date.now() + COMPOSE_RENDER_TIMEOUT_MS;
+    // BOUNDED CLICK -> CONFIRM RETRY. A single click can be lost when CRC's MUI
+    // dashboard has not yet wired its handlers (goto only waited for
+    // domcontentloaded), or when the click resolved to a non-actionable node — in
+    // both cases the composer never renders and every field reads false. Rather
+    // than click once and poll blindly, we click, poll for the composer within a
+    // slice of the overall render budget, and if it did not appear, RE-QUERY the
+    // control and click again. No force:true — we only ever click the resolved
+    // (button-preferred) control. The total wait stays bounded by
+    // COMPOSE_RENDER_TIMEOUT_MS across all attempts. The final composer-field
+    // confirmation logic (readState) is unchanged.
+    const overallDeadline = Date.now() + COMPOSE_RENDER_TIMEOUT_MS;
     let state = await readState();
 
-    while (!state.ok && Date.now() < deadline) {
-        await page.waitForTimeout(COMPOSE_POLL_MS);
+    for (let attempt = 0; attempt < MAX_COMPOSE_OPEN_ATTEMPTS && !state.ok && Date.now() < overallDeadline; attempt += 1) {
+        // Re-resolve the control each attempt so a re-render between tries does
+        // not leave us clicking a stale handle.
+        await resolveSecureBtn().click({ timeout: FIELD_TIMEOUT }).catch(() => {});
+
+        // Poll for the composer within this attempt's slice, but never past the
+        // overall deadline.
+        const attemptDeadline = Math.min(
+            Date.now() + COMPOSE_OPEN_ATTEMPT_MS,
+            overallDeadline
+        );
         state = await readState();
+        while (!state.ok && Date.now() < attemptDeadline) {
+            await page.waitForTimeout(COMPOSE_POLL_MS);
+            state = await readState();
+        }
     }
 
     if (!state.ok) {
