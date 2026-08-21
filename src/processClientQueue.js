@@ -1594,6 +1594,11 @@ async function runJob(job) {
                         recordMonitoringReactivated,
                         recordCreditHeroState,
                         recordNextEligibleDate,
+                        // Enables the sweep to route a reactivated historical
+                        // client with no recoverable last_dispute_date to Manual
+                        // Review (HISTORICAL_DISPUTE_DATE_UNKNOWN) instead of
+                        // fabricating a next_eligible_date. Already imported above.
+                        recordManualReview,
                     },
                     setCrcStatus: (client, targetStatus) =>
                         statusOnlyUpdate({

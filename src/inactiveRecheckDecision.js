@@ -42,6 +42,12 @@ export const RECHECK_ACTION = Object.freeze({
     // existing safeguard — the normal pipeline still decides what, if anything, to
     // dispute).
     REACTIVATED_ELIGIBLE: "REACTIVATED_ELIGIBLE",
+    // Access is positively active, but the client has NO stored last_dispute_date
+    // and we have no authoritative source to recover it. We CANNOT compute the
+    // dispute waiting clock, and must NOT fabricate one from today (that would
+    // silently impose a fresh 31-day wait from reactivation). Fail closed to
+    // Manual Review; write no next_eligible_date; generate nothing.
+    HISTORICAL_DISPUTE_DATE_UNKNOWN: "HISTORICAL_DISPUTE_DATE_UNKNOWN",
 });
 
 /** ISO date (YYYY-MM-DD) N days after an ISO date string. */
@@ -114,27 +120,46 @@ export function decideInactiveRecheck({ storedState = null, observedCrcStatus = 
     // ---- POSITIVELY ACTIVE -> reconcile, then decide round timing ----------
     // The waiting period is derived from the LAST dispute date, not from any
     // stored next_eligible_date (which may be blank on a client that was trapped
-    // inactive before one was ever set). If we cannot read a last_dispute_date,
-    // fail SAFE: treat as still waiting (never opens a dispute round off a missing
-    // date), using a derived date one full cycle out from today.
+    // inactive before one was ever set).
+    //
+    // If there is NO readable last_dispute_date we must NOT invent one. A
+    // historical client (ai_initialized=false) may have had disputes delivered
+    // by the prior process months ago; deriving today + cycle would silently
+    // impose a brand-new 31-day wait from reactivation and reset the real clock.
+    // We cannot recover the true date here (no authoritative source), so we fail
+    // closed to Manual Review with HISTORICAL_DISPUTE_DATE_UNKNOWN and write no
+    // next_eligible_date. CreditHero access stays active; no round advances; no
+    // disputes are generated. Once the real last_dispute_date is supplied (a
+    // backfill), the client flows through the normal REACTIVATED_* branches below.
     const lastDispute = validIsoDate(storedState?.last_dispute_date) ? storedState.last_dispute_date : null;
-    const derivedEligible = lastDispute
-        ? isoDatePlusDays(lastDispute, cycleDays)
-        : isoDatePlusDays(today, cycleDays);
+
+    if (!lastDispute) {
+        return {
+            action: RECHECK_ACTION.HISTORICAL_DISPUTE_DATE_UNKNOWN,
+            reason:
+                `Monitoring is active again, but no prior dispute delivery date is stored ` +
+                `(last_dispute_date is missing) and it cannot be established from an authoritative ` +
+                `source. Eligibility cannot be calculated safely without inventing a waiting period, ` +
+                `so the client is routed to Manual Review. CreditHero access remains active; no ` +
+                `next_eligible_date is written, no round advances, and no disputes are generated.`,
+            requiresManualReview: true,
+            manualReviewReason: "HISTORICAL_DISPUTE_DATE_UNKNOWN",
+            // No nextEligibleDate: we deliberately do not fabricate today + cycle.
+        };
+    }
+
+    const derivedEligible = isoDatePlusDays(lastDispute, cycleDays);
 
     const withinWaitingPeriod =
-        !lastDispute /* missing date -> fail safe to waiting */ ||
-        (typeof derivedEligible === "string" && derivedEligible > today);
+        typeof derivedEligible === "string" && derivedEligible > today;
 
     if (withinWaitingPeriod) {
         return {
             action: RECHECK_ACTION.REACTIVATED_WAITING,
-            reason: lastDispute
-                ? `Monitoring is active again, but the last dispute (${lastDispute}) + ${cycleDays} days ` +
-                  `= ${derivedEligible}, which is after today (${today}). Route to Waiting For Bureau; ` +
-                  `generate no disputes.`
-                : `Monitoring is active again, but no last_dispute_date is stored. Failing safe to ` +
-                  `Waiting For Bureau with next_eligible_date ${derivedEligible}; generate no disputes.`,
+            reason:
+                `Monitoring is active again, but the last dispute (${lastDispute}) + ${cycleDays} days ` +
+                `= ${derivedEligible}, which is after today (${today}). Route to Waiting For Bureau; ` +
+                `generate no disputes.`,
             nextEligibleDate: derivedEligible,
             targetCrcStatus: "Waiting For Bureau",
         };

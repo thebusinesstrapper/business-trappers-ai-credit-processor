@@ -90,6 +90,7 @@ export function buildInactiveSet(supabaseInactive = [], crcObservations = []) {
  * @param {(id, nowIso) => Promise<object>} deps.writers.recordMonitoringReactivated
  * @param {(id, fields) => Promise<object>} deps.writers.recordCreditHeroState
  * @param {(id, isoDate) => Promise<object>} deps.writers.recordNextEligibleDate
+ * @param {(id, fields) => Promise<object>} [deps.writers.recordManualReview]
  * @param {(id, isoDate) => Promise<object>} [deps.writers.recordLastReportDate]
  * @param {(client, targetStatus) => Promise<object>} deps.setCrcStatus  CRC status writer
  * @param {(client) => Promise<object>} [deps.processEligible]  normal processing hand-off
@@ -123,6 +124,7 @@ export async function runInactiveRecheckSweep(deps) {
         stillInactive: 0,
         reactivatedWaiting: 0,
         reactivatedEligible: 0,
+        historicalDateUnknown: 0,
         errors: 0,
         results: [],
     };
@@ -209,6 +211,25 @@ export async function runInactiveRecheckSweep(deps) {
             if (live?.reportDate && writers.recordLastReportDate) {
                 await writers.recordLastReportDate(client.crcClientId, live.reportDate).catch(() => {});
                 entry.reportDate = live.reportDate;
+            }
+
+            // ---- HISTORICAL_DISPUTE_DATE_UNKNOWN: fail closed to Manual Review
+            // Monitoring is active again (recordMonitoringReactivated above already
+            // reconciled the client to active), but we cannot establish the prior
+            // dispute delivery date, so eligibility cannot be computed. Route to
+            // Manual Review. Deliberately write NO next_eligible_date (never
+            // fabricate today + cycle) and advance no round / generate nothing.
+            if (decision.action === RECHECK_ACTION.HISTORICAL_DISPUTE_DATE_UNKNOWN) {
+                if (typeof writers.recordManualReview === "function") {
+                    await writers.recordManualReview(client.crcClientId, {
+                        stage: "reactivation_eligibility",
+                        reason: decision.manualReviewReason ?? "HISTORICAL_DISPUTE_DATE_UNKNOWN",
+                    }).catch(() => {});
+                }
+                entry.manualReview = decision.manualReviewReason ?? "HISTORICAL_DISPUTE_DATE_UNKNOWN";
+                summary.historicalDateUnknown += 1;
+                summary.results.push(entry);
+                continue;
             }
 
             if (decision.action === RECHECK_ACTION.REACTIVATED_WAITING) {
