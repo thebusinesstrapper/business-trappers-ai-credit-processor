@@ -155,13 +155,76 @@ async function openComposeForm(page, crcClientId) {
     // (button-preferred) control. The total wait stays bounded by
     // COMPOSE_RENDER_TIMEOUT_MS across all attempts. The final composer-field
     // confirmation logic (readState) is unchanged.
+
+    // ---- READ-ONLY diagnostics ------------------------------------------------
+    // When the composer never opens (Patience CRC 175 still failed all-false AFTER
+    // the retry fix), we need to see WHAT was clicked and what the click did.
+    // These helpers only READ the page; they never change the click, the retry
+    // count, the timing, or the fail-closed behavior. The captured attempts ride
+    // out only on the compose_form_not_confirmed failure return below.
+
+    // Compact, value-free-ish description of the element resolveSecureBtn resolves
+    // to (structural attributes + the button's own visible label, which is the
+    // static UI string "Send Secure Message", not consumer data).
+    const describeSelectedControl = async () => {
+        const loc = resolveSecureBtn();
+        if (!(await loc.count().catch(() => 0))) return null;
+        return loc.evaluate((el) => {
+            const outer = el.outerHTML || "";
+            return {
+                tag: (el.tagName || "").toLowerCase(),
+                role: el.getAttribute ? el.getAttribute("role") : null,
+                className: el.className || null,
+                href: el.getAttribute ? el.getAttribute("href") : null,
+                hasOnclick: (el.getAttribute && el.getAttribute("onclick") != null) || typeof el.onclick === "function",
+                disabled: !!(el.disabled || (el.getAttribute && el.getAttribute("aria-disabled") === "true")),
+                visibleText: ((el.innerText || el.textContent || "").trim()).slice(0, 60),
+                outerHtmlTruncated: outer.length > 300 ? outer.slice(0, 300) + "…" : outer,
+            };
+        }).catch(() => null);
+    };
+
+    // Is any dialog/modal visible? (open signal a landed click should produce.)
+    const dialogVisible = async () =>
+        page.getByRole("dialog").first().isVisible().catch(() => false) ||
+        page.locator('.MuiDialog-root, .MuiModal-root, [role="dialog"]').first().isVisible().catch(() => false);
+
+    // A cheap DOM-change signal: how many visible inputs/textareas/dialogs exist.
+    // A meaningful jump after the click indicates the composer rendered.
+    const domSignal = async () => {
+        const inputs = await page.locator('input, textarea, [role="dialog"]').count().catch(() => 0);
+        return inputs;
+    };
+
+    const roleBtnCount = async () =>
+        page.getByRole("button", { name: "Send Secure Message", exact: true }).count().catch(() => 0);
+    const textMatchCount = async () =>
+        page.getByText("Send Secure Message", { exact: true }).count().catch(() => 0);
+
+    const safePath = (u) => { try { const x = new URL(u); return `${x.host}${x.pathname}`; } catch { return null; } };
+
+    const attempts = [];
+
     const overallDeadline = Date.now() + COMPOSE_RENDER_TIMEOUT_MS;
     let state = await readState();
 
     for (let attempt = 0; attempt < MAX_COMPOSE_OPEN_ATTEMPTS && !state.ok && Date.now() < overallDeadline; attempt += 1) {
+        // --- READ-ONLY pre-click snapshot (does not affect the click) ---
+        const preUrl = safePath(page.url());
+        const preRoleCount = await roleBtnCount();
+        const preTextCount = await textMatchCount();
+        const selected = await describeSelectedControl();
+        const preDom = await domSignal();
+
         // Re-resolve the control each attempt so a re-render between tries does
         // not leave us clicking a stale handle.
-        await resolveSecureBtn().click({ timeout: FIELD_TIMEOUT }).catch(() => {});
+        let clickError = null;
+        await resolveSecureBtn().click({ timeout: FIELD_TIMEOUT }).catch((e) => { clickError = (e && e.message) ? e.message : String(e); });
+
+        // --- READ-ONLY post-click snapshot ---
+        const postUrl = safePath(page.url());
+        const modalVisible = await dialogVisible();
+        const postDom = await domSignal();
 
         // Poll for the composer within this attempt's slice, but never past the
         // overall deadline.
@@ -174,10 +237,28 @@ async function openComposeForm(page, crcClientId) {
             await page.waitForTimeout(COMPOSE_POLL_MS);
             state = await readState();
         }
+
+        attempts.push({
+            attempt: attempt + 1,
+            preUrl,
+            postUrl,
+            urlChanged: preUrl !== postUrl,
+            roleButtonMatches: preRoleCount,
+            exactTextMatches: preTextCount,
+            selected,                                   // tag/role/class/href/onclick/disabled/text/outerHTML
+            clickThrew: clickError != null,
+            clickError: clickError ? String(clickError).slice(0, 200) : null,
+            modalVisibleAfterClick: modalVisible,
+            domChanged: postDom !== preDom,             // meaningful DOM delta after click
+            fields: {
+                hasClient: state.hasClient, hasSubject: state.hasSubject, hasBody: state.hasBody,
+                hasSubmit: state.hasSubmit, replyVisible: state.replyVisible,
+            },
+        });
     }
 
     if (!state.ok) {
-        return { ok: false, reason: "compose_form_not_confirmed", state };
+        return { ok: false, reason: "compose_form_not_confirmed", state, attempts };
     }
 
     return { ok: true, dashboardIdentityConfirmed: true };
@@ -486,6 +567,9 @@ export async function sendClientNotice(page, opts = {}) {
         // Observability only — it does not affect any selector, the confirmation
         // logic, or send behavior.
         composeState: null,
+        // Per-attempt click diagnostics (URL/selected element/click result/modal/
+        // DOM-change/fields), populated ONLY on an open_compose failure. Read-only.
+        composeAttempts: null,
         recipientVerified: false,
         messageSubmitted: false,
         messageSuccessConfirmed: false,
@@ -515,14 +599,25 @@ export async function sendClientNotice(page, opts = {}) {
         // read-only diagnostic detail; the selectors, the confirmation gate, and
         // the send behavior are unchanged.
         report.composeState = opened.state ?? null;
+        report.composeAttempts = opened.attempts ?? null;
         const stateSummary = opened.state
             ? " Composer field state: " +
               `hasClient=${opened.state.hasClient}, hasSubject=${opened.state.hasSubject}, ` +
               `hasBody=${opened.state.hasBody}, hasSubmit=${opened.state.hasSubmit}, ` +
               `replyVisible=${opened.state.replyVisible}.`
             : "";
+        // Compact per-attempt trace so the persisted error shows what was clicked
+        // and what the click did (selected tag, click threw?, url change, modal).
+        const attemptsSummary = Array.isArray(opened.attempts) && opened.attempts.length
+            ? " Attempts: " + opened.attempts.map((a) =>
+                `#${a.attempt}[sel=${a.selected ? a.selected.tag : "none"},` +
+                `roleN=${a.roleButtonMatches},textN=${a.exactTextMatches},` +
+                `threw=${a.clickThrew},urlChg=${a.urlChanged},modal=${a.modalVisibleAfterClick},` +
+                `domChg=${a.domChanged}]`
+              ).join(" ") + "."
+            : "";
         report.failureReason =
-            `Could not open the secure-message composer (${opened.reason}).${stateSummary}`;
+            `Could not open the secure-message composer (${opened.reason}).${stateSummary}${attemptsSummary}`;
         return report;
     }
 
