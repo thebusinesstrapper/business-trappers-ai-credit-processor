@@ -886,6 +886,59 @@ export function decideDailyPreflight(state, todayIso) {
 
 
 /**
+ * GATE A — dispute timing, derived directly from last_dispute_date.
+ *
+ * The permanent dispute-eligibility rule has two INDEPENDENT gates:
+ *   Gate A (this): today >= last_dispute_date + CYCLE_DAYS
+ *   Gate B (elsewhere): the report selector positively confirms an appropriate
+ *                       report is available.
+ * They do not necessarily coincide, and neither may reset the other. Gate A must
+ * be computed from the ACTUAL last dispute date, never inferred from whatever is
+ * parked in next_eligible_date (which other paths could overwrite with a report
+ * date). This keeps report availability from ever shortening the dispute clock.
+ *
+ * A true first-round / new client with no last_dispute_date has no prior dispute
+ * to wait behind, so Gate A is OPEN. An unreadable date is treated as open here
+ * as well — the report selector (Gate B) and duplicate-delivery protection still
+ * gate delivery, and a malformed stored date must not permanently trap a client;
+ * round advancement only ever writes a valid YYYY-MM-DD.
+ *
+ * @param {object} state     client_state row (reads last_dispute_date only)
+ * @param {string} todayIso  YYYY-MM-DD
+ * @returns {{ elapsed: boolean, lastDisputeDate: (string|null), thresholdDate: (string|null), reason: string }}
+ */
+export function isDisputeTimingElapsed(state, todayIso) {
+    const raw = state?.last_dispute_date ?? null;
+    const valid = typeof raw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw);
+
+    if (!valid) {
+        // No prior confirmed dispute (or unreadable): nothing to wait behind.
+        return {
+            elapsed: true,
+            lastDisputeDate: null,
+            thresholdDate: null,
+            reason: raw
+                ? `last_dispute_date "${raw}" is unreadable; Gate A treated as open (report selector still gates delivery).`
+                : "No last_dispute_date (first round / new client); Gate A is open.",
+        };
+    }
+
+    const threshold = isoDatePlusDays(CYCLE_DAYS, new Date(`${raw}T00:00:00.000Z`));
+    const elapsed = typeof todayIso === "string" && todayIso >= threshold;
+
+    return {
+        elapsed,
+        lastDisputeDate: raw,
+        thresholdDate: threshold,
+        reason: elapsed
+            ? `Dispute timing elapsed: today ${todayIso} >= ${raw} + ${CYCLE_DAYS} days (${threshold}).`
+            : `Dispute timing NOT elapsed: today ${todayIso} < ${raw} + ${CYCLE_DAYS} days (${threshold}). ` +
+              `Do not process even if a newer report exists.`,
+    };
+}
+
+
+/**
  * ===========================================================================
  * MANUAL REVIEW WRITERS.
  *

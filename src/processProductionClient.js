@@ -14,7 +14,7 @@ import { statusOnlyUpdate } from "./statusOnlyUpdate.js";
 import {
     recordCreditHeroState, readClientState, decideDailyPreflight, PREFLIGHT,
     advanceRoundAfterDelivery, markProcessComplete, recordNextEligibleDate,
-    FINAL_ROUND,
+    FINAL_ROUND, isDisputeTimingElapsed,
 } from "./clientMemory.js";
 import { runMilestone8 } from "./milestone8.js";
 
@@ -156,14 +156,15 @@ async function routeToWaitingForBureau(clientName, crcClientId, nowIso, nextFree
             memoryWritten = write?.ok === true;
         }
 
-        // CLOSE THE LOOP FOR TOMORROW. When CreditHero stated the date the next
-        // free report becomes available, store it so the daily preflight can
-        // short-circuit until then instead of opening a session every morning.
-        // recordNextEligibleDate rejects anything that is not a real YYYY-MM-DD,
-        // so a missing or unreadable date never overwrites a known one.
-        if (nextFreeReportAt) {
-            await recordNextEligibleDate(String(crcClientId), nextFreeReportAt).catch(() => {});
-        }
+        // GATE SEPARATION. We deliberately DO NOT write nextFreeReportAt into
+        // next_eligible_date. That column represents Gate A (dispute timing =
+        // last_dispute_date + CYCLE_DAYS) ONLY. The free-report availability date
+        // is Gate B, and writing it here would let report availability shorten or
+        // move the dispute clock (a run that sees a free report available on 8/20
+        // would let a client whose Gate A threshold is 9/10 proceed early). Gate B
+        // is re-evaluated by the report selector on each subsequent nightly run
+        // instead. While waiting for the report, the client is simply re-checked
+        // nightly; no fabricated eligibility date is stored.
     }
 
     return { status, memoryWritten };
@@ -782,6 +783,36 @@ export async function runProductionClient(data = {}) {
     // state via the existing M8 path below (a withheld-only result still has
     // zero letters, so M8 blocks it as m7_letters_missing -> manual review,
     // which is the correct blocked state for "items exist but were withheld").
+
+    // GATE A — DISPUTE TIMING, enforced independently of Gate B (report avail).
+    // Gate B is satisfied here (ELIGIBLE_EXISTING_REPORT). Before delivering we
+    // ALSO require Gate A: today >= last_dispute_date + CYCLE_DAYS, derived from
+    // the actual last dispute date rather than from next_eligible_date (which the
+    // preflight already checked but which other paths must never let a report date
+    // shorten). This guarantees a newer report can never move the dispute clock
+    // forward: if the 31 days have not elapsed we stop BEFORE runMilestone8 — no
+    // delivery lock, no round advance, no letters — and re-check on a later run.
+    // A first-round client with no last_dispute_date has Gate A open. Reactivation
+    // never alters last_dispute_date, so it cannot alter this clock.
+    const gateAState = await readClientState(String(crcClientId)).catch(() => null);
+    const gateA = isDisputeTimingElapsed(gateAState, new Date().toISOString().slice(0, 10));
+
+    if (!gateA.elapsed) {
+        return {
+            ...base,
+            ok: false,
+            stage: "waiting_for_dispute_timing",
+            blockedReason: "waiting_for_dispute_timing",
+            classification: successCapture?.classification ?? null,
+            eligibilityHint,
+            lastDisputeDate: gateA.lastDisputeDate,
+            disputeThresholdDate: gateA.thresholdDate,
+            lastReportDate: successCapture?.lastReportDate ?? null,
+            crcClientId,
+            m7,
+            m8: null,
+        };
+    }
 
     const m8 = await runMilestone8({
         clientName,
