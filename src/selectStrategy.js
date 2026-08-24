@@ -354,6 +354,11 @@ function evaluateEscalation(history, evidenceClass) {
  *        escalation asserts bureau misconduct we cannot evidence.
  */
 export async function selectStrategy(decisions, context = {}) {
+    // Authoritative current_round floor from stored client_state, used to prevent
+    // round mismatch when history is empty. Computed nextRound = max(priorRounds.length+1, floor).
+    const validCurrentRoundFloor = Number.isInteger(context.currentRoundFloor) && context.currentRoundFloor > 0
+        ? context.currentRoundFloor
+        : null;
 
     const { itemHistory = new Map() } = context;
 
@@ -414,7 +419,9 @@ export async function selectStrategy(decisions, context = {}) {
 
         const history = historyFor(decision.stableItemKey);
         const priorRounds = history.rounds ?? [];
-        const nextRound = priorRounds.length + 1;
+        const nextRound = validCurrentRoundFloor !== null
+            ? Math.max(priorRounds.length + 1, validCurrentRoundFloor)
+            : priorRounds.length + 1;
 
         // ---- Round ceiling --------------------------------------------------
         if (nextRound > MAX_ROUNDS) {

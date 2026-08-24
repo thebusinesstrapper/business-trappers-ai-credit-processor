@@ -185,6 +185,76 @@ const d1 = await selectStrategy(decisions, { itemHistory: mixedHistory });
 const d2 = await selectStrategy(decisions, { itemHistory: mixedHistory });
 check("identical input -> identical output", JSON.stringify(d1) === JSON.stringify(d2), true);
 
+console.log("\n=== FOCUSED TEST: currentRoundFloor from stored client_state ===\n");
+console.log("Scenario: empty itemHistory, currentRoundFloor=2 (from Supabase client_state)");
+console.log("Expected: round=2 (max of 0+1 and 2), escalated=false (no history to earn escalation)\n");
+
+const r9 = await selectStrategy(decisions, {
+    itemHistory: new Map(),  // empty: no prior disputes
+    currentRoundFloor: 2     // authoritative stored round
+});
+const tu9 = S(r9, "bt_tl_tu");
+const exp9 = S(r9, "bt_tl_exp");
+
+check("empty itemHistory + currentRoundFloor=2 -> round 2 (TU)", tu9.round, 2);
+check("empty itemHistory + currentRoundFloor=2 -> round 2 (EXP)", exp9.round, 2);
+check("NO escalation without earned history (TU)", tu9.escalated, false);
+check("NO escalation without earned history (EXP)", exp9.escalated, false);
+check("floor not confused with prior rounds (TU)", tu9.priorRounds, 0);
+check("floor not confused with prior rounds (EXP)", exp9.priorRounds, 0);
+
+console.log("\n--- Invalid currentRoundFloor is ignored (fail-open) ---");
+
+const r10 = await selectStrategy(decisions, {
+    itemHistory: new Map(),
+    currentRoundFloor: null  // invalid: null
+});
+const tu10 = S(r10, "bt_tl_tu");
+
+check("currentRoundFloor=null -> round 1", tu10.round, 1);
+
+const r11 = await selectStrategy(decisions, {
+    itemHistory: new Map(),
+    currentRoundFloor: 0  // invalid: zero
+});
+const tu11 = S(r11, "bt_tl_tu");
+
+check("currentRoundFloor=0 -> round 1", tu11.round, 1);
+
+const r12 = await selectStrategy(decisions, {
+    itemHistory: new Map(),
+    currentRoundFloor: -1  // invalid: negative
+});
+const tu12 = S(r12, "bt_tl_tu");
+
+check("currentRoundFloor=-1 -> round 1", tu12.round, 1);
+
+const r13 = await selectStrategy(decisions, {
+    itemHistory: new Map(),
+    currentRoundFloor: "not-a-number"  // invalid: non-integer
+});
+const tu13 = S(r13, "bt_tl_tu");
+
+check("currentRoundFloor='not-a-number' -> round 1", tu13.round, 1);
+
+console.log("\n--- currentRoundFloor respects history when history is deeper ---");
+
+const r14 = await selectStrategy(decisions, {
+    itemHistory: verifiedSelfEvident,  // 1 prior round
+    currentRoundFloor: 2
+});
+const tu14 = S(r14, "bt_tl_tu");
+
+check("1 prior round + currentRoundFloor=2 -> round 2", tu14.round, 2);
+
+const r15 = await selectStrategy(decisions, {
+    itemHistory: verifiedSelfEvident,  // 1 prior round
+    currentRoundFloor: 5  // within ceiling
+});
+const tu15 = S(r15, "bt_tl_tu");
+
+check("1 prior round + currentRoundFloor=5 -> round 5", tu15.round, 5);
+
 console.log("\n=== FULL CHAIN — Facts -> Decision -> Strategy ===\n");
 console.log(S(r2, "bt_tl_tu").reasoningChain.join("\n"));
 

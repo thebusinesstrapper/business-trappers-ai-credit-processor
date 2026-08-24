@@ -20,8 +20,17 @@ import { exportLetterResult } from "./letterRenderer.js";
  * The pipeline AFTER capture. Pure: report + identity in, package out. No browser,
  * no network — every stage is an existing tested function. Exported so the
  * orchestration can be validated without a live session.
+ *
+ * @param {object} report - The BT Credit Report Model from M6
+ * @param {object} [identity] - Client identity, may be null
+ * @param {object} [options] - Pipeline context options
+ * @param {number} [options.currentRoundFloor] - Authoritative current_round from
+ *                  stored client_state, used to floor the round number computed
+ *                  by selectStrategy. Prevents round mismatch when history is empty.
  */
-export async function runPipeline(report, identity = null) {
+export async function runPipeline(report, identity = null, options = {}) {
+    const { currentRoundFloor = null } = options;
+
     // STAGE 1: ANALYSIS (reasoning only)
     const analysis = await analyzeCreditReport(report, {
         clientIdentity: identity ?? undefined,
@@ -31,7 +40,11 @@ export async function runPipeline(report, identity = null) {
     const decisions = await decideDisputes(analysis, { report });
 
     // STAGE 3: STRATEGY (+ remedy) per item
-    const strategies = await selectStrategy(decisions, {});
+    // Thread the authoritative current_round floor into selectStrategy so it
+    // can compute round as max(priorRounds.length+1, currentRoundFloor).
+    const strategies = await selectStrategy(decisions, {
+        currentRoundFloor,
+    });
 
     // STAGE 4: CHAIN (assemble the dispute package)
     const chain = await buildDisputeChain(strategies);
