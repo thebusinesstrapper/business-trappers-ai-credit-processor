@@ -180,7 +180,13 @@ export async function runMilestone7(data = {}) {
 
         // Stages 1-6 run in a pure, browser-free function so the pipeline is
         // unit-testable without a live session (same split as capture/normalize).
-        const pipeline = await runPipeline(report, identity);
+        // AUTHORITATIVE CURRENT ROUND FLOOR. Thread the stored client_state's
+        // current_round into runPipeline so selectStrategy has the durable source.
+        // This prevents round mismatch when selectStrategy computes nextRound.
+        const currentRoundFloor = Number.isInteger(data.currentRound) && data.currentRound > 0
+            ? data.currentRound
+            : null;
+        const pipeline = await runPipeline(report, identity, { currentRoundFloor });
 
         return successResponse({
             milestone: "M7_FULL_PIPELINE",

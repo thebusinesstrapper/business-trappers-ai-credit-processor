@@ -296,8 +296,12 @@ export async function runProductionClient(data = {}) {
             ? String(data.crcClientId).trim()
             : null;
 
+    // Retain stored client_state outside the preflight if block so current_round
+    // can be threaded into runMilestone7. Fail open: null if no valid state.
+    let storedState = null;
+
     if (preflightId) {
-        const storedState = await readClientState(preflightId).catch(() => null);
+        storedState = await readClientState(preflightId).catch(() => null);
         const todayIso = new Date().toISOString().slice(0, 10);
         const preflight = decideDailyPreflight(storedState, todayIso);
 
@@ -348,6 +352,12 @@ export async function runProductionClient(data = {}) {
         // PATCH 2: same bounded trace array, threaded on so M7/M6/gate append.
         approvalTrace: data.approvalTrace,
         approvalTraceLimit: data.approvalTraceLimit,
+        // Authoritative current_round from stored client_state, used to floor
+        // the round computed by selectStrategy. Prevents round mismatch when
+        // itemHistory is empty. Fails open if no valid stored state.
+        currentRound: storedState?.current_round != null && Number.isInteger(Number(storedState.current_round)) && Number(storedState.current_round) > 0
+            ? Number(storedState.current_round)
+            : null,
     });
     const m7LettersOk = m7?.lettersOk === true || m7?.letters_ok === true;
 
