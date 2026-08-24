@@ -113,3 +113,10 @@ check("...reason states the danger", timeout.reason.includes("stale"), true);
 
 console.log(`\n${passed} passed, ${failed} failed.\n`);
 if (failed > 0) process.exit(1);
+
+// Later-round legacy memory with no baseline must acquire; never reuse existing.
+{
+    const legacySelector = readSelector([{ value: "x", text: "08/24/2026" }]);
+    const legacyResult = decideFreshness(legacySelector, { last_report_date_used: null, newer_report_required: true });
+    check("later round with no baseline -> ACQUISITION_REQUIRED", legacyResult.action, ACTION.ACQUISITION_REQUIRED);
+}

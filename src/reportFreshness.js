@@ -164,6 +164,20 @@ export function decideFreshness(selector, memory = {}) {
 
     const lastUsed = memory.last_report_date_used ?? null;
 
+    // A later-round legacy row with no persisted report baseline cannot prove the
+    // existing selector report is new. Fail safe into the validated acquisition
+    // path rather than silently reusing potentially stale evidence.
+    if (memory.newer_report_required === true && !lastUsed) {
+        return {
+            action: ACTION.ACQUISITION_REQUIRED,
+            reason:
+                `This is a later dispute round but no prior successful report baseline is stored. ` +
+                `The existing report (${newest.reportDate}) cannot be proven new, so a fresh free report is required.`,
+            newestReportDate: newest.reportDate,
+            lastReportDateUsed: null,
+        };
+    }
+
     // ---- The page does not contain a report newer than the one already used --
     //
     // This is the permanent future-cycle freshness gate. A same-date report is
