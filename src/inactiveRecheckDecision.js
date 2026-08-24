@@ -51,11 +51,9 @@ export function classifyRecheckLandingFromM6(m6) {
  * Decide what the recheck sweep should do for one inactive client.
  *
  * A positively active reactivation ALWAYS enters Waiting For Bureau first.
- * inactiveRecheckSweep records the live report date it observed as the client's
- * last_report_date_used baseline before routing this action. The normal report
+ * Reactivation does not overwrite last_report_date_used. That baseline remains
+ * the report used by the prior successfully delivered dispute cycle. The normal
  * freshness engine then requires a report STRICTLY NEWER than that baseline.
- * This means an old report present when monitoring comes back can never trigger
- * a dispute round merely because access was restored.
  */
 export function decideInactiveRecheck({
     storedState = null,
@@ -84,8 +82,8 @@ export function decideInactiveRecheck({
         action: RECHECK_ACTION.REACTIVATED_WAITING,
         reason:
             "Monitoring is positively active again. Reactivation never authorizes a dispute cycle. " +
-            "Route the client to Waiting For Bureau and wait until Credit Hero exposes a report " +
-            "strictly newer than the report observed at reactivation.",
+            "Route the client to Waiting For Bureau. Normal processing may resume only when Credit Hero " +
+            "shows a report strictly newer than last_report_date_used from the prior successful cycle.",
         nextEligibleDate: null,
         targetCrcStatus: "Waiting For Bureau",
         waitForFreshReport: true,

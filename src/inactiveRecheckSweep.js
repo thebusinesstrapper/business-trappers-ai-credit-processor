@@ -206,12 +206,9 @@ export async function runInactiveRecheckSweep(deps) {
             entry.firstReactivation = react?.firstReactivation === true;
             entry.reactivatedDate = react?.reactivatedDate ?? null;
 
-            // Record the newest available report date if the recheck saw one.
-            // Recording it does NOT trigger disputes; it is memory only.
-            if (live?.reportDate && writers.recordLastReportDate) {
-                await writers.recordLastReportDate(client.crcClientId, live.reportDate).catch(() => {});
-                entry.reportDate = live.reportDate;
-            }
+            // Surface live report date diagnostically only. The freshness baseline
+            // remains the report used by the prior successful dispute cycle.
+            if (live?.reportDate) entry.reportDate = live.reportDate;
 
             // ---- HISTORICAL_DISPUTE_DATE_UNKNOWN: fail closed to Manual Review
             // Monitoring is active again (recordMonitoringReactivated above already

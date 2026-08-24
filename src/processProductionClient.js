@@ -14,7 +14,7 @@ import { statusOnlyUpdate } from "./statusOnlyUpdate.js";
 import {
     recordCreditHeroState, readClientState, decideDailyPreflight, PREFLIGHT,
     advanceRoundAfterDelivery, markProcessComplete, recordNextEligibleDate,
-    FINAL_ROUND, isDisputeTimingElapsed,
+    FINAL_ROUND,
 } from "./clientMemory.js";
 import { runMilestone8 } from "./milestone8.js";
 
@@ -317,21 +317,6 @@ export async function runProductionClient(data = {}) {
             };
         }
 
-        if (preflight.action === PREFLIGHT.SKIP_NOT_YET_ELIGIBLE) {
-            return {
-                ...base, ok: true, stage: "waiting_not_yet_eligible",
-                outcome: "WAITING_FOR_STORED_ELIGIBILITY_DATE",
-                blockedReason: null,
-                crcClientId: preflightId,
-                nextEligibleDate: preflight.nextEligibleDate,
-                preflight,
-                // The attestation that matters: no session was opened.
-                browserOpened: false,
-                creditHeroOpened: false,
-                acquisitionIntentCreated: false,
-                m7: null, m8: null,
-            };
-        }
     }
 
     const m7 = await runMilestone7({
@@ -794,36 +779,9 @@ export async function runProductionClient(data = {}) {
     // zero letters, so M8 blocks it as m7_letters_missing -> manual review,
     // which is the correct blocked state for "items exist but were withheld").
 
-    // GATE A — DISPUTE TIMING, enforced independently of Gate B (report avail).
-    // Gate B is satisfied here (ELIGIBLE_EXISTING_REPORT). Before delivering we
-    // ALSO require Gate A: today >= last_dispute_date + CYCLE_DAYS, derived from
-    // the actual last dispute date rather than from next_eligible_date (which the
-    // preflight already checked but which other paths must never let a report date
-    // shorten). This guarantees a newer report can never move the dispute clock
-    // forward: if the 31 days have not elapsed we stop BEFORE runMilestone8 — no
-    // delivery lock, no round advance, no letters — and re-check on a later run.
-    // A first-round client with no last_dispute_date has Gate A open. Reactivation
-    // never alters last_dispute_date, so it cannot alter this clock.
-    const gateAState = await readClientState(String(crcClientId)).catch(() => null);
-    const gateA = isDisputeTimingElapsed(gateAState, new Date().toISOString().slice(0, 10));
-
-    if (!gateA.elapsed) {
-        return {
-            ...base,
-            ok: false,
-            stage: "waiting_for_dispute_timing",
-            blockedReason: "waiting_for_dispute_timing",
-            classification: successCapture?.classification ?? null,
-            eligibilityHint,
-            lastDisputeDate: gateA.lastDisputeDate,
-            disputeThresholdDate: gateA.thresholdDate,
-            lastReportDate: successCapture?.lastReportDate ?? null,
-            crcClientId,
-            m7,
-            m8: null,
-        };
-    }
-
+    // Fresh-report policy: report freshness is the sole next-round timing gate.
+    // A report must be strictly newer than last_report_date_used; there is no
+    // separate 31-day delivery-date gate.
     const m8 = await runMilestone8({
         clientName,
         crcClientId,
@@ -919,7 +877,9 @@ export async function runProductionClient(data = {}) {
             // sets next_eligible_date 31 days out, which is what the daily
             // preflight reads to avoid re-disputing off the same report
             // tomorrow.
-            const advanced = await advanceRoundAfterDelivery(crcClientId, deliveredRound)
+            const advanced = await advanceRoundAfterDelivery(
+                crcClientId, deliveredRound, successCapture?.lastReportDate ?? null
+            )
                 .catch((error) => ({ ok: false, reason: "round_advance_failed", detail: error.message }));
 
             roundOutcome = {

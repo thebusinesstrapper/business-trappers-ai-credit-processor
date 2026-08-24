@@ -535,7 +535,7 @@ function isoDatePlusDays(days, from = new Date()) {
  * @param {string|number} crcClientId
  * @param {number} deliveredRound  the round just confirmed delivered
  */
-export async function advanceRoundAfterDelivery(crcClientId, deliveredRound) {
+export async function advanceRoundAfterDelivery(crcClientId, deliveredRound, reportDateUsed = null) {
     const id = String(crcClientId);
     const round = Number(deliveredRound);
 
@@ -545,6 +545,10 @@ export async function advanceRoundAfterDelivery(crcClientId, deliveredRound) {
 
     if (!Number.isInteger(round) || round < 1) {
         return { ok: false, reason: "invalid_delivered_round", deliveredRound };
+    }
+
+    if (typeof reportDateUsed !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(reportDateUsed)) {
+        return { ok: false, reason: "valid_report_date_required_for_round_advance", deliveredRound: round };
     }
 
     if (round >= FINAL_ROUND) {
@@ -562,13 +566,14 @@ export async function advanceRoundAfterDelivery(crcClientId, deliveredRound) {
             current_round: round + 1,
             processing_state: "ready",
             last_dispute_date: isoDate(now),
-            next_eligible_date: isoDatePlusDays(CYCLE_DAYS, now),
+            last_report_date_used: reportDateUsed,
+            next_eligible_date: null,
             last_successful_processing_at: now.toISOString(),
         })
         .eq("crc_client_id", id)
         .eq("current_round", round)
         .eq("processing_state", "waiting")
-        .select("crc_client_id, current_round, processing_state, next_eligible_date, last_dispute_date")
+        .select("crc_client_id, current_round, processing_state, next_eligible_date, last_dispute_date, last_report_date_used")
         .maybeSingle();
 
     if (error) {
@@ -861,26 +866,10 @@ export function decideDailyPreflight(state, todayIso) {
         };
     }
 
-    const next = state.next_eligible_date ?? null;
-
-    // ISO dates compare correctly as strings; no Date parsing needed. An
-    // unreadable value is treated as absent rather than as a licence to skip.
-    if (typeof next === "string" && /^\d{4}-\d{2}-\d{2}$/.test(next) && next > todayIso) {
-        return {
-            action: PREFLIGHT.SKIP_NOT_YET_ELIGIBLE,
-            reason:
-                `A verified eligibility date of ${next} has not arrived (today ${todayIso}). ` +
-                `No CreditHero session is opened; the client is re-evaluated on the next daily run.`,
-            nextEligibleDate: next,
-        };
-    }
-
     return {
         action: PREFLIGHT.PROCEED,
-        reason: next
-            ? `Stored eligibility date ${next} has arrived. Verifying live state.`
-            : "No reliable future eligibility date stored. Verifying live state.",
-        nextEligibleDate: next,
+        reason: "Fresh-report policy requires live Credit Hero verification. Stored next_eligible_date does not gate processing.",
+        nextEligibleDate: state.next_eligible_date ?? null,
     };
 }
 
