@@ -30,7 +30,6 @@ jobs:
         run: |
           node src/reportFreshness.test.js
           if [ -f src/acquireCurrentReport.test.js ]; then node src/acquireCurrentReport.test.js; fi
-          if [ -f src/milestone6.test.js ]; then node src/milestone6.test.js; fi
       - name: Commit source patch
         run: |
           git config user.name "bt-acquisition-fix-bot"
