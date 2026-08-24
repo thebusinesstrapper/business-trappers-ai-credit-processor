@@ -31,13 +31,13 @@
  * ---------------------------------------------------------------------------
  */
 
-export const FRESHNESS_SCHEMA_VERSION = "BT-FRESHNESS-1.0";
+export const FRESHNESS_SCHEMA_VERSION = "BT-FRESHNESS-1.1";
 
 export const ACTION = Object.freeze({
     USE_NEWEST: "USE_NEWEST",                 // The newest report on the selector is good. Extract it.
     ACQUISITION_REQUIRED: "ACQUISITION_REQUIRED", // Memory needs a newer report than exists.
     MANUAL_REVIEW: "MANUAL_REVIEW",           // Anything we cannot account for.
-    NO_ACTION_REQUIRED: "NO_ACTION_REQUIRED", // Already processed this report.
+    NO_ACTION_REQUIRED: "NO_ACTION_REQUIRED", // Kept for compatibility; production no longer reuses a prior report.
 });
 
 // Option text that would CREATE a report rather than show an existing one.
@@ -138,10 +138,14 @@ export function readSelector(options = []) {
 /**
  * Decide what to do, given what the selector shows and what memory knows.
  *
+ * Permanent future-cycle rule: if a report date has already been analyzed,
+ * another dispute cycle may use only a STRICTLY NEWER report. Equality never
+ * authorizes reuse, even if an older caller passes newer_report_required=false.
+ *
  * @param {object} selector    readSelector() output
  * @param {object} memory      AI Memory client state
  * @param {string} memory.last_report_date_used   ISO date of the last report ANALYZED
- * @param {boolean} memory.newer_report_required  Policy says a newer report is needed
+ * @param {boolean} memory.newer_report_required  retained for caller compatibility
  */
 export function decideFreshness(selector, memory = {}) {
     const { newest, count, rejected } = selector;
@@ -160,26 +164,18 @@ export function decideFreshness(selector, memory = {}) {
 
     const lastUsed = memory.last_report_date_used ?? null;
 
-    // ---- Already analyzed the newest report --------------------------------
-    if (lastUsed && newest.reportDate === lastUsed && !memory.newer_report_required) {
-        return {
-            action: ACTION.NO_ACTION_REQUIRED,
-            reason: `The newest report (${newest.reportDate}) has already been analyzed. No new cycle is due.`,
-            newestReportDate: newest.reportDate,
-        };
-    }
-
-    // ---- Memory demands a newer report than the one on the page ------------
+    // ---- The page does not contain a report newer than the one already used --
     //
-    // The selector is authoritative for what EXISTS. If memory says we need
-    // something newer than the newest thing that exists, a report must be
-    // acquired — we cannot manufacture one by waiting.
-    if (memory.newer_report_required && lastUsed && newest.reportDate <= lastUsed) {
+    // This is the permanent future-cycle freshness gate. A same-date report is
+    // not "no action" in production because a later round must never reuse the
+    // evidence from an earlier round. It must wait for / acquire a fresh report.
+    if (lastUsed && newest.reportDate <= lastUsed) {
         return {
             action: ACTION.ACQUISITION_REQUIRED,
             reason:
-                `Memory requires a newer report, but the newest report on the selector ` +
-                `(${newest.reportDate}) is not newer than the one already analyzed (${lastUsed}).`,
+                `A fresh report is required for the next dispute cycle, but the newest report on ` +
+                `the selector (${newest.reportDate}) is not strictly newer than the report already ` +
+                `analyzed (${lastUsed}).`,
             newestReportDate: newest.reportDate,
             lastReportDateUsed: lastUsed,
         };
