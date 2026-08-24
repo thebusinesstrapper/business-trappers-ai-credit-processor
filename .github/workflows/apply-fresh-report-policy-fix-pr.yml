@@ -1,0 +1,133 @@
+name: Apply fresh report policy fix via PR
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-main:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Apply guarded narrow patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def sub1(text, pattern, repl, label):
+              out, n = re.subn(pattern, repl, text, count=1, flags=re.S)
+              if n != 1:
+                  raise SystemExit(f"{label}: expected exactly 1 match, got {n}")
+              return out
+
+          p = Path('src/processProductionClient.js')
+          s = p.read_text()
+          old = '    FINAL_ROUND, isDisputeTimingElapsed,\n'
+          if s.count(old) != 1: raise SystemExit(f'process import: expected 1 match, got {s.count(old)}')
+          s = s.replace(old, '    FINAL_ROUND,\n', 1)
+          s = sub1(s, r'\n        if \(preflight\.action === PREFLIGHT\.SKIP_NOT_YET_ELIGIBLE\) \{.*?\n        \}\n(?=    \}\n\n    const m7 = await runMilestone7)', '\n', 'remove next_eligible_date preflight skip')
+          s = sub1(s, r'\n    // GATE A — DISPUTE TIMING, enforced independently of Gate B \(report avail\)\..*?\n    const m8 = await runMilestone8', '\n    // Fresh-report policy: report freshness is the sole next-round timing gate.\n    // A report must be strictly newer than last_report_date_used; there is no\n    // separate 31-day delivery-date gate.\n    const m8 = await runMilestone8', 'remove 31-day Gate A')
+          old = 'const advanced = await advanceRoundAfterDelivery(crcClientId, deliveredRound)'
+          new = 'const advanced = await advanceRoundAfterDelivery(\n                crcClientId, deliveredRound, successCapture?.lastReportDate ?? null\n            )'
+          if s.count(old) != 1: raise SystemExit(f'advance call: expected 1 match, got {s.count(old)}')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('src/clientMemory.js')
+          s = p.read_text()
+          old = 'export async function advanceRoundAfterDelivery(crcClientId, deliveredRound) {'
+          new = 'export async function advanceRoundAfterDelivery(crcClientId, deliveredRound, reportDateUsed = null) {'
+          if s.count(old) != 1: raise SystemExit(f'advance signature: expected 1 match, got {s.count(old)}')
+          s = s.replace(old, new, 1)
+          marker = '''    if (!Number.isInteger(round) || round < 1) {
+        return { ok: false, reason: "invalid_delivered_round", deliveredRound };
+    }
+'''
+          if s.count(marker) != 1: raise SystemExit(f'round validation marker: expected 1 match, got {s.count(marker)}')
+          s = s.replace(marker, marker + '''
+    if (typeof reportDateUsed !== "string" || !/^\\d{4}-\\d{2}-\\d{2}$/.test(reportDateUsed)) {
+        return { ok: false, reason: "valid_report_date_required_for_round_advance", deliveredRound: round };
+    }
+''', 1)
+          old = '''            last_dispute_date: isoDate(now),
+            next_eligible_date: isoDatePlusDays(CYCLE_DAYS, now),
+            last_successful_processing_at: now.toISOString(),'''
+          new = '''            last_dispute_date: isoDate(now),
+            last_report_date_used: reportDateUsed,
+            next_eligible_date: null,
+            last_successful_processing_at: now.toISOString(),'''
+          if s.count(old) != 1: raise SystemExit(f'advance update fields: expected 1 match, got {s.count(old)}')
+          s = s.replace(old, new, 1)
+          old = '.select("crc_client_id, current_round, processing_state, next_eligible_date, last_dispute_date")'
+          new = '.select("crc_client_id, current_round, processing_state, next_eligible_date, last_dispute_date, last_report_date_used")'
+          if s.count(old) != 1: raise SystemExit(f'advance select: expected 1 match, got {s.count(old)}')
+          s = s.replace(old, new, 1)
+          s = sub1(s, r'    const next = state\.next_eligible_date \?\? null;\n.*?\n    return \{\n        action: PREFLIGHT\.PROCEED,.*?\n    \};\n(?=\}\n\n\n/\*\*\n \* GATE A)', '''    return {
+        action: PREFLIGHT.PROCEED,
+        reason: "Fresh-report policy requires live Credit Hero verification. Stored next_eligible_date does not gate processing.",
+        nextEligibleDate: state.next_eligible_date ?? null,
+    };
+''', 'remove preflight date gate')
+          p.write_text(s)
+
+          p = Path('src/inactiveRecheckSweep.js')
+          s = p.read_text()
+          s = sub1(s, r'            // Record the newest available report date if the recheck saw one\.\n            // Recording it does NOT trigger disputes; it is memory only\.\n            if \(live\?\.reportDate && writers\.recordLastReportDate\) \{\n                await writers\.recordLastReportDate\(client\.crcClientId, live\.reportDate\)\.catch\(\(\) => \{\}\);\n                entry\.reportDate = live\.reportDate;\n            \}', '''            // Surface live report date diagnostically only. The freshness baseline
+            // remains the report used by the prior successful dispute cycle.
+            if (live?.reportDate) entry.reportDate = live.reportDate;''', 'stop reactivation baseline overwrite')
+          p.write_text(s)
+
+          p = Path('src/inactiveRecheckDecision.js')
+          s = p.read_text()
+          old = ''' * A positively active reactivation ALWAYS enters Waiting For Bureau first.
+ * inactiveRecheckSweep records the live report date it observed as the client's
+ * last_report_date_used baseline before routing this action. The normal report
+ * freshness engine then requires a report STRICTLY NEWER than that baseline.
+ * This means an old report present when monitoring comes back can never trigger
+ * a dispute round merely because access was restored.
+ */'''
+          new = ''' * A positively active reactivation ALWAYS enters Waiting For Bureau first.
+ * Reactivation does not overwrite last_report_date_used. That baseline remains
+ * the report used by the prior successfully delivered dispute cycle. The normal
+ * freshness engine then requires a report STRICTLY NEWER than that baseline.
+ */'''
+          if s.count(old) != 1: raise SystemExit(f'inactive decision comment: expected 1 match, got {s.count(old)}')
+          s = s.replace(old, new, 1)
+          old = '''            "Monitoring is positively active again. Reactivation never authorizes a dispute cycle. " +
+            "Route the client to Waiting For Bureau and wait until Credit Hero exposes a report " +
+            "strictly newer than the report observed at reactivation.",'''
+          new = '''            "Monitoring is positively active again. Reactivation never authorizes a dispute cycle. " +
+            "Route the client to Waiting For Bureau. Normal processing may resume only when Credit Hero " +
+            "shows a report strictly newer than last_report_date_used from the prior successful cycle.",'''
+          if s.count(old) != 1: raise SystemExit(f'inactive decision reason: expected 1 match, got {s.count(old)}')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+      - name: Syntax and focused tests
+        run: |
+          node --check src/processProductionClient.js
+          node --check src/clientMemory.js
+          node --check src/inactiveRecheckSweep.js
+          node --check src/inactiveRecheckDecision.js
+          node src/reportFreshness.test.js
+          if [ -f src/inactiveRecheckDecision.test.js ]; then node src/inactiveRecheckDecision.test.js; fi
+
+      - name: Commit tested patch to main
+        run: |
+          git config user.name "bt-policy-fix-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/processProductionClient.js src/clientMemory.js src/inactiveRecheckSweep.js src/inactiveRecheckDecision.js
+          git diff --cached --check
+          git commit -m "Use fresh report availability as next-round gate"
+          git push origin HEAD:main
