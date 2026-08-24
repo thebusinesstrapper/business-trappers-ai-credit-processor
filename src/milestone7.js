@@ -30,6 +30,47 @@ import { verifyIdentity } from "./clientIdentity.js";
 
 import { runPipeline } from "./pipeline.js";
 
+const REQUIRED_IDENTITY_LABELS = Object.freeze([
+    "First Name",
+    "Last Name",
+    "Mailing Address",
+    "City",
+    "State",
+    "Zip Code",
+]);
+
+/**
+ * CRC occasionally renders the Edit Profile modal shell without populating any
+ * of its required identity controls. Production evidence on 2026-08-23 showed
+ * this exact all-six-empty signature on clients whose profiles were later read
+ * successfully without any data change.
+ *
+ * This predicate is deliberately narrow. One or two missing fields can be real
+ * client-data defects and MUST still fail closed. We retry only when every
+ * required identity field is simultaneously reported missing and empty.
+ */
+function isTransientEmptyProfileLoad(result) {
+    if (!result || result.success !== false) return false;
+    if (result.error_code !== "REQUIRED_IDENTITY_FIELDS_MISSING") return false;
+
+    const missingLabels = new Set(
+        (Array.isArray(result.missing) ? result.missing : [])
+            .map((item) => String(item?.label ?? item ?? "").trim())
+            .filter(Boolean)
+    );
+
+    if (!REQUIRED_IDENTITY_LABELS.every((label) => missingLabels.has(label))) {
+        return false;
+    }
+
+    const partial = result.partial ?? {};
+
+    return REQUIRED_IDENTITY_LABELS.every((label) => {
+        const value = partial[label];
+        return value == null || String(value).trim() === "";
+    });
+}
+
 export async function runMilestone7(data = {}) {
     try {
         // ---- STAGE 0: CAPTURE + NORMALIZE (Milestone 6, reused wholesale) ----
@@ -56,7 +97,33 @@ export async function runMilestone7(data = {}) {
             }
         }
 
-        const m6 = await runMilestone6(data);
+        let m6 = await runMilestone6(data);
+
+        // A fully empty CRC profile modal is a known transient CRC load failure,
+        // not evidence that six independent identity fields were deleted at once.
+        // Retry ONCE by invoking M6 again. The first M6 call owns and closes its
+        // browser session, so the retry starts from a fresh Browserbase session.
+        // No retry is allowed for partial identity failures or any other error.
+        if (isTransientEmptyProfileLoad(m6)) {
+            console.warn(
+                `CRC profile returned all six required identity fields empty for ` +
+                    `${data.clientName ?? "(unknown client)"}. Retrying M6 once in a fresh session.`
+            );
+
+            m6 = await runMilestone6(data);
+
+            if (m6?.success === true) {
+                console.log(
+                    `Fresh-session CRC profile retry succeeded for ` +
+                        `${data.clientName ?? "(unknown client)"}.`
+                );
+            } else {
+                console.warn(
+                    `Fresh-session CRC profile retry did not recover ` +
+                        `${data.clientName ?? "(unknown client)"}. Failing closed.`
+                );
+            }
+        }
 
         // M6 failed closed somewhere (extraction, capture, navigation, identity).
         // Its own error response is authoritative — do not run the pipeline on a
