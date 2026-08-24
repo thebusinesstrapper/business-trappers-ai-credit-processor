@@ -1,13 +1,21 @@
 from pathlib import Path
+import re
 
-# reportFreshness.js: Round 2+ legacy rows with no baseline must not reuse an existing report.
+
+def sub1(text, pattern, repl, label):
+    out, n = re.subn(pattern, repl, text, count=1, flags=re.S)
+    if n != 1:
+        raise SystemExit(f"{label}: expected exactly 1 match, got {n}")
+    return out
+
+# reportFreshness.js
 p = Path('src/reportFreshness.js')
 s = p.read_text()
-old = '''    const lastUsed = memory.last_report_date_used ?? null;
-
-    // ---- The page does not contain a report newer than the one already used --'''
-new = '''    const lastUsed = memory.last_report_date_used ?? null;
-
+if 'later-round legacy row with no persisted report baseline' not in s:
+    s = sub1(
+        s,
+        r'(    const lastUsed = memory\.last_report_date_used \?\? null;\n)',
+        r'''\1
     // A later-round legacy row with no persisted report baseline cannot prove the
     // existing selector report is new. Fail safe into the validated acquisition
     // path rather than silently reusing potentially stale evidence.
@@ -21,45 +29,25 @@ new = '''    const lastUsed = memory.last_report_date_used ?? null;
             lastReportDateUsed: null,
         };
     }
-
-    // ---- The page does not contain a report newer than the one already used --'''
-if s.count(old) != 1:
-    raise SystemExit(f'reportFreshness insertion: expected 1 match, got {s.count(old)}')
-s = s.replace(old, new, 1)
+''',
+        'reportFreshness legacy guard',
+    )
 p.write_text(s)
 
-# milestone6.js: mark later rounds as requiring a newer report, and bridge
-# ACQUISITION_REQUIRED into the existing validated acquisition path.
+# milestone6.js
 p = Path('src/milestone6.js')
 s = p.read_text()
-old = '''        const freshness = decideFreshness(parsed, data.memory ?? {
-            last_report_date_used: clientState?.last_report_date_used ?? null,
-            newer_report_required: false,
-        });'''
-new = '''        let freshness = decideFreshness(parsed, data.memory ?? {
+s = sub1(
+    s,
+    r'        const freshness = decideFreshness\(parsed, data\.memory \?\? \{\n            last_report_date_used: clientState\?\.last_report_date_used \?\? null,\n            newer_report_required: false,\n        \}\);',
+    '''        let freshness = decideFreshness(parsed, data.memory ?? {
             last_report_date_used: clientState?.last_report_date_used ?? null,
             newer_report_required: Number(clientState?.current_round ?? 1) > 1,
-        });'''
-if s.count(old) != 1:
-    raise SystemExit(f'milestone6 freshness memory: expected 1 match, got {s.count(old)}')
-s = s.replace(old, new, 1)
+        });''',
+    'milestone6 freshness memory',
+)
 
-old = '''        if (freshness.action === ACTION.ACQUISITION_REQUIRED) {
-            // The Order Submitter is NOT authorized. We halt exactly where it
-            // would have acted, rather than falling back to an older report.
-            return successResponse({
-                milestone: "M6_CAPTURE",
-                result: "CAPABILITY_UNAVAILABLE",
-                message:
-                    "A newer report is required, but the Order Submitter is not authorized in this " +
-                    "version. The processor does not fall back to an older report — analysing a stale " +
-                    "report means asserting facts that may no longer be true, in the consumer's voice.",
-                freshness,
-                replayUrl,
-            });
-        }
-'''
-new = '''        if (freshness.action === ACTION.ACQUISITION_REQUIRED) {
+bridge = '''        if (freshness.action === ACTION.ACQUISITION_REQUIRED) {
             // Use the EXISTING validated $0-only acquisition path. The selector's
             // current newest report is the acquisition baseline; the path will not
             // proceed until a strictly newer report appears and will never select a
@@ -102,9 +90,6 @@ new = '''        if (freshness.action === ACTION.ACQUISITION_REQUIRED) {
             }
 
             parsed = refreshed.selector;
-            // Acquisition itself proved a report strictly newer than the pre-order
-            // selector baseline. Re-evaluate against that grounded baseline so a
-            // legacy row with no stored last_report_date_used can proceed safely.
             freshness = decideFreshness(parsed, {
                 last_report_date_used: baselineReportDate,
                 newer_report_required: true,
@@ -119,15 +104,18 @@ new = '''        if (freshness.action === ACTION.ACQUISITION_REQUIRED) {
             }
         }
 '''
-if s.count(old) != 1:
-    raise SystemExit(f'milestone6 acquisition bridge: expected 1 match, got {s.count(old)}')
-s = s.replace(old, new, 1)
+
+s = sub1(
+    s,
+    r'        if \(freshness\.action === ACTION\.ACQUISITION_REQUIRED\) \{.*?\n        \}\n\n(?=        // ---- 5\. SELECT THE NEWEST)',
+    bridge + '\n',
+    'milestone6 acquisition bridge',
+)
 p.write_text(s)
 
-# Extend focused freshness test with the legacy later-round case, using this repo's check helper.
+# focused test
 p = Path('src/reportFreshness.test.js')
 s = p.read_text()
-append = '''\n// Later-round legacy memory with no baseline must acquire; never reuse existing.\n{\n    const legacySelector = readSelector([{ value: "x", text: "08/24/2026" }]);\n    const legacyResult = decideFreshness(legacySelector, { last_report_date_used: null, newer_report_required: true });\n    check("later round with no baseline -> ACQUISITION_REQUIRED", legacyResult.action, ACTION.ACQUISITION_REQUIRED);\n}\n'''
-if 'Later-round legacy memory with no baseline must acquire' not in s:
-    s += append
+if 'later round with no baseline -> ACQUISITION_REQUIRED' not in s:
+    s += '''\n// Later-round legacy memory with no baseline must acquire; never reuse existing.\n{\n    const legacySelector = readSelector([{ value: "x", text: "08/24/2026" }]);\n    const legacyResult = decideFreshness(legacySelector, { last_report_date_used: null, newer_report_required: true });\n    check("later round with no baseline -> ACQUISITION_REQUIRED", legacyResult.action, ACTION.ACQUISITION_REQUIRED);\n}\n'''
 p.write_text(s)
