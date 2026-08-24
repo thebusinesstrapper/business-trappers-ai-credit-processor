@@ -124,10 +124,10 @@ if s.count(old) != 1:
 s = s.replace(old, new, 1)
 p.write_text(s)
 
-# Extend focused freshness test with the legacy later-round case.
+# Extend focused freshness test with the legacy later-round case, using this repo's check helper.
 p = Path('src/reportFreshness.test.js')
 s = p.read_text()
-append = '''\n// Later-round legacy memory with no baseline must acquire; never reuse existing.\n{\n    const selector = readSelector([{ value: "x", text: "08/24/2026" }]);\n    const result = decideFreshness(selector, { last_report_date_used: null, newer_report_required: true });\n    assert.equal(result.action, ACTION.ACQUISITION_REQUIRED);\n}\n'''
+append = '''\n// Later-round legacy memory with no baseline must acquire; never reuse existing.\n{\n    const legacySelector = readSelector([{ value: "x", text: "08/24/2026" }]);\n    const legacyResult = decideFreshness(legacySelector, { last_report_date_used: null, newer_report_required: true });\n    check("later round with no baseline -> ACQUISITION_REQUIRED", legacyResult.action, ACTION.ACQUISITION_REQUIRED);\n}\n'''
 if 'Later-round legacy memory with no baseline must acquire' not in s:
     s += append
 p.write_text(s)
