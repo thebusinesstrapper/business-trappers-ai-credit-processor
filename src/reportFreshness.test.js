@@ -37,7 +37,6 @@ check("'July 13, 2026'", isSelectableReportOption("July 13, 2026"), true);
 check("'Order New Report'", isSelectableReportOption("Order New Report"), false);
 check("'Refresh Report'", isSelectableReportOption("Refresh Report"), false);
 check("'Purchase 3-Bureau Report $18.95'", isSelectableReportOption("Purchase 3-Bureau Report $18.95"), false);
-// Parses as a date AND carries order language. Must still be refused.
 check("'Order new report 7/18/2026' (date + trap)", isSelectableReportOption("Order new report 7/18/2026"), false);
 check("'Select...'", isSelectableReportOption("Select..."), false);
 
@@ -47,7 +46,7 @@ const selector = readSelector([
     { value: "3", text: "July 13, 2026", selected: true },
     { value: "2", text: "June 11, 2026" },
     { value: "1", text: "May 10, 2026" },
-    { value: "x", text: "Order New Report" }, // must be rejected
+    { value: "x", text: "Order New Report" },
 ]);
 
 check("3 reports read", selector.count, 3);
@@ -57,28 +56,26 @@ check("...and never ranked as newest", selector.newest.text.includes("Order"), f
 
 console.log("\n=== Freshness decisions ===\n");
 
-// First run. No memory.
 const first = decideFreshness(selector, {});
 check("no prior report -> USE_NEWEST", first.action, ACTION.USE_NEWEST);
 check("...selects July 13", first.select.text, "July 13, 2026");
 
-// Newer report available than last analyzed.
 const newer = decideFreshness(selector, { last_report_date_used: "2026-06-11" });
 check("newer than last used -> USE_NEWEST", newer.action, ACTION.USE_NEWEST);
 check("...selects the NEWEST, not the last used", newer.newestReportDate, "2026-07-13");
 
-// Already analyzed the newest.
 const same = decideFreshness(selector, { last_report_date_used: "2026-07-13" });
-check("already analyzed newest -> NO_ACTION_REQUIRED", same.action, ACTION.NO_ACTION_REQUIRED);
+check("same report cannot be reused -> ACQUISITION_REQUIRED", same.action, ACTION.ACQUISITION_REQUIRED);
 
-// Memory demands newer, but the newest that EXISTS is not newer.
 const stale = decideFreshness(selector, {
     last_report_date_used: "2026-07-13",
     newer_report_required: true,
 });
 check("newer required but none exists -> ACQUISITION_REQUIRED", stale.action, ACTION.ACQUISITION_REQUIRED);
 
-// Nothing readable.
+const olderThanUsed = decideFreshness(selector, { last_report_date_used: "2026-08-01" });
+check("selector older than last used -> ACQUISITION_REQUIRED", olderThanUsed.action, ACTION.ACQUISITION_REQUIRED);
+
 const empty = decideFreshness(readSelector([{ value: "x", text: "Order New Report" }]), {});
 check("no readable report -> MANUAL_REVIEW", empty.action, ACTION.MANUAL_REVIEW);
 
@@ -94,15 +91,12 @@ check("no change -> not appeared", hasNewerReport(before, "2026-06-11").appeared
 check("newer appeared", hasNewerReport(after, "2026-06-11").appeared, true);
 check("...and it is the new one", hasNewerReport(after, "2026-06-11").reportDate, "2026-07-13");
 
-// An OLDER report appearing (page re-sorted, or an archive loaded) is NOT a new
-// report. "Different" is not "newer".
 const older = readSelector([
     { value: "1", text: "May 10, 2026" },
     { value: "2", text: "June 11, 2026" },
 ]);
 check("an OLDER report appearing is NOT 'newer'", hasNewerReport(older, "2026-06-11").appeared, false);
 
-// Same date, different option value — a re-render, not a new report.
 const rerendered = readSelector([{ value: "99", text: "June 11, 2026" }]);
 check("same date, new option value -> NOT newer", hasNewerReport(rerendered, "2026-06-11").appeared, false);
 
