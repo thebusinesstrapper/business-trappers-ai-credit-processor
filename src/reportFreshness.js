@@ -31,23 +31,21 @@
  * ---------------------------------------------------------------------------
  */
 
-export const FRESHNESS_SCHEMA_VERSION = "BT-FRESHNESS-1.0";
+export const FRESHNESS_SCHEMA_VERSION = "BT-FRESHNESS-1.1";
 
 export const ACTION = Object.freeze({
-    USE_NEWEST: "USE_NEWEST",                 // The newest report on the selector is good. Extract it.
-    ACQUISITION_REQUIRED: "ACQUISITION_REQUIRED", // Memory needs a newer report than exists.
-    MANUAL_REVIEW: "MANUAL_REVIEW",           // Anything we cannot account for.
-    NO_ACTION_REQUIRED: "NO_ACTION_REQUIRED", // Already processed this report.
+    USE_NEWEST: "USE_NEWEST",
+    ACQUISITION_REQUIRED: "ACQUISITION_REQUIRED",
+    MANUAL_REVIEW: "MANUAL_REVIEW",
+    NO_ACTION_REQUIRED: "NO_ACTION_REQUIRED",
 });
 
-// Option text that would CREATE a report rather than show an existing one.
-// Selecting one of these is not a read — it is an irreversible action.
 const FORBIDDEN_OPTION_LANGUAGE = /order|new\s*report|refresh|purchase|buy|update|generate|pull|request/i;
 
 const DATE_PATTERNS = [
-    /\b(\d{4})-(\d{2})-(\d{2})\b/,                                   // 2026-07-13
-    /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/,                             // 7/13/2026
-    /\b([A-Z][a-z]{2,8})\s+(\d{1,2}),?\s+(\d{4})\b/,                 // July 13, 2026
+    /\b(\d{4})-(\d{2})-(\d{2})\b/,
+    /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/,
+    /\b([A-Z][a-z]{2,8})\s+(\d{1,2}),?\s+(\d{4})\b/,
 ];
 
 const MONTHS = {
@@ -55,28 +53,17 @@ const MONTHS = {
     july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
 };
 
-/**
- * Parse a report date from a selector option's visible text.
- * Returns an ISO date string, or null if it cannot be positively read.
- *
- * NULL IS NOT A FAILURE TO BE PAPERED OVER. An option whose date we cannot read
- * is an option we cannot rank, and an unrankable option means we cannot know
- * which report is newest.
- */
 export function parseReportDate(text) {
     if (typeof text !== "string" || !text.trim()) return null;
 
-    // ISO
     let m = text.match(DATE_PATTERNS[0]);
     if (m) return `${m[1]}-${m[2]}-${m[3]}`;
 
-    // US numeric
     m = text.match(DATE_PATTERNS[1]);
     if (m) {
         return `${m[3]}-${String(m[1]).padStart(2, "0")}-${String(m[2]).padStart(2, "0")}`;
     }
 
-    // Month name
     m = text.match(DATE_PATTERNS[2]);
     if (m) {
         const month = MONTHS[m[1].toLowerCase()];
@@ -87,25 +74,12 @@ export function parseReportDate(text) {
     return null;
 }
 
-/**
- * An option is a REPORT we may select only if we can positively identify it as
- * an existing report date carrying no action language.
- *
- * Fail closed. We do not find out what an unrecognised option does by clicking
- * it — on this page, some controls spend money.
- */
 export function isSelectableReportOption(text) {
     if (typeof text !== "string" || !text.trim()) return false;
     if (FORBIDDEN_OPTION_LANGUAGE.test(text)) return false;
-
     return parseReportDate(text) !== null;
 }
 
-/**
- * Reduce a raw selector read into a ranked list of reports.
- *
- * @param {Array<{value: string, text: string, selected?: boolean}>} options
- */
 export function readSelector(options = []) {
     const reports = [];
     const rejected = [];
@@ -124,7 +98,6 @@ export function readSelector(options = []) {
         });
     }
 
-    // Newest first.
     reports.sort((a, b) => b.reportDate.localeCompare(a.reportDate));
 
     return {
@@ -136,17 +109,14 @@ export function readSelector(options = []) {
 }
 
 /**
- * Decide what to do, given what the selector shows and what memory knows.
- *
- * @param {object} selector    readSelector() output
- * @param {object} memory      AI Memory client state
- * @param {string} memory.last_report_date_used   ISO date of the last report ANALYZED
- * @param {boolean} memory.newer_report_required  Policy says a newer report is needed
+ * Permanent future-round freshness rule:
+ * once a prior report date is known, the next cycle may use ONLY a strictly
+ * newer report. Equality is not "no action" for production; it means a new
+ * report must be acquired before another dispute package can be generated.
  */
 export function decideFreshness(selector, memory = {}) {
     const { newest, count, rejected } = selector;
 
-    // ---- Nothing readable --------------------------------------------------
     if (!newest || count === 0) {
         return {
             action: ACTION.MANUAL_REVIEW,
@@ -160,56 +130,28 @@ export function decideFreshness(selector, memory = {}) {
 
     const lastUsed = memory.last_report_date_used ?? null;
 
-    // ---- Already analyzed the newest report --------------------------------
-    if (lastUsed && newest.reportDate === lastUsed && !memory.newer_report_required) {
-        return {
-            action: ACTION.NO_ACTION_REQUIRED,
-            reason: `The newest report (${newest.reportDate}) has already been analyzed. No new cycle is due.`,
-            newestReportDate: newest.reportDate,
-        };
-    }
-
-    // ---- Memory demands a newer report than the one on the page ------------
-    //
-    // The selector is authoritative for what EXISTS. If memory says we need
-    // something newer than the newest thing that exists, a report must be
-    // acquired — we cannot manufacture one by waiting.
-    if (memory.newer_report_required && lastUsed && newest.reportDate <= lastUsed) {
+    if (lastUsed && newest.reportDate <= lastUsed) {
         return {
             action: ACTION.ACQUISITION_REQUIRED,
             reason:
-                `Memory requires a newer report, but the newest report on the selector ` +
-                `(${newest.reportDate}) is not newer than the one already analyzed (${lastUsed}).`,
+                `A fresh report is required for the next dispute cycle. The newest report on the selector ` +
+                `(${newest.reportDate}) is not strictly newer than the report already used (${lastUsed}).`,
             newestReportDate: newest.reportDate,
             lastReportDateUsed: lastUsed,
         };
     }
 
-    // ---- The newest report is new to us. Use it. ---------------------------
     return {
         action: ACTION.USE_NEWEST,
         reason: lastUsed
-            ? `The selector's newest report (${newest.reportDate}) is newer than the last analyzed (${lastUsed}).`
-            : `The selector's newest report is ${newest.reportDate}. No prior report has been analyzed.`,
+            ? `The selector's newest report (${newest.reportDate}) is strictly newer than the last analyzed (${lastUsed}).`
+            : `The selector's newest report is ${newest.reportDate}. No prior report has been recorded yet.`,
         newestReportDate: newest.reportDate,
         lastReportDateUsed: lastUsed,
         select: { value: newest.value, text: newest.text },
     };
 }
 
-/**
- * After an acquisition, decide whether a NEWER report has actually appeared.
- *
- * This is the guard on the polling loop, and it is deliberately strict:
- * STRICTLY NEWER than the baseline. Not "different". Not "the count changed".
- *
- * A report that is merely different could be an older one the page re-sorted.
- * A count that changed could be an artefact of a partial render. Only a date
- * strictly greater than the baseline proves the new report has landed.
- *
- * @param {object} selector  a fresh readSelector() output
- * @param {string} baseline  the newest report date recorded BEFORE ordering
- */
 export function hasNewerReport(selector, baseline) {
     if (!selector.newest) {
         return { appeared: false, reason: "No readable report on the selector." };
@@ -241,14 +183,6 @@ export function hasNewerReport(selector, baseline) {
     };
 }
 
-/**
- * The timeout outcome.
- *
- * WE DO NOT FALL BACK TO THE OLD REPORT. That is the entire point of this
- * module. A newer report was expected and did not arrive; analyzing the old one
- * would produce a dispute package asserting facts that may already be stale —
- * and those assertions go out in the consumer's name.
- */
 export function timeoutOutcome(baseline, waitedMs) {
     return {
         action: ACTION.MANUAL_REVIEW,
@@ -259,6 +193,6 @@ export function timeoutOutcome(baseline, waitedMs) {
             `expected — that would assert facts in the consumer's voice that may already be stale.`,
         baseline,
         waitedMs,
-        analyzedOlderReport: false, // INVARIANT.
+        analyzedOlderReport: false,
     };
 }
