@@ -150,6 +150,7 @@ export async function runInactiveRecheckSweep(deps) {
                 storedState: client.storedState,
                 observedCrcStatus: INACTIVE_CRC_STATUS,
                 landing: live?.landing ?? null,
+                liveReportDate: live?.reportDate ?? null,
                 todayIso,
             });
             entry.action = decision.action;

@@ -825,7 +825,7 @@ export async function listInactiveClients() {
         .select(
             "crc_client_id, client_display_name, credit_hero_access_state, processing_state, " +
             "last_credit_hero_check_at, last_dispute_date, next_eligible_date, current_round, " +
-            "process_complete, monitoring_reactivated_date"
+            "last_report_date_used, process_complete, monitoring_reactivated_date"
         )
         .eq("credit_hero_access_state", "inactive")
         .not("process_complete", "is", true);
