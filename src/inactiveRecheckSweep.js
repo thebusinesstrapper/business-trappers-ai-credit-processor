@@ -34,7 +34,8 @@ function key(v) {
  *   - Supabase rows where credit_hero_access_state = inactive (primary), and
  *   - CRC-grid observations whose visible status is Credit Monitoring Inactive.
  * Deduplicated by crc_client_id. If EITHER source marks a client inactive, it is
- * included. Completed clients (Supabase process_complete = true) are excluded.
+ * included. Completed clients (Supabase process_complete = true) and clients whose
+ * stored CRC status is Suspended are excluded from the automated recheck.
  *
  * @param {Array<object>} supabaseInactive  rows from listInactiveClients()
  * @param {Array<object>} crcObservations   [{crcClientId, clientName, crcClientStatus}]
@@ -47,6 +48,10 @@ export function buildInactiveSet(supabaseInactive = [], crcObservations = []) {
         const id = row?.crc_client_id != null ? String(row.crc_client_id) : null;
         if (!id) continue;
         if (row.process_complete === true) continue; // terminal, never rechecked
+        // Suspended is an explicit manual pause and is excluded from ALL automated
+        // processing. Do not let an old inactive-memory flag pull a suspended
+        // client back into the daily CreditHero recheck sweep.
+        if (key(row.crc_client_status) === "suspended") continue;
         byId.set(id, {
             crcClientId: id,
             clientName: row.client_display_name ?? null,
