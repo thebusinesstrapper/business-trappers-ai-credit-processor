@@ -1,0 +1,38 @@
+name: Fix dead-control false inactive
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/trigger-dead-control-false-inactive'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-main:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply guarded patch
+        run: python3 .github/scripts/fix_dead_control_false_inactive.py
+      - name: Syntax check
+        run: node --check src/openCreditHero.js
+      - name: Verify classification invariants
+        shell: bash
+        run: |
+          grep -q 'deadControl: noDestination' src/openCreditHero.js
+          grep -q 'preLanding.state === CH_LANDING_STATE.CREDENTIALS_OR_AUTH_FAILED' src/openCreditHero.js
+          grep -q 'requiresInactiveWorkflow: true' src/openCreditHero.js
+      - name: Commit source patch
+        run: |
+          git config user.name "bt-safety-fix-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/openCreditHero.js
+          git diff --cached --check
+          git commit -m "Do not classify dead CreditHero control as inactive"
+          git push origin HEAD:main
