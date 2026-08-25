@@ -321,6 +321,10 @@ export async function runProductionClient(data = {}) {
 
     const m7 = await runMilestone7({
         clientName,
+        // Preserve the authoritative CRC id already supplied by the queue. M6
+        // accepts this value and openClient uses it to select the exact dashboard
+        // row instead of relying on a potentially ambiguous name-only search.
+        crcClientId: preflightId,
         // Passed through to M6's client_state initialization. Null unless a live
         // scan positively observed it.
         crcClientStatus: data.crcClientStatus ?? null,
