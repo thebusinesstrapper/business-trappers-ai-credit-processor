@@ -221,7 +221,9 @@ export async function runInactiveWorkflow(opts = {}) {
         page = session.page;
 
         await loginToCRC(page);
-        await openClient(page, clientName);
+        // Use the authoritative CRC id already supplied by the inactive route.
+        // Name remains the search text, but the id selects the exact client row.
+        await openClient(page, clientName, crcClientId);
 
         const openedId = String(await getCrcClientId(page));
 
@@ -334,7 +336,48 @@ export async function runInactiveWorkflow(opts = {}) {
     if (decision.action !== PLANNED_ACTION.NO_MESSAGE_DUE) {
         const isReminder = decision.action === PLANNED_ACTION.SEND_REMINDER;
 
-        // Read the name live, at send time.
+        // NOTICE SESSION ISOLATION. The status writer opens CRC's Edit Profile
+        // modal. If CRC stalls while populating that modal, the page can remain
+        // covered by a stale overlay even though the status result has already
+        // been captured. Reusing that page for "Send Secure Message" makes the
+        // composer click land behind the modal and every compose field reads
+        // false. A notice is independent of the status write, so start it from a
+        // fresh CRC session and the exact authoritative client id.
+        try {
+            if (browser) await browser.close();
+        } catch { /* best effort */ }
+        browser = null;
+        page = null;
+
+        try {
+            const noticeSession = await launchBrowser();
+            browser = noticeSession.browser;
+            page = noticeSession.page;
+
+            await loginToCRC(page);
+            await openClient(page, clientName, crcClientId);
+
+            const noticeOpenedId = String(await getCrcClientId(page));
+            if (noticeOpenedId !== String(crcClientId)) {
+                report.error_code = report.error_code ?? "NOTICE_WRONG_CLIENT_OPENED";
+                report.failureReason = report.failureReason ??
+                    `Notice session opened client ${noticeOpenedId}, expected ${crcClientId}. Notice not sent.`;
+                await recordCreditHeroState(crcClientId, {
+                    inactive_notice_last_error: "notice_session: wrong_client_opened",
+                }).catch(() => {});
+                return report;
+            }
+        } catch (error) {
+            report.error_code = report.error_code ?? "NOTICE_SESSION_FAILED";
+            report.failureReason = report.failureReason ??
+                `Could not open a fresh CRC session for the inactive notice: ${error.message}`;
+            await recordCreditHeroState(crcClientId, {
+                inactive_notice_last_error: `notice_session: ${String(error.message ?? error).slice(0, 180)}`,
+            }).catch(() => {});
+            return report;
+        }
+
+        // Read the name live, at send time, from the clean notice session.
         const profile = await readClientProfile(page, crcClientId).catch(() => null);
         const firstName = resolveFirstName(profile?.identity, clientName);
 
