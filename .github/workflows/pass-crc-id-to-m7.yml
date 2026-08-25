@@ -1,0 +1,40 @@
+name: Pass CRC id to M7
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/trigger-pass-crc-id-to-m7'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-main:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply guarded patch
+        run: python3 .github/scripts/pass_crc_id_to_m7.py
+      - name: Syntax checks
+        run: |
+          node --check src/processProductionClient.js
+          node --check src/milestone7.js
+          node --check src/milestone6.js
+      - name: Verify handoff
+        shell: bash
+        run: |
+          grep -q 'crcClientId: preflightId' src/processProductionClient.js
+          grep -q 'openClient(page, clientName, data.crcClientId ?? null)' src/milestone6.js
+      - name: Commit source patch
+        run: |
+          git config user.name "bt-navigation-fix-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/processProductionClient.js
+          git diff --cached --check
+          git commit -m "Preserve authoritative CRC id through M7"
+          git push origin HEAD:main
