@@ -377,9 +377,12 @@ export async function runInactiveWorkflow(opts = {}) {
             return report;
         }
 
-        // Read the name live, at send time, from the clean notice session.
-        const profile = await readClientProfile(page, crcClientId).catch(() => null);
-        const firstName = resolveFirstName(profile?.identity, clientName);
+        // Keep the notice session CLEAN. Do not reopen Edit Profile just to
+        // derive the greeting: CRC already supplied the authoritative client
+        // display name, and resolveFirstName() safely falls back to its first token.
+        // This avoids recreating the exact stuck-profile overlay the fresh session
+        // was introduced to escape.
+        const firstName = resolveFirstName(null, clientName);
 
         if (!firstName) {
             report.error_code = report.error_code ?? "FIRST_NAME_UNRESOLVED";

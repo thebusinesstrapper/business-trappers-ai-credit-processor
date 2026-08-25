@@ -1584,7 +1584,11 @@ async function runJob(job) {
         // monitoring, or incurs a charge — and it runs ONLY on an approved,
         // non-diagnostic operational run, exactly like the write-capable paths
         // above.
-        if (job.operationalRoutingApproved === true && job.diagnosticOnly !== true) {
+        if (
+            job.operationalRoutingApproved === true &&
+            job.diagnosticOnly !== true &&
+            job.clientNames.length === 0
+        ) {
             try {
                 job.summary.inactiveRecheck = await runInactiveRecheckSweep({
                     listInactiveClients,
