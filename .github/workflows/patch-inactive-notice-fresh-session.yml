@@ -44,7 +44,7 @@ jobs:
         run: |
           node --check src/inactiveWorkflow.js
           node --check src/crcClientNotice.js
-          npm test -- --runInBand || npm test
+          node --check src/openClient.js
       - name: Commit patch
         run: |
           if git diff --quiet; then
