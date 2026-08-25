@@ -494,13 +494,21 @@ async function attemptOpen(page, context, attempt) {
         // link working exactly as designed, and never reaches this branch.
         return {
             ok: false,
-            nonActionable: noDestination,
+            // Staying on CRC proves only that the CreditHero entry control failed
+            // to navigate. Even when the anchor has no usable href, that is NOT
+            // proof the consumer's monitoring is inactive: CRC also uses working
+            // href-less JavaScript anchors. Keep this a technical access failure.
+            // Positive inactive classification is reserved for explicit disabled
+            // controls or a CreditHero page carrying recognized inactive markers.
+            nonActionable: false,
+            deadControl: noDestination,
             definitive: false,
             probe,
             diagnostics,
             reason: noDestination
                 ? `The "${CREDIT_HERO_LABEL}" control has no usable href and the click did not ` +
-                  `navigate — still on CRC (${url}). The control is present but dead.`
+                  `navigate — still on CRC (${url}). This is a technical navigation failure, not ` +
+                  `evidence that monitoring is inactive.`
                 : `The click did not navigate — still on CRC (${url}). The control was likely not yet wired up.`,
         };
     }
