@@ -803,6 +803,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
         let freshness = decideFreshness(parsed, data.memory ?? {
             last_report_date_used: clientState?.last_report_date_used ?? null,
             newer_report_required: Number(clientState?.current_round ?? 1) > 1,
+            legacy_dispute_date_floor: clientState?.last_dispute_date ?? null,
         });
 
         console.log(`Freshness decision: ${freshness.action} — ${freshness.reason}`);

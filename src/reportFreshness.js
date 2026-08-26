@@ -163,16 +163,53 @@ export function decideFreshness(selector, memory = {}) {
     }
 
     const lastUsed = memory.last_report_date_used ?? null;
+    const legacyDisputeFloor = memory.legacy_dispute_date_floor ?? null;
+    const validIsoDate = (value) =>
+        typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 
-    // A later-round legacy row with no persisted report baseline cannot prove the
-    // existing selector report is new. Fail safe into the validated acquisition
-    // path rather than silently reusing potentially stale evidence.
+    // LEGACY BRIDGE ONLY. Some historical July cycles were delivered in CRC but
+    // predate reliable persistence of last_report_date_used. We must not fabricate
+    // that report date. When the prior delivery date itself is verified, however,
+    // any Credit Hero report dated STRICTLY AFTER that delivery could not have
+    // been the report used for the earlier cycle. It is therefore safe to use as
+    // the next-round report. Same-day or older remains unproven and must acquire.
+    // Once the next round succeeds, advanceRoundAfterDelivery stores the exact
+    // report date used and this fallback is no longer relevant for that client.
     if (memory.newer_report_required === true && !lastUsed) {
+        if (validIsoDate(legacyDisputeFloor)) {
+            if (newest.reportDate > legacyDisputeFloor) {
+                return {
+                    action: ACTION.USE_NEWEST,
+                    reason:
+                        `Legacy cycle has no stored report baseline, but the newest report ` +
+                        `(${newest.reportDate}) is strictly after the verified prior dispute ` +
+                        `delivery date (${legacyDisputeFloor}). Use the newer report and establish ` +
+                        `a real report baseline on successful delivery.`,
+                    newestReportDate: newest.reportDate,
+                    lastReportDateUsed: null,
+                    legacyDisputeDateFloor: legacyDisputeFloor,
+                    select: { value: newest.value, text: newest.text },
+                };
+            }
+
+            return {
+                action: ACTION.ACQUISITION_REQUIRED,
+                reason:
+                    `Legacy cycle has no stored report baseline, and the newest report ` +
+                    `(${newest.reportDate}) is not strictly after the verified prior dispute ` +
+                    `delivery date (${legacyDisputeFloor}). A fresh free report is required.`,
+                newestReportDate: newest.reportDate,
+                lastReportDateUsed: null,
+                legacyDisputeDateFloor: legacyDisputeFloor,
+            };
+        }
+
         return {
             action: ACTION.ACQUISITION_REQUIRED,
             reason:
-                `This is a later dispute round but no prior successful report baseline is stored. ` +
-                `The existing report (${newest.reportDate}) cannot be proven new, so a fresh free report is required.`,
+                `This is a later dispute round but no prior successful report baseline or verified ` +
+                `legacy dispute-date floor is stored. The existing report (${newest.reportDate}) ` +
+                `cannot be proven new, so a fresh free report is required.`,
             newestReportDate: newest.reportDate,
             lastReportDateUsed: null,
         };

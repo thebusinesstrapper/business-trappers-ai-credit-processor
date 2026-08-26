@@ -111,12 +111,59 @@ check("...analyzedOlderReport is FALSE (invariant)", timeout.analyzedOlderReport
 check("...baseline preserved", timeout.baseline, "2026-06-11");
 check("...reason states the danger", timeout.reason.includes("stale"), true);
 
-console.log(`\n${passed} passed, ${failed} failed.\n`);
-if (failed > 0) process.exit(1);
-
-// Later-round legacy memory with no baseline must acquire; never reuse existing.
+// Later-round legacy memory with no baseline and no verified dispute floor must acquire.
 {
     const legacySelector = readSelector([{ value: "x", text: "08/24/2026" }]);
-    const legacyResult = decideFreshness(legacySelector, { last_report_date_used: null, newer_report_required: true });
-    check("later round with no baseline -> ACQUISITION_REQUIRED", legacyResult.action, ACTION.ACQUISITION_REQUIRED);
+    const legacyResult = decideFreshness(legacySelector, {
+        last_report_date_used: null,
+        newer_report_required: true,
+    });
+    check("legacy no baseline/floor -> ACQUISITION_REQUIRED", legacyResult.action, ACTION.ACQUISITION_REQUIRED);
 }
+
+// A verified legacy dispute date may serve as a one-time temporal floor.
+// A report strictly AFTER it is necessarily newer than the prior delivered cycle.
+{
+    const newerLegacy = readSelector([{ value: "new", text: "08/24/2026" }]);
+    const result = decideFreshness(newerLegacy, {
+        last_report_date_used: null,
+        newer_report_required: true,
+        legacy_dispute_date_floor: "2026-07-19",
+    });
+    check("legacy report after dispute floor -> USE_NEWEST", result.action, ACTION.USE_NEWEST);
+    check("legacy newer report selected", result.select.text, "08/24/2026");
+}
+
+{
+    const sameDayLegacy = readSelector([{ value: "same", text: "07/19/2026" }]);
+    const result = decideFreshness(sameDayLegacy, {
+        last_report_date_used: null,
+        newer_report_required: true,
+        legacy_dispute_date_floor: "2026-07-19",
+    });
+    check("legacy same-day report -> ACQUISITION_REQUIRED", result.action, ACTION.ACQUISITION_REQUIRED);
+}
+
+{
+    const olderLegacy = readSelector([{ value: "old", text: "07/18/2026" }]);
+    const result = decideFreshness(olderLegacy, {
+        last_report_date_used: null,
+        newer_report_required: true,
+        legacy_dispute_date_floor: "2026-07-19",
+    });
+    check("legacy older report -> ACQUISITION_REQUIRED", result.action, ACTION.ACQUISITION_REQUIRED);
+}
+
+// A real report baseline always wins; the legacy floor cannot weaken it.
+{
+    const realBaselineSelector = readSelector([{ value: "x", text: "08/15/2026" }]);
+    const result = decideFreshness(realBaselineSelector, {
+        last_report_date_used: "2026-08-15",
+        newer_report_required: true,
+        legacy_dispute_date_floor: "2026-07-19",
+    });
+    check("real baseline still blocks same report", result.action, ACTION.ACQUISITION_REQUIRED);
+}
+
+console.log(`\n${passed} passed, ${failed} failed.\n`);
+if (failed > 0) process.exit(1);
