@@ -1,62 +1,126 @@
-name: Patch targeted retry safety
+name: Patch redundant Waiting for Bureau status writes
 
 on:
   push:
+    branches: [main]
     paths:
-      - '.patch-triggers/targeted-retry-safety.txt'
+      - '.github/workflows/patch-targeted-retry-safety.yml'
 
 permissions:
   contents: write
 
 jobs:
   patch:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-      - name: Apply guarded patches
+
+      - name: Apply guarded Waiting for Bureau patch
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          # 1) A clean inactive-notice session must never reopen Edit Profile
-          # merely to derive a greeting. The authoritative CRC list name is
-          # already available and resolveFirstName() safely uses its first token.
-          p = Path('src/inactiveWorkflow.js')
+          p = Path('src/processProductionClient.js')
           s = p.read_text()
-          old = '''        // Read the name live, at send time, from the clean notice session.\n        const profile = await readClientProfile(page, crcClientId).catch(() => null);\n        const firstName = resolveFirstName(profile?.identity, clientName);'''
-          new = '''        // Keep the notice session CLEAN. Do not reopen Edit Profile just to\n        // derive the greeting: CRC already supplied the authoritative client\n        // display name, and resolveFirstName() safely falls back to its first token.\n        // This avoids recreating the exact stuck-profile overlay the fresh session\n        // was introduced to escape.\n        const firstName = resolveFirstName(null, clientName);'''
-          if old not in s:
-              raise SystemExit('guard failed: inactive notice profile-read block not found')
-          s = s.replace(old, new, 1)
-          p.write_text(s)
 
-          # 2) Supplied-name jobs are intentionally targeted. They must not turn
-          # into a global inactive recheck after the requested client finishes.
-          q = Path('src/processClientQueue.js')
-          t = q.read_text()
-          old2 = '''        if (job.operationalRoutingApproved === true && job.diagnosticOnly !== true) {\n            try {\n                job.summary.inactiveRecheck = await runInactiveRecheckSweep({'''
-          new2 = '''        if (\n            job.operationalRoutingApproved === true &&\n            job.diagnosticOnly !== true &&\n            job.clientNames.length === 0\n        ) {\n            try {\n                job.summary.inactiveRecheck = await runInactiveRecheckSweep({'''
-          if old2 not in t:
-              raise SystemExit('guard failed: inactive sweep gate not found')
-          t = t.replace(old2, new2, 1)
-          q.write_text(t)
+          old_sig = 'async function routeToWaitingForBureau(clientName, crcClientId, nowIso, nextFreeReportAt = null) {\n    const status = await statusOnlyUpdate({' 
+          new_sig = '''async function routeToWaitingForBureau(
+    clientName,
+    crcClientId,
+    nowIso,
+    nextFreeReportAt = null,
+    observedCrcStatus = null
+) {
+    // If the nightly CRC grid already positively observed the client at the
+    // target status, do not reopen Edit Profile merely to write the same value.
+    // The grid observation is authoritative enough to prove no status change is
+    // needed, and skipping the modal avoids false Manual Review when a populated
+    // profile modal is slow or unavailable.
+    const observedNormalized =
+        typeof observedCrcStatus === "string"
+            ? observedCrcStatus.trim().replace(/\\s+/g, " ").toLowerCase()
+            : "";
+
+    if (observedNormalized === "waiting for bureau") {
+        const write = await recordCreditHeroState(String(crcClientId), {
+            block_reason: "WAITING_FOR_FREE_REPORT",
+            last_credit_hero_check_at: nowIso,
+            crc_client_status: observedCrcStatus.trim(),
+        }).catch(() => null);
+
+        return {
+            status: {
+                targetStatus: "Waiting For Bureau",
+                previousStatus: observedCrcStatus.trim(),
+                statusUpdated: false,
+                statusWritten: observedCrcStatus.trim(),
+                alreadyCorrect: true,
+                error_code: null,
+                failureReason: null,
+            },
+            memoryWritten: write?.ok === true,
+        };
+    }
+
+    const status = await statusOnlyUpdate({'''
+
+          if old_sig not in s:
+              raise SystemExit('guard failed: routeToWaitingForBureau signature block not found')
+          s = s.replace(old_sig, new_sig, 1)
+
+          old_call_1 = '''        const { status, memoryWritten } = await routeToWaitingForBureau(
+            clientName, routeCrcId, nowIso, capture?.nextFreeReportAvailableAt ?? null
+        );'''
+          new_call_1 = '''        const { status, memoryWritten } = await routeToWaitingForBureau(
+            clientName,
+            routeCrcId,
+            nowIso,
+            capture?.nextFreeReportAvailableAt ?? null,
+            data.crcClientStatus ?? null
+        );'''
+          if old_call_1 not in s:
+              raise SystemExit('guard failed: capture waiting-route call not found')
+          s = s.replace(old_call_1, new_call_1, 1)
+
+          old_call_2 = '''        const { status, memoryWritten } = await routeToWaitingForBureau(
+            clientName, crcClientId, nowIso, successCapture?.nextFreeReportAvailableAt ?? null
+        );'''
+          new_call_2 = '''        const { status, memoryWritten } = await routeToWaitingForBureau(
+            clientName,
+            crcClientId,
+            nowIso,
+            successCapture?.nextFreeReportAvailableAt ?? null,
+            data.crcClientStatus ?? null
+        );'''
+          if old_call_2 not in s:
+              raise SystemExit('guard failed: eligibility waiting-route call not found')
+          s = s.replace(old_call_2, new_call_2, 1)
+
+          old_ok = '            ...base, ok: status.statusUpdated,\n            stage: "waiting_for_free_report",'
+          new_ok = '            ...base, ok: status.statusUpdated === true || status.alreadyCorrect === true,\n            stage: "waiting_for_free_report",'
+          count = s.count(old_ok)
+          if count != 2:
+              raise SystemExit(f'guard failed: expected 2 waiting-route ok expressions, found {count}')
+          s = s.replace(old_ok, new_ok)
+
+          p.write_text(s)
           PY
-      - name: Validate syntax
+
+      - name: Validate patch
         run: |
-          node --check src/inactiveWorkflow.js
-          node --check src/processClientQueue.js
-          node --check src/crcClientNotice.js
-      - name: Commit patch
+          node --check src/processProductionClient.js
+          grep -q 'observedNormalized === "waiting for bureau"' src/processProductionClient.js
+          test "$(grep -c 'status.alreadyCorrect === true' src/processProductionClient.js)" -eq 2
+
+      - name: Commit source patch
         run: |
-          if git diff --quiet; then
-            echo 'No source diff'
-            exit 0
-          fi
-          git config user.name actions
-          git config user.email actions@github.com
-          git add src/inactiveWorkflow.js src/processClientQueue.js
-          git commit -m 'Keep targeted retries isolated and notice sessions clean'
-          git push origin main
+          git config user.name "bt-waiting-route-fix-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/processProductionClient.js
+          git diff --cached --check
+          git commit -m 'Skip redundant Waiting for Bureau status writes'
+          git push origin HEAD:main
