@@ -27,63 +27,67 @@ jobs:
           p = Path('src/processProductionClient.js')
           s = p.read_text()
 
-          old_sig = "async function routeToWaitingForBureau(clientName, crcClientId, nowIso, nextFreeReportAt = null) {\n    const status = await statusOnlyUpdate({"
-          new_sig = (
-              "async function routeToWaitingForBureau(\n"
-              "    clientName,\n"
-              "    crcClientId,\n"
-              "    nowIso,\n"
-              "    nextFreeReportAt = null,\n"
-              "    observedCrcStatus = null\n"
-              ") {\n"
-              "    // If the nightly CRC grid already positively observed the client at the\n"
-              "    // target status, do not reopen Edit Profile merely to write the same value.\n"
-              "    // The grid observation is authoritative enough to prove no status change is\n"
-              "    // needed, and skipping the modal avoids false Manual Review when a populated\n"
-              "    // profile modal is slow or unavailable.\n"
-              "    const observedNormalized =\n"
-              "        typeof observedCrcStatus === \\\"string\\\"\n"
-              "            ? observedCrcStatus.trim().replace(/\\\\s+/g, \\\" \\\").toLowerCase()\n"
-              "            : \\\"\\\";\n\n"
-              "    if (observedNormalized === \\\"waiting for bureau\\\") {\n"
-              "        const write = await recordCreditHeroState(String(crcClientId), {\n"
-              "            block_reason: \\\"WAITING_FOR_FREE_REPORT\\\",\n"
-              "            last_credit_hero_check_at: nowIso,\n"
-              "            crc_client_status: observedCrcStatus.trim(),\n"
-              "        }).catch(() => null);\n\n"
-              "        return {\n"
-              "            status: {\n"
-              "                targetStatus: \\\"Waiting For Bureau\\\",\n"
-              "                previousStatus: observedCrcStatus.trim(),\n"
-              "                statusUpdated: false,\n"
-              "                statusWritten: observedCrcStatus.trim(),\n"
-              "                alreadyCorrect: true,\n"
-              "                error_code: null,\n"
-              "                failureReason: null,\n"
-              "            },\n"
-              "            memoryWritten: write?.ok === true,\n"
-              "        };\n"
-              "    }\n\n"
-              "    const status = await statusOnlyUpdate({"
-          )
+          old_sig = 'async function routeToWaitingForBureau(clientName, crcClientId, nowIso, nextFreeReportAt = null) {\n    const status = await statusOnlyUpdate({' 
+          new_sig = '\n'.join([
+              'async function routeToWaitingForBureau(',
+              '    clientName,',
+              '    crcClientId,',
+              '    nowIso,',
+              '    nextFreeReportAt = null,',
+              '    observedCrcStatus = null',
+              ') {',
+              '    // If the nightly CRC grid already positively observed the client at the',
+              '    // target status, do not reopen Edit Profile merely to write the same value.',
+              '    // The grid observation is authoritative enough to prove no status change is',
+              '    // needed, and skipping the modal avoids false Manual Review when a populated',
+              '    // profile modal is slow or unavailable.',
+              '    const observedNormalized =',
+              '        typeof observedCrcStatus === "string"',
+              '            ? observedCrcStatus.trim().replace(/\\s+/g, " ").toLowerCase()',
+              '            : "";',
+              '',
+              '    if (observedNormalized === "waiting for bureau") {',
+              '        const write = await recordCreditHeroState(String(crcClientId), {',
+              '            block_reason: "WAITING_FOR_FREE_REPORT",',
+              '            last_credit_hero_check_at: nowIso,',
+              '            crc_client_status: observedCrcStatus.trim(),',
+              '        }).catch(() => null);',
+              '',
+              '        return {',
+              '            status: {',
+              '                targetStatus: "Waiting For Bureau",',
+              '                previousStatus: observedCrcStatus.trim(),',
+              '                statusUpdated: false,',
+              '                statusWritten: observedCrcStatus.trim(),',
+              '                alreadyCorrect: true,',
+              '                error_code: null,',
+              '                failureReason: null,',
+              '            },',
+              '            memoryWritten: write?.ok === true,',
+              '        };',
+              '    }',
+              '',
+              '    const status = await statusOnlyUpdate({',
+          ])
+
           if old_sig not in s:
               raise SystemExit('guard failed: routeToWaitingForBureau signature block not found')
           s = s.replace(old_sig, new_sig, 1)
 
-          old_call_1 = "        const { status, memoryWritten } = await routeToWaitingForBureau(\n            clientName, routeCrcId, nowIso, capture?.nextFreeReportAvailableAt ?? null\n        );"
-          new_call_1 = "        const { status, memoryWritten } = await routeToWaitingForBureau(\n            clientName,\n            routeCrcId,\n            nowIso,\n            capture?.nextFreeReportAvailableAt ?? null,\n            data.crcClientStatus ?? null\n        );"
+          old_call_1 = '        const { status, memoryWritten } = await routeToWaitingForBureau(\n            clientName, routeCrcId, nowIso, capture?.nextFreeReportAvailableAt ?? null\n        );'
+          new_call_1 = '        const { status, memoryWritten } = await routeToWaitingForBureau(\n            clientName,\n            routeCrcId,\n            nowIso,\n            capture?.nextFreeReportAvailableAt ?? null,\n            data.crcClientStatus ?? null\n        );'
           if old_call_1 not in s:
               raise SystemExit('guard failed: capture waiting-route call not found')
           s = s.replace(old_call_1, new_call_1, 1)
 
-          old_call_2 = "        const { status, memoryWritten } = await routeToWaitingForBureau(\n            clientName, crcClientId, nowIso, successCapture?.nextFreeReportAvailableAt ?? null\n        );"
-          new_call_2 = "        const { status, memoryWritten } = await routeToWaitingForBureau(\n            clientName,\n            crcClientId,\n            nowIso,\n            successCapture?.nextFreeReportAvailableAt ?? null,\n            data.crcClientStatus ?? null\n        );"
+          old_call_2 = '        const { status, memoryWritten } = await routeToWaitingForBureau(\n            clientName, crcClientId, nowIso, successCapture?.nextFreeReportAvailableAt ?? null\n        );'
+          new_call_2 = '        const { status, memoryWritten } = await routeToWaitingForBureau(\n            clientName,\n            crcClientId,\n            nowIso,\n            successCapture?.nextFreeReportAvailableAt ?? null,\n            data.crcClientStatus ?? null\n        );'
           if old_call_2 not in s:
               raise SystemExit('guard failed: eligibility waiting-route call not found')
           s = s.replace(old_call_2, new_call_2, 1)
 
-          old_ok = "            ...base, ok: status.statusUpdated,\n            stage: \\\"waiting_for_free_report\\\","
-          new_ok = "            ...base, ok: status.statusUpdated === true || status.alreadyCorrect === true,\n            stage: \\\"waiting_for_free_report\\\","
+          old_ok = '            ...base, ok: status.statusUpdated,\n            stage: "waiting_for_free_report",'
+          new_ok = '            ...base, ok: status.statusUpdated === true || status.alreadyCorrect === true,\n            stage: "waiting_for_free_report",'
           count = s.count(old_ok)
           if count != 2:
               raise SystemExit(f'guard failed: expected 2 waiting-route ok expressions, found {count}')
