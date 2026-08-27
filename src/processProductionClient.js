@@ -133,7 +133,44 @@ function findCrcClientId(value, seen = new Set()) {
  *                     itself reported success (recordCreditHeroState().ok
  *                     === true). Not merely whether a write was attempted.
  */
-async function routeToWaitingForBureau(clientName, crcClientId, nowIso, nextFreeReportAt = null) {
+async function routeToWaitingForBureau(
+    clientName,
+    crcClientId,
+    nowIso,
+    nextFreeReportAt = null,
+    observedCrcStatus = null
+) {
+    // If the nightly CRC grid already positively observed the client at the
+    // target status, do not reopen Edit Profile merely to write the same value.
+    // The grid observation is authoritative enough to prove no status change is
+    // needed, and skipping the modal avoids false Manual Review when a populated
+    // profile modal is slow or unavailable.
+    const observedNormalized =
+        typeof observedCrcStatus === "string"
+            ? observedCrcStatus.trim().replace(/\s+/g, " ").toLowerCase()
+            : "";
+
+    if (observedNormalized === "waiting for bureau") {
+        const write = await recordCreditHeroState(String(crcClientId), {
+            block_reason: "WAITING_FOR_FREE_REPORT",
+            last_credit_hero_check_at: nowIso,
+            crc_client_status: observedCrcStatus.trim(),
+        }).catch(() => null);
+
+        return {
+            status: {
+                targetStatus: "Waiting For Bureau",
+                previousStatus: observedCrcStatus.trim(),
+                statusUpdated: false,
+                statusWritten: observedCrcStatus.trim(),
+                alreadyCorrect: true,
+                error_code: null,
+                failureReason: null,
+            },
+            memoryWritten: write?.ok === true,
+        };
+    }
+
     const status = await statusOnlyUpdate({
         clientName, crcClientId,
         targetStatus: "Waiting For Bureau",
@@ -525,11 +562,15 @@ export async function runProductionClient(data = {}) {
         }
 
         const { status, memoryWritten } = await routeToWaitingForBureau(
-            clientName, routeCrcId, nowIso, capture?.nextFreeReportAvailableAt ?? null
+            clientName,
+            routeCrcId,
+            nowIso,
+            capture?.nextFreeReportAvailableAt ?? null,
+            data.crcClientStatus ?? null
         );
 
         return {
-            ...base, ok: status.statusUpdated,
+            ...base, ok: status.statusUpdated === true || status.alreadyCorrect === true,
             stage: "waiting_for_free_report",
             blockedReason: "waiting_for_free_report",
             classification, crcClientId: routeCrcId,
@@ -658,11 +699,15 @@ export async function runProductionClient(data = {}) {
         }
 
         const { status, memoryWritten } = await routeToWaitingForBureau(
-            clientName, crcClientId, nowIso, successCapture?.nextFreeReportAvailableAt ?? null
+            clientName,
+            crcClientId,
+            nowIso,
+            successCapture?.nextFreeReportAvailableAt ?? null,
+            data.crcClientStatus ?? null
         );
 
         return {
-            ...base, ok: status.statusUpdated,
+            ...base, ok: status.statusUpdated === true || status.alreadyCorrect === true,
             stage: "waiting_for_free_report",
             blockedReason: "waiting_for_free_report",
             classification: successCapture?.classification ?? null,
