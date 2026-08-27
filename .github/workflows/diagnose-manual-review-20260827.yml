@@ -22,7 +22,7 @@ jobs:
           BASE_URL: https://business-trappers-ai-credit-processor-production.up.railway.app
         run: |
           set -euo pipefail
-          BODY='{"diagnosticOnly":true,"clientNames":["Kristina Tollon","Adriana Ellis-Fo"],"delayMs":1000,"maxClients":2}'
+          BODY='{"processingApproved":true,"diagnosticOnly":true,"clientNames":["Kristina Tollon","Adriana Ellis-Fo"],"delayMs":1000,"maxClients":2}'
           echo "Starting diagnostic-only queue..."
           RESPONSE=$(curl -fsS -X POST "$BASE_URL/process-client-queue" \
             -H 'Content-Type: application/json' \
