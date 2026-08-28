@@ -211,6 +211,23 @@ async function collectFilteredRows(page, term) {
             displayedName = displayedName.replace(/\s+/g, " ").trim() || null;
         }
 
+        // CRC Table Search matches the ENTIRE row. A team member/account owner can
+        // therefore make unrelated client rows appear just because their name is
+        // present in Team Members. Only admit rows whose actual client-name link
+        // matches the search term. Prefix matching preserves the existing
+        // suffix-free search fallback; selectClientRow still performs the final,
+        // fail-closed full-name/CRC-id identity verification afterward.
+        const normalizeName = (value) =>
+            typeof value === "string" ? value.replace(/\s+/g, " ").trim().toLowerCase() : "";
+        const actualClientName = normalizeName(displayedName);
+        const requestedClientName = normalizeName(term);
+        const clientNameMatchesSearch =
+            actualClientName === requestedClientName ||
+            actualClientName.startsWith(requestedClientName + " ");
+        if (!displayedName || !requestedClientName || !clientNameMatchesSearch) {
+            continue;
+        }
+
         rows.push({
             clientName: displayedName,
             crcClientId: hrefId, // from the dashboard href — enables id-authoritative selection
