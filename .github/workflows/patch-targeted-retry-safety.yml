@@ -1,4 +1,4 @@
-name: Patch redundant Waiting for Bureau status writes
+name: Patch CRC client-name matching
 
 on:
   push:
@@ -19,94 +19,66 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Apply guarded Waiting for Bureau patch
+      - name: Apply guarded client-name candidate patch
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          p = Path('src/processProductionClient.js')
+          p = Path('src/openClient.js')
           s = p.read_text()
 
-          old_sig = 'async function routeToWaitingForBureau(clientName, crcClientId, nowIso, nextFreeReportAt = null) {\n    const status = await statusOnlyUpdate({' 
-          new_sig = '\n'.join([
-              'async function routeToWaitingForBureau(',
-              '    clientName,',
-              '    crcClientId,',
-              '    nowIso,',
-              '    nextFreeReportAt = null,',
-              '    observedCrcStatus = null',
-              ') {',
-              '    // If the nightly CRC grid already positively observed the client at the',
-              '    // target status, do not reopen Edit Profile merely to write the same value.',
-              '    // The grid observation is authoritative enough to prove no status change is',
-              '    // needed, and skipping the modal avoids false Manual Review when a populated',
-              '    // profile modal is slow or unavailable.',
-              '    const observedNormalized =',
-              '        typeof observedCrcStatus === "string"',
-              '            ? observedCrcStatus.trim().replace(/\\s+/g, " ").toLowerCase()',
-              '            : "";',
-              '',
-              '    if (observedNormalized === "waiting for bureau") {',
-              '        const write = await recordCreditHeroState(String(crcClientId), {',
-              '            block_reason: "WAITING_FOR_FREE_REPORT",',
-              '            last_credit_hero_check_at: nowIso,',
-              '            crc_client_status: observedCrcStatus.trim(),',
-              '        }).catch(() => null);',
-              '',
-              '        return {',
-              '            status: {',
-              '                targetStatus: "Waiting For Bureau",',
-              '                previousStatus: observedCrcStatus.trim(),',
-              '                statusUpdated: false,',
-              '                statusWritten: observedCrcStatus.trim(),',
-              '                alreadyCorrect: true,',
-              '                error_code: null,',
-              '                failureReason: null,',
-              '            },',
-              '            memoryWritten: write?.ok === true,',
-              '        };',
-              '    }',
-              '',
-              '    const status = await statusOnlyUpdate({',
-          ])
+          needle = '''        rows.push({
+            clientName: displayedName,
+            crcClientId: hrefId, // from the dashboard href — enables id-authoritative selection
+            index: locators.length,
+        });
+        locators.push(nameLink);
+'''
+          replacement = '''        // CRC Table Search matches the ENTIRE row. A team member/account owner can
+        // therefore make unrelated client rows appear just because their name is
+        // present in Team Members. Only admit rows whose actual client-name link
+        // matches the search term. Prefix matching preserves the existing
+        // suffix-free search fallback; selectClientRow still performs the final,
+        // fail-closed full-name/CRC-id identity verification afterward.
+        const normalizeName = (value) =>
+            typeof value === "string" ? value.replace(/\\s+/g, " ").trim().toLowerCase() : "";
+        const actualClientName = normalizeName(displayedName);
+        const requestedClientName = normalizeName(term);
+        const clientNameMatchesSearch =
+            actualClientName === requestedClientName ||
+            actualClientName.startsWith(requestedClientName + " ");
+        if (!displayedName || !requestedClientName || !clientNameMatchesSearch) {
+            continue;
+        }
 
-          if old_sig not in s:
-              raise SystemExit('guard failed: routeToWaitingForBureau signature block not found')
-          s = s.replace(old_sig, new_sig, 1)
+        rows.push({
+            clientName: displayedName,
+            crcClientId: hrefId, // from the dashboard href — enables id-authoritative selection
+            index: locators.length,
+        });
+        locators.push(nameLink);
+'''
 
-          old_call_1 = '        const { status, memoryWritten } = await routeToWaitingForBureau(\n            clientName, routeCrcId, nowIso, capture?.nextFreeReportAvailableAt ?? null\n        );'
-          new_call_1 = '        const { status, memoryWritten } = await routeToWaitingForBureau(\n            clientName,\n            routeCrcId,\n            nowIso,\n            capture?.nextFreeReportAvailableAt ?? null,\n            data.crcClientStatus ?? null\n        );'
-          if old_call_1 not in s:
-              raise SystemExit('guard failed: capture waiting-route call not found')
-          s = s.replace(old_call_1, new_call_1, 1)
+          count = s.count(needle)
+          if count != 1:
+              raise SystemExit(f'guard failed: expected one candidate push block, found {count}')
+          if 'CRC Table Search matches the ENTIRE row' in s:
+              raise SystemExit('guard failed: client-name candidate patch already present')
 
-          old_call_2 = '        const { status, memoryWritten } = await routeToWaitingForBureau(\n            clientName, crcClientId, nowIso, successCapture?.nextFreeReportAvailableAt ?? null\n        );'
-          new_call_2 = '        const { status, memoryWritten } = await routeToWaitingForBureau(\n            clientName,\n            crcClientId,\n            nowIso,\n            successCapture?.nextFreeReportAvailableAt ?? null,\n            data.crcClientStatus ?? null\n        );'
-          if old_call_2 not in s:
-              raise SystemExit('guard failed: eligibility waiting-route call not found')
-          s = s.replace(old_call_2, new_call_2, 1)
-
-          old_ok = '            ...base, ok: status.statusUpdated,\n            stage: "waiting_for_free_report",'
-          new_ok = '            ...base, ok: status.statusUpdated === true || status.alreadyCorrect === true,\n            stage: "waiting_for_free_report",'
-          count = s.count(old_ok)
-          if count != 2:
-              raise SystemExit(f'guard failed: expected 2 waiting-route ok expressions, found {count}')
-          s = s.replace(old_ok, new_ok)
-
-          p.write_text(s)
+          p.write_text(s.replace(needle, replacement, 1))
           PY
 
       - name: Validate patch
         run: |
-          node --check src/processProductionClient.js
-          grep -q 'observedNormalized === "waiting for bureau"' src/processProductionClient.js
-          test "$(grep -c 'status.alreadyCorrect === true' src/processProductionClient.js)" -eq 2
+          node --check src/openClient.js
+          grep -q 'CRC Table Search matches the ENTIRE row' src/openClient.js
+          grep -q 'actualClientName.startsWith(requestedClientName + " ")' src/openClient.js
 
       - name: Commit source patch
         run: |
-          git config user.name "bt-waiting-route-fix-bot"
+          git config user.name "bt-client-name-match-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add src/processProductionClient.js
+          git add src/openClient.js
           git diff --cached --check
-          git commit -m 'Skip redundant Waiting for Bureau status writes'
+          git commit -m 'Match CRC clients by client-name link, not team-member text'
           git push origin HEAD:main
