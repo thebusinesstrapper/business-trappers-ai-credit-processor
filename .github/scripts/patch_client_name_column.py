@@ -3,56 +3,82 @@ from pathlib import Path
 p = Path('src/openClient.js')
 s = p.read_text()
 
-old = '''async function waitForFilteredRow(page, clientName) {
-    const row = page.locator(ROW_SELECTOR, { hasText: clientName }).first();
-
-    try {
-        await row.waitFor({ state: "visible", timeout: ROW_TIMEOUT });
-    } catch {
-        return null;
-    }
-
-    const nameLink = await findClientNameLink(row, clientName);
-
-    if (!nameLink) {
-        console.error(
-            `Matched a row for "${clientName}" but found no clickable client-name element inside it.`
-        );
-    }
-
-    return nameLink;
-}
+old_start = '''export async function openClient(page, clientName, knownCrcClientId = null) {
+    let searchInput;
 '''
 
-new = '''async function waitForFilteredRow(page, clientName) {
-    // CRC Table Search filters on every column, including Team Members. Do not
-    // choose the first row whose whole text contains the search term. Reuse the
-    // client-name-aware collector so only rows whose ACTUAL Client Name link
-    // matches the requested client are eligible for the ordinary path too.
-    const { rows, locators } = await collectFilteredRows(page, clientName);
-    if (!rows.length) return null;
+new_start = '''export async function openClient(page, clientName, knownCrcClientId = null) {
+    // Existing clients already have an authoritative CRC client ID in Supabase.
+    // Do not make those clients depend on CRC's broad Table Search, which matches
+    // Team Members and other columns as well as Client Name. Navigate directly to
+    // the known dashboard, then verify the resulting URL/ID before continuing.
+    const knownIdProvided =
+        knownCrcClientId != null && /^\\d+$/.test(String(knownCrcClientId).trim());
 
-    const selection = selectClientRow(rows, { fullName: clientName });
-    if (!selection.matched) {
-        if (selection.ambiguous) {
-            console.error(
-                `Client-name search for "${clientName}" remained ambiguous across ` +
-                `${selection.candidates} actual Client Name matches; refusing to guess.`
+    if (knownIdProvided) {
+        const knownId = String(knownCrcClientId).trim();
+        const directUrl = new URL(`/app/clients/${knownId}/dashboard`, page.url()).toString();
+        console.log(`Known CRC id ${knownId} supplied. Opening client dashboard directly by id.`);
+
+        try {
+            await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: DASHBOARD_TIMEOUT });
+            await page.waitForURL(
+                new RegExp(`/clients/${knownId}/dashboard(?:[/?#]|$)`),
+                { timeout: NAVIGATION_TIMEOUT }
             );
+            console.log(`Waiting for client dashboard to finish loading ("${DASHBOARD_READY_LABEL}")...`);
+            await waitForDashboardLoad(page);
+
+            const actualId = getCrcClientId(page);
+            if (String(actualId ?? "") !== knownId) {
+                throw new Error(
+                    `Direct CRC-id navigation expected client ${knownId} but resolved ${actualId ?? "none"}.`
+                );
+            }
+
+            const dashboardClientName = await readDashboardClientName(page, clientName);
+            const dashboardClientStatus = await readDashboardClientStatus(page);
+
+            console.log(`Client dashboard loaded directly by known id: ${page.url()}`);
+            console.log(`Derived crc_client_id: ${actualId}`);
+
+            return {
+                clientFound: true,
+                clientOpened: true,
+                crcClientId: actualId,
+                currentUrl: page.url(),
+                clientStatus: dashboardClientStatus,
+                pageTitle: await page.title(),
+                clientName: dashboardClientName,
+            };
+        } catch (error) {
+            console.error(`Failed direct CRC-id client open for ${knownId}: ${error.message}`);
+            await captureFailureContext(page, "known-id-client-open-failed");
+            throw error;
         }
-        return null;
     }
 
-    return locators[selection.row.index] ?? null;
-}
+    let searchInput;
 '''
 
-if 'client-name-aware collector' in s:
-    raise SystemExit('ordinary fallback patch already present')
+old_known = '''    const knownIdProvided =
+        knownCrcClientId != null && /^\\d+$/.test(String(knownCrcClientId).trim());
 
-count = s.count(old)
-if count != 1:
-    raise SystemExit(f'guard failed: expected exactly one waitForFilteredRow block, found {count}')
+    if (knownIdProvided) {
+'''
 
-p.write_text(s.replace(old, new, 1))
-print('guarded ordinary client-name fallback patch applied')
+new_known = '''    // No authoritative CRC id was supplied, so use the guarded name-search path.
+    if (knownIdProvided) {
+'''
+
+if 'Opening client dashboard directly by id' in s:
+    raise SystemExit('direct known-id patch already present')
+if s.count(old_start) != 1:
+    raise SystemExit(f'guard failed: expected one openClient start, found {s.count(old_start)}')
+if s.count(old_known) != 1:
+    raise SystemExit(f'guard failed: expected one later knownId declaration, found {s.count(old_known)}')
+
+s = s.replace(old_start, new_start, 1)
+s = s.replace(old_known, new_known, 1)
+p.write_text(s)
+print('guarded direct known-CRC-id navigation patch applied')
