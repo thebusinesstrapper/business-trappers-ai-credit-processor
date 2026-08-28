@@ -3,45 +3,56 @@ from pathlib import Path
 p = Path('src/openClient.js')
 s = p.read_text()
 
-needle = '''        rows.push({
-            clientName: displayedName,
-            crcClientId: hrefId, // from the dashboard href — enables id-authoritative selection
-            index: locators.length,
-        });
-        locators.push(nameLink);
+old = '''async function waitForFilteredRow(page, clientName) {
+    const row = page.locator(ROW_SELECTOR, { hasText: clientName }).first();
+
+    try {
+        await row.waitFor({ state: "visible", timeout: ROW_TIMEOUT });
+    } catch {
+        return null;
+    }
+
+    const nameLink = await findClientNameLink(row, clientName);
+
+    if (!nameLink) {
+        console.error(
+            `Matched a row for "${clientName}" but found no clickable client-name element inside it.`
+        );
+    }
+
+    return nameLink;
+}
 '''
 
-replacement = '''        // CRC Table Search matches the ENTIRE row. A team member/account owner can
-        // therefore make unrelated client rows appear just because their name is
-        // present in Team Members. Only admit rows whose actual client-name link
-        // matches the search term. Prefix matching preserves the existing
-        // suffix-free search fallback; selectClientRow still performs the final,
-        // fail-closed full-name/CRC-id identity verification afterward.
-        const normalizeName = (value) =>
-            typeof value === "string" ? value.replace(/\\s+/g, " ").trim().toLowerCase() : "";
-        const actualClientName = normalizeName(displayedName);
-        const requestedClientName = normalizeName(term);
-        const clientNameMatchesSearch =
-            actualClientName === requestedClientName ||
-            actualClientName.startsWith(requestedClientName + " ");
-        if (!displayedName || !requestedClientName || !clientNameMatchesSearch) {
-            continue;
+new = '''async function waitForFilteredRow(page, clientName) {
+    // CRC Table Search filters on every column, including Team Members. Do not
+    // choose the first row whose whole text contains the search term. Reuse the
+    // client-name-aware collector so only rows whose ACTUAL Client Name link
+    // matches the requested client are eligible for the ordinary path too.
+    const { rows, locators } = await collectFilteredRows(page, clientName);
+    if (!rows.length) return null;
+
+    const selection = selectClientRow(rows, { fullName: clientName });
+    if (!selection.matched) {
+        if (selection.ambiguous) {
+            console.error(
+                `Client-name search for "${clientName}" remained ambiguous across ` +
+                `${selection.candidates} actual Client Name matches; refusing to guess.`
+            );
         }
+        return null;
+    }
 
-        rows.push({
-            clientName: displayedName,
-            crcClientId: hrefId, // from the dashboard href — enables id-authoritative selection
-            index: locators.length,
-        });
-        locators.push(nameLink);
+    return locators[selection.row.index] ?? null;
+}
 '''
 
-if 'CRC Table Search matches the ENTIRE row' in s:
-    raise SystemExit('patch already present')
+if 'client-name-aware collector' in s:
+    raise SystemExit('ordinary fallback patch already present')
 
-count = s.count(needle)
+count = s.count(old)
 if count != 1:
-    raise SystemExit(f'guard failed: expected exactly one candidate push block, found {count}')
+    raise SystemExit(f'guard failed: expected exactly one waitForFilteredRow block, found {count}')
 
-p.write_text(s.replace(needle, replacement, 1))
-print('guarded client-name candidate patch applied')
+p.write_text(s.replace(old, new, 1))
+print('guarded ordinary client-name fallback patch applied')
