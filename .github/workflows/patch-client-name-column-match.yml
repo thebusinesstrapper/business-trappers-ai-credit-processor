@@ -1,0 +1,86 @@
+name: Patch client-name column matching
+
+on:
+  push:
+    paths:
+      - '.github/workflows/patch-client-name-column-match.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Patch openClient candidate filtering
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('src/openClient.js')
+          s = p.read_text()
+          old = '''        // Fallback name element (used only when the row exposes no dashboard link
+        // — e.g. an older DOM). Verify on the clickable NAME element's own text,
+        // not the whole row (which also carries status badges, icons, etc.).
+        const nameLink = clickTarget ?? (await findClientNameLink(rowEl, term));
+        let displayedName = null;
+        if (nameLink) {
+            displayedName = (await nameLink.textContent().catch(() => "")) || "";
+            displayedName = displayedName.replace(/\\s+/g, " ").trim() || null;
+        }
+
+        rows.push({
+            clientName: displayedName,
+            crcClientId: hrefId, // from the dashboard href — enables id-authoritative selection
+            index: locators.length,
+        });
+        locators.push(nameLink);
+'''
+          new = '''        // Fallback name element (used only when the row exposes no dashboard link
+        // — e.g. an older DOM). Verify on the clickable NAME element's own text,
+        // not the whole row (which also carries status badges, icons, etc.).
+        const nameLink = clickTarget ?? (await findClientNameLink(rowEl, term));
+        let displayedName = null;
+        if (nameLink) {
+            displayedName = (await nameLink.textContent().catch(() => "")) || "";
+            displayedName = displayedName.replace(/\\s+/g, " ").trim() || null;
+        }
+
+        // The CRC Table Search matches the ENTIRE row. For account owners/team
+        // members, the searched name can therefore appear in many unrelated rows
+        // under Team Members. Those rows are search hits, but they are NOT client
+        // matches. Admit a row only when the actual client dashboard/name link
+        // itself matches the requested search term. This keeps Team Member text
+        // out of identity matching while preserving known CRC-id verification.
+        const normalizeName = (value) =>
+            typeof value === "string" ? value.replace(/\\s+/g, " ").trim().toLowerCase() : "";
+        if (!displayedName || normalizeName(displayedName) !== normalizeName(term)) {
+            continue;
+        }
+
+        rows.push({
+            clientName: displayedName,
+            crcClientId: hrefId, // from the dashboard href — enables id-authoritative selection
+            index: locators.length,
+        });
+        locators.push(nameLink);
+'''
+          if old not in s:
+              raise SystemExit('Guard failed: expected collectFilteredRows block not found; refusing to patch')
+          if s.count(old) != 1:
+              raise SystemExit(f'Guard failed: expected exactly one target block, found {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+      - name: Syntax check
+        run: node --check src/openClient.js
+      - name: Commit patch
+        run: |
+          git config user.name "thebusinesstrapper"
+          git config user.email "thebusinesstrapper@gmail.com"
+          git add src/openClient.js
+          git diff --cached --quiet && exit 0
+          git commit -m "Match CRC clients by client-name link, not team-member text"
+          git push origin main
