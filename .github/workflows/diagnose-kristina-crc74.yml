@@ -1,0 +1,24 @@
+name: Diagnose Kristina CRC74 read only
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/diagnose-kristina-crc74.yml'
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Railway deploy
+        run: sleep 90
+      - name: Run M6 with authoritative CRC id
+        env:
+          BASE_URL: https://business-trappers-ai-credit-processor-production.up.railway.app
+        run: |
+          set -euo pipefail
+          curl -fsS -X POST "$BASE_URL/milestone-6" \
+            -H 'Content-Type: application/json' \
+            --data '{"clientName":"Kristina Tollon","crcClientId":"74","submitApproved":false,"operationalRoutingApproved":false}' \
+            | python3 -m json.tool
