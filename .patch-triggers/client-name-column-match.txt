@@ -1,0 +1,1 @@
+Apply the guarded CRC client-name column matching fix. 2026-08-28
