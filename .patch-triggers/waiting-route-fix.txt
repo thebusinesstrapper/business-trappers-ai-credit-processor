@@ -1,2 +1,2 @@
-Trigger guarded CRC client-name matching patch on 2026-08-28 attempt 3.
-Use actual Client Name links in both known-ID and ordinary fallback paths.
+Trigger guarded CRC client navigation patch on 2026-08-28 attempt 4.
+Existing clients with an authoritative CRC ID should bypass broad table search.
