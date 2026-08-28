@@ -2,28 +2,31 @@ name: Patch client-name column matching
 
 on:
   push:
+    branches: [main]
     paths:
-      - '.github/workflows/patch-client-name-column-match.yml'
-  workflow_dispatch:
+      - '.patch-triggers/client-name-column-match.txt'
 
 permissions:
   contents: write
 
 jobs:
   patch:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-      - name: Patch openClient candidate filtering
-        shell: bash
+
+      - name: Apply guarded client-name candidate patch
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
           p = Path('src/openClient.js')
           s = p.read_text()
+
           old = '''        // Fallback name element (used only when the row exposes no dashboard link
         // — e.g. an older DOM). Verify on the clickable NAME element's own text,
         // not the whole row (which also carries status badges, icons, etc.).
@@ -55,8 +58,7 @@ jobs:
         // therefore make unrelated client rows appear just because their name is
         // present in Team Members. Only admit rows whose actual client-name link
         // matches the search term. Prefix matching preserves the existing
-        // suffix-free search fallback: "Jane Doe" may legitimately identify the
-        // Client Name "Jane Doe Jr"; selectClientRow still performs the final,
+        // suffix-free search fallback; selectClientRow still performs the final,
         // fail-closed full-name/CRC-id identity verification afterward.
         const normalizeName = (value) =>
             typeof value === "string" ? value.replace(/\\s+/g, " ").trim().toLowerCase() : "";
@@ -64,7 +66,7 @@ jobs:
         const requestedClientName = normalizeName(term);
         const clientNameMatchesSearch =
             actualClientName === requestedClientName ||
-            actualClientName.startsWith(`${requestedClientName} `);
+            actualClientName.startsWith(requestedClientName + " ");
         if (!displayedName || !requestedClientName || !clientNameMatchesSearch) {
             continue;
         }
@@ -76,19 +78,26 @@ jobs:
         });
         locators.push(nameLink);
 '''
+
           if old not in s:
-              raise SystemExit('Guard failed: expected collectFilteredRows block not found; refusing to patch')
+              raise SystemExit('guard failed: expected collectFilteredRows block not found')
           if s.count(old) != 1:
-              raise SystemExit(f'Guard failed: expected exactly one target block, found {s.count(old)}')
+              raise SystemExit(f'guard failed: expected one target block, found {s.count(old)}')
+
           p.write_text(s.replace(old, new, 1))
           PY
-      - name: Syntax check
-        run: node --check src/openClient.js
-      - name: Commit patch
+
+      - name: Validate patch
         run: |
-          git config user.name "thebusinesstrapper"
-          git config user.email "thebusinesstrapper@gmail.com"
+          node --check src/openClient.js
+          grep -q 'CRC Table Search matches the ENTIRE row' src/openClient.js
+          grep -q 'actualClientName.startsWith(requestedClientName + " ")' src/openClient.js
+
+      - name: Commit source patch
+        run: |
+          git config user.name "bt-client-name-match-bot"
+          git config user.email "actions@users.noreply.github.com"
           git add src/openClient.js
-          git diff --cached --quiet && exit 0
-          git commit -m "Match CRC clients by client-name link, not team-member text"
-          git push origin main
+          git diff --cached --check
+          git commit -m 'Match CRC clients by client-name link, not team-member text'
+          git push origin HEAD:main
