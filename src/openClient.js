@@ -379,7 +379,9 @@ export async function openClient(page, clientName, knownCrcClientId = null) {
     // Do not make those clients depend on CRC's broad Table Search, which matches
     // Team Members and other columns as well as Client Name. Navigate directly to
     // the known dashboard, then verify the resulting URL/ID before continuing.
-    // No authoritative CRC id was supplied, so use the guarded name-search path.
+    const knownIdProvided =
+        knownCrcClientId != null && /^\d+$/.test(String(knownCrcClientId).trim());
+
     if (knownIdProvided) {
         const knownId = String(knownCrcClientId).trim();
         const directUrl = new URL(`/app/clients/${knownId}/dashboard`, page.url()).toString();
@@ -463,9 +465,7 @@ export async function openClient(page, clientName, knownCrcClientId = null) {
     //     This is not a second matching system — it is the existing one, applied
     //     to the primary search. Ordinary clients (no known id) keep the original
     //     first-match behavior below unchanged.
-    const knownIdProvided =
-        knownCrcClientId != null && /^\d+$/.test(String(knownCrcClientId).trim());
-
+    // No authoritative CRC id was supplied, so use the guarded name-search path.
     if (knownIdProvided) {
         const { rows, locators } = await collectFilteredRows(page, searchTerms[0]);
         const selection = selectClientRow(rows, {
