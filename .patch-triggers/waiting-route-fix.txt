@@ -1,2 +1,2 @@
-Trigger guarded CRC client-name matching patch on 2026-08-28.
+Trigger guarded CRC client-name matching patch on 2026-08-28 attempt 2.
 Exclude Team Members text from client identity candidates.
