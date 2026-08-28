@@ -2,7 +2,8 @@ name: Patch CRC client-name matching
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - '.patch-triggers/waiting-route-fix.txt'
 
@@ -11,74 +12,21 @@ permissions:
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-
-      - name: Apply guarded client-name candidate patch
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path('src/openClient.js')
-          s = p.read_text()
-
-          needle = '''        rows.push({
-            clientName: displayedName,
-            crcClientId: hrefId, // from the dashboard href — enables id-authoritative selection
-            index: locators.length,
-        });
-        locators.push(nameLink);
-'''
-          replacement = '''        // CRC Table Search matches the ENTIRE row. A team member/account owner can
-        // therefore make unrelated client rows appear just because their name is
-        // present in Team Members. Only admit rows whose actual client-name link
-        // matches the search term. Prefix matching preserves the existing
-        // suffix-free search fallback; selectClientRow still performs the final,
-        // fail-closed full-name/CRC-id identity verification afterward.
-        const normalizeName = (value) =>
-            typeof value === "string" ? value.replace(/\\s+/g, " ").trim().toLowerCase() : "";
-        const actualClientName = normalizeName(displayedName);
-        const requestedClientName = normalizeName(term);
-        const clientNameMatchesSearch =
-            actualClientName === requestedClientName ||
-            actualClientName.startsWith(requestedClientName + " ");
-        if (!displayedName || !requestedClientName || !clientNameMatchesSearch) {
-            continue;
-        }
-
-        rows.push({
-            clientName: displayedName,
-            crcClientId: hrefId, // from the dashboard href — enables id-authoritative selection
-            index: locators.length,
-        });
-        locators.push(nameLink);
-'''
-
-          count = s.count(needle)
-          if count != 1:
-              raise SystemExit(f'guard failed: expected one candidate push block, found {count}')
-          if 'CRC Table Search matches the ENTIRE row' in s:
-              raise SystemExit('guard failed: client-name candidate patch already present')
-
-          p.write_text(s.replace(needle, replacement, 1))
-          PY
-
-      - name: Validate patch
-        run: |
-          node --check src/openClient.js
-          grep -q 'CRC Table Search matches the ENTIRE row' src/openClient.js
-          grep -q 'actualClientName.startsWith(requestedClientName + " ")' src/openClient.js
-
+      - name: Apply guarded patch
+        run: python3 .github/scripts/patch_client_name_column.py
+      - name: Validate source
+        run: node --check src/openClient.js
       - name: Commit source patch
         run: |
           git config user.name "bt-client-name-match-bot"
           git config user.email "actions@users.noreply.github.com"
           git add src/openClient.js
           git diff --cached --check
-          git commit -m 'Match CRC clients by client-name link, not team-member text'
+          git commit -m "Match CRC clients by client-name link, not team-member text"
           git push origin HEAD:main
