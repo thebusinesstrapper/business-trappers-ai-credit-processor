@@ -133,23 +133,25 @@ async function findClientNameLink(row, clientName) {
  * row exists.
  */
 async function waitForFilteredRow(page, clientName) {
-    const row = page.locator(ROW_SELECTOR, { hasText: clientName }).first();
+    // CRC Table Search filters on every column, including Team Members. Do not
+    // choose the first row whose whole text contains the search term. Reuse the
+    // client-name-aware collector so only rows whose ACTUAL Client Name link
+    // matches the requested client are eligible for the ordinary path too.
+    const { rows, locators } = await collectFilteredRows(page, clientName);
+    if (!rows.length) return null;
 
-    try {
-        await row.waitFor({ state: "visible", timeout: ROW_TIMEOUT });
-    } catch {
+    const selection = selectClientRow(rows, { fullName: clientName });
+    if (!selection.matched) {
+        if (selection.ambiguous) {
+            console.error(
+                `Client-name search for "${clientName}" remained ambiguous across ` +
+                `${selection.candidates} actual Client Name matches; refusing to guess.`
+            );
+        }
         return null;
     }
 
-    const nameLink = await findClientNameLink(row, clientName);
-
-    if (!nameLink) {
-        console.error(
-            `Matched a row for "${clientName}" but found no clickable client-name element inside it.`
-        );
-    }
-
-    return nameLink;
+    return locators[selection.row.index] ?? null;
 }
 
 /**
