@@ -1,2 +1,1 @@
-Trigger guarded CRC client navigation patch on 2026-08-28 attempt 4.
-Existing clients with an authoritative CRC ID should bypass broad table search.
+Trigger guarded CRC client navigation validation on 2026-08-28 attempt 5.
