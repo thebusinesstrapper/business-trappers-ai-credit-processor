@@ -18,8 +18,9 @@ jobs:
           ref: main
           fetch-depth: 0
       - name: Patch openClient candidate filtering
-        shell: python
+        shell: bash
         run: |
+          python3 - <<'PY'
           from pathlib import Path
           p = Path('src/openClient.js')
           s = p.read_text()
@@ -50,15 +51,21 @@ jobs:
             displayedName = displayedName.replace(/\\s+/g, " ").trim() || null;
         }
 
-        // The CRC Table Search matches the ENTIRE row. For account owners/team
-        // members, the searched name can therefore appear in many unrelated rows
-        // under Team Members. Those rows are search hits, but they are NOT client
-        // matches. Admit a row only when the actual client dashboard/name link
-        // itself matches the requested search term. This keeps Team Member text
-        // out of identity matching while preserving known CRC-id verification.
+        // CRC Table Search matches the ENTIRE row. A team member/account owner can
+        // therefore make unrelated client rows appear just because their name is
+        // present in Team Members. Only admit rows whose actual client-name link
+        // matches the search term. Prefix matching preserves the existing
+        // suffix-free search fallback: "Jane Doe" may legitimately identify the
+        // Client Name "Jane Doe Jr"; selectClientRow still performs the final,
+        // fail-closed full-name/CRC-id identity verification afterward.
         const normalizeName = (value) =>
             typeof value === "string" ? value.replace(/\\s+/g, " ").trim().toLowerCase() : "";
-        if (!displayedName || normalizeName(displayedName) !== normalizeName(term)) {
+        const actualClientName = normalizeName(displayedName);
+        const requestedClientName = normalizeName(term);
+        const clientNameMatchesSearch =
+            actualClientName === requestedClientName ||
+            actualClientName.startsWith(`${requestedClientName} `);
+        if (!displayedName || !requestedClientName || !clientNameMatchesSearch) {
             continue;
         }
 
@@ -74,6 +81,7 @@ jobs:
           if s.count(old) != 1:
               raise SystemExit(f'Guard failed: expected exactly one target block, found {s.count(old)}')
           p.write_text(s.replace(old, new, 1))
+          PY
       - name: Syntax check
         run: node --check src/openClient.js
       - name: Commit patch
