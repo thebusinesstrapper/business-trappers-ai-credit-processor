@@ -1,4 +1,4 @@
-name: Patch client-name column matching
+name: Patch processing audit history
 
 on:
   push:
@@ -19,85 +19,112 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Apply guarded client-name candidate patch
+      - name: Apply guarded processing audit patch
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          p = Path('src/openClient.js')
+          p = Path('src/processProductionClient.js')
           s = p.read_text()
 
-          old = '''        // Fallback name element (used only when the row exposes no dashboard link
-        // — e.g. an older DOM). Verify on the clickable NAME element's own text,
-        // not the whole row (which also carries status badges, icons, etc.).
-        const nameLink = clickTarget ?? (await findClientNameLink(rowEl, term));
-        let displayedName = null;
-        if (nameLink) {
-            displayedName = (await nameLink.textContent().catch(() => "")) || "";
-            displayedName = displayedName.replace(/\\s+/g, " ").trim() || null;
-        }
+          old_import = 'import { runMilestone8 } from "./milestone8.js";\n'
+          new_import = old_import + 'import { recordSuccessfulProcessingRun } from "./processingRunHistory.js";\n'
+          if new_import not in s:
+              if s.count(old_import) != 1:
+                  raise SystemExit(f'guard failed: M8 import count={s.count(old_import)}')
+              s = s.replace(old_import, new_import, 1)
 
-        rows.push({
-            clientName: displayedName,
-            crcClientId: hrefId, // from the dashboard href — enables id-authoritative selection
-            index: locators.length,
-        });
-        locators.push(nameLink);
-'''
-          new = '''        // Fallback name element (used only when the row exposes no dashboard link
-        // — e.g. an older DOM). Verify on the clickable NAME element's own text,
-        // not the whole row (which also carries status badges, icons, etc.).
-        const nameLink = clickTarget ?? (await findClientNameLink(rowEl, term));
-        let displayedName = null;
-        if (nameLink) {
-            displayedName = (await nameLink.textContent().catch(() => "")) || "";
-            displayedName = displayedName.replace(/\\s+/g, " ").trim() || null;
-        }
-
-        // CRC Table Search matches the ENTIRE row. A team member/account owner can
-        // therefore make unrelated client rows appear just because their name is
-        // present in Team Members. Only admit rows whose actual client-name link
-        // matches the search term. Prefix matching preserves the existing
-        // suffix-free search fallback; selectClientRow still performs the final,
-        // fail-closed full-name/CRC-id identity verification afterward.
-        const normalizeName = (value) =>
-            typeof value === "string" ? value.replace(/\\s+/g, " ").trim().toLowerCase() : "";
-        const actualClientName = normalizeName(displayedName);
-        const requestedClientName = normalizeName(term);
-        const clientNameMatchesSearch =
-            actualClientName === requestedClientName ||
-            actualClientName.startsWith(requestedClientName + " ");
-        if (!displayedName || !requestedClientName || !clientNameMatchesSearch) {
-            continue;
-        }
-
-        rows.push({
-            clientName: displayedName,
-            crcClientId: hrefId, // from the dashboard href — enables id-authoritative selection
-            index: locators.length,
-        });
-        locators.push(nameLink);
+          marker = '''    return {
+        ...base,
+        crcClientId,
+        ok,
+        stage: "complete",
 '''
 
-          if old not in s:
-              raise SystemExit('guard failed: expected collectFilteredRows block not found')
-          if s.count(old) != 1:
-              raise SystemExit(f'guard failed: expected one target block, found {s.count(old)}')
+          audit = '''    // ---- DURABLE SUCCESS AUDIT --------------------------------------------
+    // Write processing_run_history only AFTER delivery is confirmed AND the
+    // lifecycle transition itself succeeds. This audit is intentionally
+    // non-authoritative for delivery: a failed audit write must never cause a
+    // resend, roll back a round, or mutate client_state.
+    let processingRunAudit = null;
+    const lifecycleSucceeded =
+        roundOutcome?.roundAdvanced === true ||
+        roundOutcome?.processComplete === true;
 
-          p.write_text(s.replace(old, new, 1))
+    if (deliveryConfirmed && lifecycleSucceeded) {
+        const exactReportDate = successCapture?.lastReportDate ?? null;
+        const attachmentSaveVerified =
+            m8?.messageSuccessConfirmed === true &&
+            Number.isInteger(m8?.expectedAttachmentCount) &&
+            m8.expectedAttachmentCount > 0 &&
+            m8?.verifiedAttachmentCount === m8.expectedAttachmentCount;
+
+        processingRunAudit = await recordSuccessfulProcessingRun({
+            crcClientId,
+            roundCompleted: deliveredRound,
+            reportDateUsed: exactReportDate,
+            eligibilityReason:
+                `Eligibility ${eligibilityHint}; confirmed delivery used report ${exactReportDate}.`,
+            lettersGenerated: Array.isArray(m7.letters) ? m7.letters.length : null,
+            crcSaveVerified: attachmentSaveVerified,
+            clientNotificationVerified: m8?.messageSuccessConfirmed === true,
+            resultingClientState: roundOutcome?.processComplete === true ? "complete" : "ready",
+            // Do not guess whether the fresh report was already visible or was
+            // newly ordered. Keep report_source null until M6 exposes that fact
+            // explicitly in its success contract.
+            reportSource: null,
+        }).catch((error) => ({
+            ok: false,
+            reason: "audit_writer_exception",
+            detail: error.message,
+        }));
+
+        if (processingRunAudit?.ok !== true) {
+            console.error(
+                `processing_run_history audit failed for CRC ${crcClientId}, round ${deliveredRound}: ` +
+                `${processingRunAudit?.reason ?? "unknown"}${processingRunAudit?.detail ? ` — ${processingRunAudit.detail}` : ""}`
+            );
+        }
+    }
+
+'''
+
+          if 'let processingRunAudit = null;' not in s:
+              if s.count(marker) != 1:
+                  raise SystemExit(f'guard failed: final return marker count={s.count(marker)}')
+              s = s.replace(marker, audit + marker, 1)
+
+          # Add the audit result to the returned production result for diagnosis.
+          old_return_piece = '''        deliveryConfirmed,
+        roundOutcome,
+        m7Summary: {
+'''
+          new_return_piece = '''        deliveryConfirmed,
+        roundOutcome,
+        processingRunAudit,
+        m7Summary: {
+'''
+          if new_return_piece not in s:
+              if s.count(old_return_piece) != 1:
+                  raise SystemExit(f'guard failed: return insertion count={s.count(old_return_piece)}')
+              s = s.replace(old_return_piece, new_return_piece, 1)
+
+          p.write_text(s)
           PY
 
       - name: Validate patch
         run: |
-          node --check src/openClient.js
-          grep -q 'CRC Table Search matches the ENTIRE row' src/openClient.js
-          grep -q 'actualClientName.startsWith(requestedClientName + " ")' src/openClient.js
+          node --check src/processingRunHistory.js
+          node --check src/processProductionClient.js
+          grep -q 'recordSuccessfulProcessingRun' src/processProductionClient.js
+          grep -q 'processingRunAudit' src/processProductionClient.js
+          grep -q 'lifecycleSucceeded' src/processProductionClient.js
 
       - name: Commit source patch
         run: |
-          git config user.name "bt-client-name-match-bot"
+          git config user.name "bt-processing-audit-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add src/openClient.js
+          git add src/processProductionClient.js
           git diff --cached --check
-          git commit -m 'Match CRC clients by client-name link, not team-member text'
+          git commit -m 'Persist successful processing run history'
           git push origin HEAD:main
