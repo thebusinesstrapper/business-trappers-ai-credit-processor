@@ -1,0 +1,88 @@
+from pathlib import Path
+
+p = Path('src/processProductionClient.js')
+s = p.read_text()
+
+old_import = 'import { runMilestone8 } from "./milestone8.js";\n'
+new_import = old_import + 'import { recordSuccessfulProcessingRun } from "./processingRunHistory.js";\n'
+if new_import not in s:
+    if s.count(old_import) != 1:
+        raise SystemExit(f'guard failed: M8 import count={s.count(old_import)}')
+    s = s.replace(old_import, new_import, 1)
+
+marker = '''    return {
+        ...base,
+        crcClientId,
+        ok,
+        stage: "complete",
+'''
+
+audit = '''    // ---- DURABLE SUCCESS AUDIT --------------------------------------------
+    // Write processing_run_history only AFTER delivery is confirmed AND the
+    // lifecycle transition itself succeeds. This audit is intentionally
+    // non-authoritative for delivery: a failed audit write must never cause a
+    // resend, roll back a round, or mutate client_state.
+    let processingRunAudit = null;
+    const lifecycleSucceeded =
+        roundOutcome?.roundAdvanced === true ||
+        roundOutcome?.processComplete === true;
+
+    if (deliveryConfirmed && lifecycleSucceeded) {
+        const exactReportDate = successCapture?.lastReportDate ?? null;
+        const attachmentSaveVerified =
+            m8?.messageSuccessConfirmed === true &&
+            Number.isInteger(m8?.expectedAttachmentCount) &&
+            m8.expectedAttachmentCount > 0 &&
+            m8?.verifiedAttachmentCount === m8.expectedAttachmentCount;
+
+        processingRunAudit = await recordSuccessfulProcessingRun({
+            crcClientId,
+            roundCompleted: deliveredRound,
+            reportDateUsed: exactReportDate,
+            eligibilityReason:
+                `Eligibility ${eligibilityHint}; confirmed delivery used report ${exactReportDate}.`,
+            lettersGenerated: Array.isArray(m7.letters) ? m7.letters.length : null,
+            crcSaveVerified: attachmentSaveVerified,
+            clientNotificationVerified: m8?.messageSuccessConfirmed === true,
+            resultingClientState: roundOutcome?.processComplete === true ? "complete" : "ready",
+            // Do not guess whether the fresh report was already visible or was
+            // newly ordered. Keep report_source null until M6 exposes that fact
+            // explicitly in its success contract.
+            reportSource: null,
+        }).catch((error) => ({
+            ok: false,
+            reason: "audit_writer_exception",
+            detail: error.message,
+        }));
+
+        if (processingRunAudit?.ok !== true) {
+            console.error(
+                `processing_run_history audit failed for CRC ${crcClientId}, round ${deliveredRound}: ` +
+                `${processingRunAudit?.reason ?? "unknown"}${processingRunAudit?.detail ? ` — ${processingRunAudit.detail}` : ""}`
+            );
+        }
+    }
+
+'''
+
+if 'let processingRunAudit = null;' not in s:
+    if s.count(marker) != 1:
+        raise SystemExit(f'guard failed: final return marker count={s.count(marker)}')
+    s = s.replace(marker, audit + marker, 1)
+
+old_return_piece = '''        deliveryConfirmed,
+        roundOutcome,
+        m7Summary: {
+'''
+new_return_piece = '''        deliveryConfirmed,
+        roundOutcome,
+        processingRunAudit,
+        m7Summary: {
+'''
+if new_return_piece not in s:
+    if s.count(old_return_piece) != 1:
+        raise SystemExit(f'guard failed: return insertion count={s.count(old_return_piece)}')
+    s = s.replace(old_return_piece, new_return_piece, 1)
+
+p.write_text(s)
+print('processing audit source patch applied')
