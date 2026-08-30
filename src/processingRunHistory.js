@@ -6,6 +6,12 @@ function validIsoDate(value) {
     return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
+function validIsoTimestamp(value) {
+    if (typeof value !== "string" || !value.trim()) return false;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed);
+}
+
 function nonNegativeIntOrNull(value) {
     return Number.isInteger(value) && value >= 0 ? value : null;
 }
@@ -26,6 +32,7 @@ export async function recordSuccessfulProcessingRun({
     crcClientId,
     roundCompleted,
     reportDateUsed,
+    startedAt,
     eligibilityReason,
     lettersGenerated = null,
     crcSaveVerified = false,
@@ -46,6 +53,9 @@ export async function recordSuccessfulProcessingRun({
     }
     if (!validIsoDate(reportDateUsed)) {
         return { ok: false, reason: "valid_report_date_required" };
+    }
+    if (!validIsoTimestamp(startedAt)) {
+        return { ok: false, reason: "valid_started_at_required" };
     }
 
     const allowedStates = new Set(["ready", "processing", "waiting", "blocked", "complete"]);
@@ -74,6 +84,7 @@ export async function recordSuccessfulProcessingRun({
 
     const payload = {
         crc_client_id: id,
+        started_at: new Date(startedAt).toISOString(),
         completed_at: new Date().toISOString(),
         round_attempted: round,
         round_completed: round,
