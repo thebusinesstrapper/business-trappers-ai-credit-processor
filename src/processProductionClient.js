@@ -266,6 +266,10 @@ function traceApproval(data, stage, values) {
 }
 
 export async function runProductionClient(data = {}) {
+    // Capture the real production-run start time before any preflight/browser
+    // work. processing_run_history must not use its insert time as started_at.
+    const processingRunStartedAt = new Date().toISOString();
+
     const clientName =
         typeof data.clientName === "string"
             ? data.clientName.trim().replace(/\s+/g, " ")
@@ -964,6 +968,7 @@ export async function runProductionClient(data = {}) {
             crcClientId,
             roundCompleted: deliveredRound,
             reportDateUsed: exactReportDate,
+            startedAt: processingRunStartedAt,
             eligibilityReason:
                 `Eligibility ${eligibilityHint}; confirmed delivery used report ${exactReportDate}.`,
             lettersGenerated: Array.isArray(m7.letters) ? m7.letters.length : null,
