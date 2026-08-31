@@ -1,1 +1,1 @@
-Apply processing_run_history start-time correction. 2026-08-30
+Remove obsolete GitHub Actions workflows. 2026-08-31
