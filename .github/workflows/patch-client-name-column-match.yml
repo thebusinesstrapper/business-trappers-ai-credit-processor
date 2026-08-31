@@ -1,4 +1,4 @@
-name: Patch processing audit history
+name: One-time cleanup obsolete GitHub Actions
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  patch:
+  cleanup:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
@@ -19,22 +19,16 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Apply guarded patch
-        run: python3 .github/scripts/patch_processing_audit.py
-
-      - name: Validate patch
+      - name: Remove obsolete one-time workflow files
         run: |
-          node --check src/processingRunHistory.js
-          node --check src/processProductionClient.js
-          grep -q 'recordSuccessfulProcessingRun' src/processProductionClient.js
-          grep -q 'processingRunAudit' src/processProductionClient.js
-          grep -q 'lifecycleSucceeded' src/processProductionClient.js
+          rm -f .github/workflows/*.yml
+          rm -f .github/workflows/*.yaml
 
-      - name: Commit source patch
+      - name: Commit cleanup
         run: |
-          git config user.name "bt-processing-audit-bot"
+          git config user.name "bt-actions-cleanup-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add src/processProductionClient.js
+          git add -A .github/workflows
           git diff --cached --check
-          git commit -m 'Persist successful processing run history'
+          git commit -m "Remove obsolete one-time GitHub Actions workflows"
           git push origin HEAD:main
