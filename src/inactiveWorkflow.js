@@ -224,7 +224,26 @@ export async function runInactiveWorkflow(opts = {}) {
         report.inactiveEpisodeReset = true;
     }
 
-    const decision = decideNoticeAction(state);
+    let decision = decideNoticeAction(state);
+
+    // LEGACY REMINDER CUTOVER. Before the 2026-09-01 race/episode fix, notice
+    // timestamps could survive a reactivation and later manufacture a stale
+    // "7-day reminder." Those pre-fix timestamps remain useful audit history,
+    // but they are never again authority to message a client. Only notices sent
+    // under the corrected episode logic may generate a future reminder.
+    const legacyReminderCutoffMs = Date.parse("2026-09-01T18:00:00Z");
+    const noticeMs = Date.parse(String(state.inactive_notice_sent_at ?? ""));
+    if (
+        decision.action === PLANNED_ACTION.SEND_REMINDER &&
+        Number.isFinite(noticeMs) &&
+        noticeMs < legacyReminderCutoffMs
+    ) {
+        decision = {
+            action: PLANNED_ACTION.NO_MESSAGE_DUE,
+            reason: "legacy_pre_fix_reminder_suppressed",
+        };
+    }
+
     report.plannedAction = decision.action;
     report.plannedReason = decision.reason;
 
