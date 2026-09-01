@@ -1,0 +1,31 @@
+name: One-time legacy inactive reminder cutover
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-legacy-inactive-reminder-cutover.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Apply guarded cutover
+        run: python .github/scripts/patch_legacy_inactive_reminders.py
+      - name: Syntax check
+        run: node --check src/inactiveWorkflow.js
+      - name: Commit and remove one-time workflow
+        run: |
+          rm -f .github/workflows/apply-legacy-inactive-reminder-cutover.yml
+          git config user.name 'thebusinesstrapper'
+          git config user.email 'thebusinesstrapper@gmail.com'
+          git add src/inactiveWorkflow.js .github/workflows/apply-legacy-inactive-reminder-cutover.yml
+          git diff --cached --quiet && exit 1
+          git commit -m 'Suppress all legacy inactive reminders'
+          git push
