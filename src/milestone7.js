@@ -186,7 +186,10 @@ export async function runMilestone7(data = {}) {
         const currentRoundFloor = Number.isInteger(data.currentRound) && data.currentRound > 0
             ? data.currentRound
             : null;
-        const pipeline = await runPipeline(report, identity, { currentRoundFloor });
+        const pipeline = await runPipeline(report, identity, {
+            currentRoundFloor,
+            itemHistory: data.itemHistory ?? {},
+        });
 
         return successResponse({
             milestone: "M7_FULL_PIPELINE",

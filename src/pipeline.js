@@ -29,7 +29,7 @@ import { exportLetterResult } from "./letterRenderer.js";
  *                  by selectStrategy. Prevents round mismatch when history is empty.
  */
 export async function runPipeline(report, identity = null, options = {}) {
-    const { currentRoundFloor = null } = options;
+    const { currentRoundFloor = null, itemHistory = {} } = options;
 
     // STAGE 1: ANALYSIS (reasoning only)
     const analysis = await analyzeCreditReport(report, {
@@ -44,6 +44,7 @@ export async function runPipeline(report, identity = null, options = {}) {
     // can compute round as max(priorRounds.length+1, currentRoundFloor).
     const strategies = await selectStrategy(decisions, {
         currentRoundFloor,
+        itemHistory,
     });
 
     // STAGE 4: CHAIN (assemble the dispute package)
@@ -101,6 +102,11 @@ export async function runPipeline(report, identity = null, options = {}) {
     const result = {
         analysis_summary: analysis.clientSummary ?? null,
         item_decisions: decisions.itemDecisions ?? [],
+        // Durable strategy-memory metadata. These are reasoning records only;
+        // no binary letter contents are added to the JSON response.
+        item_strategies: strategies.itemStrategies ?? [],
+        dispute_chain_items: chain.items ?? [],
+        strategy_summary: strategies.summary ?? null,
         letters: letterResult.letters ?? [],
         withheld: letterResult.withheld ?? [],
         letters_ok: letterResult.lettersOk ?? false,

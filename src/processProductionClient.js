@@ -18,6 +18,7 @@ import {
 } from "./clientMemory.js";
 import { runMilestone8 } from "./milestone8.js";
 import { recordSuccessfulProcessingRun } from "./processingRunHistory.js";
+import { readItemDisputeHistory, recordDeliveredItemHistory } from "./itemDisputeHistory.js";
 
 /**
  * Read-only, sanitized projection of the raw m7.withheld array into the four
@@ -341,9 +342,26 @@ export async function runProductionClient(data = {}) {
     // Retain stored client_state outside the preflight if block so current_round
     // can be threaded into runMilestone7. Fail open: null if no valid state.
     let storedState = null;
+    let storedItemHistory = {};
+    let itemHistoryRead = { ok: true, itemHistory: {}, rows: [] };
 
     if (preflightId) {
         storedState = await readClientState(preflightId).catch(() => null);
+        itemHistoryRead = await readItemDisputeHistory(preflightId).catch((error) => ({
+            ok: false,
+            reason: "item_history_read_exception",
+            detail: error.message,
+            itemHistory: {},
+            rows: [],
+        }));
+        storedItemHistory = itemHistoryRead?.itemHistory ?? {};
+
+        if (itemHistoryRead?.ok !== true) {
+            console.error(
+                `item_dispute_history read failed for CRC ${preflightId}: ` +
+                `${itemHistoryRead?.reason ?? "unknown"}${itemHistoryRead?.detail ? ` — ${itemHistoryRead.detail}` : ""}`
+            );
+        }
         const todayIso = new Date().toISOString().slice(0, 10);
         const preflight = decideDailyPreflight(storedState, todayIso);
 
@@ -389,6 +407,7 @@ export async function runProductionClient(data = {}) {
         currentRound: storedState?.current_round != null && Number.isInteger(Number(storedState.current_round)) && Number(storedState.current_round) > 0
             ? Number(storedState.current_round)
             : null,
+        itemHistory: storedItemHistory,
     });
     const m7LettersOk = m7?.lettersOk === true || m7?.letters_ok === true;
 
@@ -956,7 +975,32 @@ export async function runProductionClient(data = {}) {
         roundOutcome?.roundAdvanced === true ||
         roundOutcome?.processComplete === true;
 
+    let itemHistoryAudit = null;
+
     if (deliveryConfirmed && lifecycleSucceeded) {
+        itemHistoryAudit = await recordDeliveredItemHistory({
+            crcClientId,
+            roundCompleted: deliveredRound,
+            chainItems: Array.isArray(m7?.dispute_chain_items) ? m7.dispute_chain_items : [],
+        }).catch((error) => ({
+            ok: false,
+            reason: "item_history_writer_exception",
+            detail: error.message,
+            written: 0,
+        }));
+
+        if (itemHistoryAudit?.ok !== true) {
+            console.error(
+                `item_dispute_history persistence failed for CRC ${crcClientId}, round ${deliveredRound}: ` +
+                `${itemHistoryAudit?.reason ?? "write_errors"}${itemHistoryAudit?.detail ? ` — ${itemHistoryAudit.detail}` : ""}`
+            );
+        } else {
+            console.log(
+                `item_dispute_history persisted for CRC ${crcClientId}, round ${deliveredRound}: ` +
+                `${itemHistoryAudit.written ?? 0} written, ${itemHistoryAudit.duplicates ?? 0} duplicate-safe.`
+            );
+        }
+
         const exactReportDate = successCapture?.lastReportDate ?? null;
         const attachmentSaveVerified =
             m8?.messageSuccessConfirmed === true &&
@@ -1002,6 +1046,12 @@ export async function runProductionClient(data = {}) {
         deliveryConfirmed,
         roundOutcome,
         processingRunAudit,
+        itemHistoryRead: {
+            ok: itemHistoryRead?.ok === true,
+            rows: Array.isArray(itemHistoryRead?.rows) ? itemHistoryRead.rows.length : 0,
+            reason: itemHistoryRead?.ok === true ? null : (itemHistoryRead?.reason ?? "unknown"),
+        },
+        itemHistoryAudit,
         m7Summary: {
             success: m7.success !== false,
             lettersOk: m7LettersOk,
