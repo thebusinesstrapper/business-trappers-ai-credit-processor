@@ -446,6 +446,10 @@ export async function runProductionClient(data = {}) {
             clientName,
             crcClientId: routeCrcId,
             inactiveWorkflowApproved: data.inactiveWorkflowApproved === true,
+            // Timestamp belongs to this live M7 CHS_NOT_ACTIVATED classification.
+            // runInactiveWorkflow compares it with any newer active/reactivated
+            // observation before it is allowed to message the client.
+            confirmedInactiveAt: new Date().toISOString(),
             // Temporary diagnostic: read the prefilled recipient and change nothing.
             noticeDiagnosticOnly: data.noticeDiagnosticOnly === true,
         });

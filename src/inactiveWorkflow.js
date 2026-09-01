@@ -32,6 +32,7 @@ import { loginToCRC } from "./crcLogin.js";
 import { openClient } from "./openClient.js";
 import { getCrcClientId } from "./crcClientId.js";
 import { loadOrCreateClientMemory, readClientState } from "./clientMemory.js";
+import { evaluateInactiveMessageGate } from "./inactiveMessageGate.js";
 
 export const INACTIVE_WORKFLOW_VERSION = "BT-INACTIVE-1.0";
 
@@ -139,7 +140,7 @@ function resolveFirstName(identity, clientName) {
  * @param {boolean} opts.inactiveWorkflowApproved  must be true to act
  */
 export async function runInactiveWorkflow(opts = {}) {
-    const { clientName, crcClientId: suppliedId, inactiveWorkflowApproved, noticeDiagnosticOnly } = opts;
+    const { clientName, crcClientId: suppliedId, inactiveWorkflowApproved, noticeDiagnosticOnly, confirmedInactiveAt } = opts;
     const nowIso = new Date().toISOString();
     let crcClientId = suppliedId;
 
@@ -199,6 +200,30 @@ export async function runInactiveWorkflow(opts = {}) {
         return report;
     }
 
+    // SEND-TIME RACE GATE. The caller must supply when CreditHero was positively
+    // confirmed inactive. A stale inactive sweep is not allowed to outrank a
+    // newer active/reactivated observation written by another branch of the same run.
+    const initialGate = evaluateInactiveMessageGate(state, confirmedInactiveAt);
+    if (!initialGate.allow) {
+        report.plannedAction = PLANNED_ACTION.NO_MESSAGE_DUE;
+        report.plannedReason = initialGate.reason;
+        report.failureReason = `SUPPRESSED — ${initialGate.reason}. No inactive message or status write.`;
+        return report;
+    }
+
+    if (initialGate.newInactiveEpisode) {
+        // A prior inactive episode ended when monitoring reactivated. The old
+        // notice/reminder dates cannot carry into a later lapse and manufacture
+        // an immediate 7-day reminder. Reset the episode durably before deciding.
+        await recordCreditHeroState(crcClientId, {
+            inactive_notice_sent_at: null,
+            inactive_reminder_sent_at: null,
+            inactive_notice_last_error: null,
+        });
+        state = { ...state, inactive_notice_sent_at: null, inactive_reminder_sent_at: null };
+        report.inactiveEpisodeReset = true;
+    }
+
     const decision = decideNoticeAction(state);
     report.plannedAction = decision.action;
     report.plannedReason = decision.reason;
@@ -242,6 +267,18 @@ export async function runInactiveWorkflow(opts = {}) {
     }
 
     try {
+
+    // FINAL SEND-TIME RACE GATE. Another branch may have confirmed the client
+    // active while this workflow was opening CRC. Re-read authoritative memory
+    // immediately before any inactive memory/status/message write.
+    const sendGateState = (await readClientState(String(crcClientId))) ?? {};
+    const sendGate = evaluateInactiveMessageGate(sendGateState, confirmedInactiveAt);
+    if (!sendGate.allow) {
+        report.plannedAction = PLANNED_ACTION.NO_MESSAGE_DUE;
+        report.plannedReason = sendGate.reason;
+        report.failureReason = `SUPPRESSED AT SEND TIME — ${sendGate.reason}. No inactive message or status write.`;
+        return report;
+    }
 
     // ---- DIAGNOSTIC-ONLY SHORT PATH (temporary) ---------------------------
     // When noticeDiagnosticOnly is set, we ONLY read the prefilled recipient and

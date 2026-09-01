@@ -188,6 +188,7 @@ export async function runInactiveRecheckSweep(deps) {
                             clientName: client.clientName,
                             crcClientId: client.crcClientId,
                             inactiveWorkflowApproved: true,
+                            confirmedInactiveAt: new Date().toISOString(),
                         });
                         entry.notice = {
                             plannedAction: notice?.plannedAction ?? null,
