@@ -169,6 +169,8 @@ const STATUS_VALUE_SELECTOR = ".clientStatusValue";
 
 const ROWS_READY_TIMEOUT_MS = 15000;
 const ROWS_POLL_MS = 250;
+const QUEUE_SCAN_MAX_ATTEMPTS = 3;
+const QUEUE_SCAN_RETRY_DELAY_MS = 5000;
 
 /**
  * Wait for real client cells to exist.
@@ -240,7 +242,12 @@ async function readStatusFromFragment(row) {
  * never returns them.
  */
 async function extractVisibleClientRows(page) {
-    await waitForGridRows(page);
+    const rowsReady = await waitForGridRows(page);
+    if (!rowsReady) {
+        throw new Error(
+            `CRC_CLIENT_GRID_TIMEOUT: no client-name cells appeared within ${ROWS_READY_TIMEOUT_MS}ms.`
+        );
+    }
 
     const rows = await visibleRows(page);
     const count = await rows.count();
@@ -297,7 +304,7 @@ async function nextPageButton(page) {
     return null;
 }
 
-async function readEligibleQueue(excludedStatuses) {
+async function readEligibleQueueOnce(excludedStatuses) {
     const { browser, page } = await launchBrowser();
 
     try {
@@ -396,6 +403,43 @@ async function readEligibleQueue(excludedStatuses) {
     } finally {
         await browser.close().catch(() => {});
     }
+}
+
+/**
+ * Retry the entire CRC queue scan in a FRESH browser session. CRC is a third-
+ * party UI; one transient DataGrid/navigation failure must not kill the whole
+ * nightly production run. Each readEligibleQueueOnce() call owns and closes its
+ * own Browserbase session, so a failed attempt cannot poison the next attempt.
+ */
+async function readEligibleQueue(excludedStatuses) {
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= QUEUE_SCAN_MAX_ATTEMPTS; attempt += 1) {
+        try {
+            console.log(`[QUEUE_SCAN] attempt ${attempt}/${QUEUE_SCAN_MAX_ATTEMPTS} starting.`);
+            const result = await readEligibleQueueOnce(excludedStatuses);
+            console.log(
+                `[QUEUE_SCAN] attempt ${attempt} succeeded: ` +
+                `scanned=${result.scannedRows}, eligible=${result.eligibleRows}, queued=${result.queue.length}.`
+            );
+            return { ...result, scanAttempts: attempt };
+        } catch (error) {
+            lastError = error;
+            const message = safeMessage(error?.message) ?? 'Unknown queue scan error';
+            console.error(
+                `[QUEUE_SCAN] attempt ${attempt}/${QUEUE_SCAN_MAX_ATTEMPTS} failed: ${message}`
+            );
+
+            if (attempt < QUEUE_SCAN_MAX_ATTEMPTS) {
+                await new Promise((resolve) => setTimeout(resolve, QUEUE_SCAN_RETRY_DELAY_MS));
+            }
+        }
+    }
+
+    const finalMessage = safeMessage(lastError?.message) ?? 'Unknown queue scan error';
+    throw new Error(
+        `CRC_QUEUE_SCAN_FAILED_AFTER_${QUEUE_SCAN_MAX_ATTEMPTS}_ATTEMPTS: ${finalMessage}`
+    );
 }
 
 /** Short identifier-ish strings only. Never free text, never objects. */
@@ -1293,6 +1337,7 @@ async function runJob(job) {
 
             job.summary.scannedRows = scan.scannedRows;
             job.summary.eligibleRows = scan.eligibleRows;
+            job.summary.scanAttempts = scan.scanAttempts ?? 1;
             job.summary.ambiguousNames = scan.ambiguous.length;
 
             for (const item of scan.ambiguous) {
@@ -1638,14 +1683,26 @@ async function runJob(job) {
             job.status = "complete";
         }
     } catch (error) {
+        const failedStage = job.status;
         job.status = "failed";
         job.fatalError = {
             message: error.message,
             stack: error.stack,
+            failedStage,
         };
+
+        console.error(
+            `[QUEUE_FATAL] job ${job.jobId} failed during ${failedStage}: ` +
+            `${safeMessage(error?.message) ?? "Unknown queue failure"}`
+        );
     } finally {
         job.currentClient = null;
         job.completedAt = new Date().toISOString();
+        console.log(
+            `[QUEUE_DONE] job ${job.jobId} status=${job.status} ` +
+            `scanned=${job.summary?.scannedRows ?? 0} queued=${job.summary?.queued ?? 0} ` +
+            `processed=${job.summary?.processed ?? 0} sent=${job.summary?.sent ?? 0}.`
+        );
     }
 }
 
