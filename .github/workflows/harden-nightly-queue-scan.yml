@@ -1,0 +1,72 @@
+name: Harden nightly queue scan
+
+on:
+  push:
+    paths:
+      - '.github/workflows/harden-nightly-queue-scan.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch queue scan retry and fatal logging
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/processClientQueue.js')
+          text = path.read_text()
+
+          replacements = []
+
+          old = '''const ROWS_READY_TIMEOUT_MS = 15000;\nconst ROWS_POLL_MS = 250;'''
+          new = '''const ROWS_READY_TIMEOUT_MS = 15000;\nconst ROWS_POLL_MS = 250;\nconst QUEUE_SCAN_MAX_ATTEMPTS = 3;\nconst QUEUE_SCAN_RETRY_DELAY_MS = 5000;'''
+          replacements.append((old, new, 'queue scan constants'))
+
+          old = '''async function extractVisibleClientRows(page) {\n    await waitForGridRows(page);\n\n    const rows = await visibleRows(page);'''
+          new = '''async function extractVisibleClientRows(page) {\n    const rowsReady = await waitForGridRows(page);\n    if (!rowsReady) {\n        throw new Error(\n            `CRC_CLIENT_GRID_TIMEOUT: no client-name cells appeared within ${ROWS_READY_TIMEOUT_MS}ms.`\n        );\n    }\n\n    const rows = await visibleRows(page);'''
+          replacements.append((old, new, 'grid timeout becomes retryable failure'))
+
+          old = 'async function readEligibleQueue(excludedStatuses) {'
+          new = 'async function readEligibleQueueOnce(excludedStatuses) {'
+          replacements.append((old, new, 'single-attempt scan rename'))
+
+          old = '''}\n\n/** Short identifier-ish strings only. Never free text, never objects. */'''
+          new = '''}\n\n/**\n * Retry the entire CRC queue scan in a FRESH browser session. CRC is a third-\n * party UI; one transient DataGrid/navigation failure must not kill the whole\n * nightly production run. Each readEligibleQueueOnce() call owns and closes its\n * own Browserbase session, so a failed attempt cannot poison the next attempt.\n */\nasync function readEligibleQueue(excludedStatuses) {\n    let lastError = null;\n\n    for (let attempt = 1; attempt <= QUEUE_SCAN_MAX_ATTEMPTS; attempt += 1) {\n        try {\n            console.log(`[QUEUE_SCAN] attempt ${attempt}/${QUEUE_SCAN_MAX_ATTEMPTS} starting.`);\n            const result = await readEligibleQueueOnce(excludedStatuses);\n            console.log(\n                `[QUEUE_SCAN] attempt ${attempt} succeeded: ` +\n                `scanned=${result.scannedRows}, eligible=${result.eligibleRows}, queued=${result.queue.length}.`\n            );\n            return { ...result, scanAttempts: attempt };\n        } catch (error) {\n            lastError = error;\n            const message = safeMessage(error?.message) ?? 'Unknown queue scan error';\n            console.error(\n                `[QUEUE_SCAN] attempt ${attempt}/${QUEUE_SCAN_MAX_ATTEMPTS} failed: ${message}`\n            );\n\n            if (attempt < QUEUE_SCAN_MAX_ATTEMPTS) {\n                await new Promise((resolve) => setTimeout(resolve, QUEUE_SCAN_RETRY_DELAY_MS));\n            }\n        }\n    }\n\n    const finalMessage = safeMessage(lastError?.message) ?? 'Unknown queue scan error';\n    throw new Error(\n        `CRC_QUEUE_SCAN_FAILED_AFTER_${QUEUE_SCAN_MAX_ATTEMPTS}_ATTEMPTS: ${finalMessage}`\n    );\n}\n\n/** Short identifier-ish strings only. Never free text, never objects. */'''
+          replacements.append((old, new, 'queue scan retry wrapper'))
+
+          old = '''            job.summary.scannedRows = scan.scannedRows;\n            job.summary.eligibleRows = scan.eligibleRows;'''
+          new = '''            job.summary.scannedRows = scan.scannedRows;\n            job.summary.eligibleRows = scan.eligibleRows;\n            job.summary.scanAttempts = scan.scanAttempts ?? 1;'''
+          replacements.append((old, new, 'scan attempt audit'))
+
+          old = '''    } catch (error) {\n        job.status = "failed";\n        job.fatalError = {\n            message: error.message,\n            stack: error.stack,\n        };\n    } finally {\n        job.currentClient = null;\n        job.completedAt = new Date().toISOString();\n    }'''
+          new = '''    } catch (error) {\n        const failedStage = job.status;\n        job.status = "failed";\n        job.fatalError = {\n            message: error.message,\n            stack: error.stack,\n            failedStage,\n        };\n\n        console.error(\n            `[QUEUE_FATAL] job ${job.jobId} failed during ${failedStage}: ` +\n            `${safeMessage(error?.message) ?? "Unknown queue failure"}`\n        );\n    } finally {\n        job.currentClient = null;\n        job.completedAt = new Date().toISOString();\n        console.log(\n            `[QUEUE_DONE] job ${job.jobId} status=${job.status} ` +\n            `scanned=${job.summary?.scannedRows ?? 0} queued=${job.summary?.queued ?? 0} ` +\n            `processed=${job.summary?.processed ?? 0} sent=${job.summary?.sent ?? 0}.`\n        );\n    }'''
+          replacements.append((old, new, 'fatal logging and completion summary'))
+
+          for old, new, label in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'Guard failed for {label}: expected 1 exact match, found {count}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+          node --check src/processClientQueue.js
+
+      - name: Commit source patch and remove one-time workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/harden-nightly-queue-scan.yml
+          git add src/processClientQueue.js
+          git commit -m "Harden nightly CRC queue startup scan"
+          git push
