@@ -6,7 +6,7 @@
  * that single action in its own session.
  *
  * WHAT IT CANNOT DO, BY CONSTRUCTION. It imports browserbase, crcLogin,
- * openClient, crcClientId, and crcClientStatus — nothing else. It does not import
+ * crcClientId, and crcClientStatus — nothing else. It does not import
  * milestone6/7/8, openCreditHero, crcSecureMessage, m8Pdf, or clientMemory, so
  * it cannot open CreditHero, run a milestone, send a message or attachment, take
  * a delivery lock, advance a round, or order a report. Those are unreachable, not
@@ -19,11 +19,10 @@
 
 import { launchBrowser } from "./browserbase.js";
 import { loginToCRC } from "./crcLogin.js";
-import { openClient } from "./openClient.js";
 import { getCrcClientId } from "./crcClientId.js";
 import { updateClientStatus, STATUS_LABEL } from "./crcClientStatus.js";
 
-export const STATUS_ONLY_VERSION = "BT-STATUS-ONLY-2.0";
+export const STATUS_ONLY_VERSION = "BT-STATUS-ONLY-2.1";
 
 const PROFILE_LINK_TEXT = "View/Edit Profile";
 const TIMEOUT = 20000;
@@ -183,7 +182,16 @@ export async function statusOnlyUpdate(opts = {}) {
         const page = session.page;
 
         await loginToCRC(page);
-        await openClient(page, clientName);
+
+        // The queue already supplies CRC's authoritative numeric client ID.
+        // Do not search by client name here: duplicate/partial text matches can
+        // resolve to the wrong row even when the correct ID is known. Navigate
+        // directly to the exact client dashboard, then independently verify the
+        // ID from the resulting URL before any status read/write occurs.
+        const dashboardUrl =
+            `https://app.creditrepaircloud.com/app/clients/${crcClientId}/dashboard`;
+        await page.goto(dashboardUrl, { waitUntil: "domcontentloaded" });
+        await page.waitForTimeout(800);
 
         const openedId = String(await getCrcClientId(page));
 
