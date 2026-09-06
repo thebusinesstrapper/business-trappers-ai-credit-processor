@@ -22,7 +22,7 @@ import { loginToCRC } from "./crcLogin.js";
 import { getCrcClientId } from "./crcClientId.js";
 import { updateClientStatus, STATUS_LABEL } from "./crcClientStatus.js";
 
-export const STATUS_ONLY_VERSION = "BT-STATUS-ONLY-2.1";
+export const STATUS_ONLY_VERSION = "BT-STATUS-ONLY-2.2";
 
 const PROFILE_LINK_TEXT = "View/Edit Profile";
 const TIMEOUT = 20000;
@@ -225,6 +225,23 @@ export async function statusOnlyUpdate(opts = {}) {
         }
 
         report.labelVerified = true;
+
+        // readStatusOptions intentionally opens the Edit Profile modal to inspect
+        // the available labels. updateClientStatus owns its own pre-write snapshot
+        // and modal lifecycle, so restore a clean client dashboard before handing
+        // control to the writer. Leaving the verification modal open caused the
+        // writer's profile snapshot/open sequence to fail and valid operational
+        // routes (for example WAITING_FOR_FREE_REPORT) to fall through as manual
+        // review even though CreditHero access itself was healthy.
+        await page.goto(dashboardUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        await page.waitForTimeout(750);
+
+        if (!page.url().includes(`/app/clients/${openedId}/dashboard`)) {
+            report.error_code = "DASHBOARD_RESTORE_FAILED";
+            report.failureReason =
+                "Status label was verified, but a clean client dashboard could not be restored before the write.";
+            return report;
+        }
 
         // ---- WRITE (idempotent; governed helper) --------------------------
         const result = await updateClientStatus(
