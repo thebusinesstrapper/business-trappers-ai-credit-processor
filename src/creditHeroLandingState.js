@@ -90,8 +90,9 @@ const NO_ACTIVE_ORDERS_MARKER = /no active orders found/i;
 //
 // SAFETY: recognition is READ-ONLY. Nothing here clicks "Get Started",
 // purchases, enrolls, reactivates, or continues to payment. The URL path is
-// corroborating evidence ONLY — it is never sufficient on its own (requirement:
-// fail closed if the URL matches but enrollment markers are not confirmed).
+// REQUIRED corroborating evidence. Generic marketing banners on a healthy
+// member dashboard can contain "Get Started" and monthly-offer language, so
+// visible promo text alone must NEVER mark a client inactive.
 const ENROLLMENT_OFFER_URL_MARKER = /\/lp\/\d+-[a-z]{1,4}\/index\.asp/i;
 const ENROLLMENT_OFFER_MARKERS = [
     /get started/i,
@@ -238,28 +239,23 @@ export async function recognizeCreditHeroLanding(page) {
 
     // ---- 1c. ENROLLMENT OFFER (\"Get Started\" sign-up landing) --------------
     //
-    // A positively recognized Credit Monitoring Inactive state: the client is
-    // being asked to ENROLL (access fee + monthly membership), which means they
-    // are not currently active. Routes to the SAME inactive state and existing
-    // inactive workflow — never Manual Review when the markers are confirmed,
-    // and never a click/purchase/enroll.
+    // The exact enrollment URL is REQUIRED. Healthy CreditHero dashboards can
+    // contain generic "Get Started" promotions and monthly offer language. Those
+    // promotional markers alone are not evidence that monitoring is inactive.
     //
-    // FAIL CLOSED ON URL ALONE. The URL path is corroborating only. Acceptance
-    // requires at least TWO independent visible enrollment markers, OR the URL
-    // path plus at least ONE visible marker. A URL match with no visible
-    // enrollment marker falls through to UNKNOWN (existing manual-review path),
-    // exactly as required.
+    // Fail closed: only the known enrollment path PLUS at least one visible
+    // enrollment marker may enter the inactive workflow.
     const enroll = countMatches(ENROLLMENT_OFFER_MARKERS, text);
     const currentUrl = typeof page.url === "function" ? (page.url() || "") : "";
     const enrollUrl = ENROLLMENT_OFFER_URL_MARKER.test(currentUrl);
 
-    if (enroll.n >= 2 || (enrollUrl && enroll.n >= 1)) {
+    if (enrollUrl && enroll.n >= 1) {
         return {
             state: CH_LANDING_STATE.CREDENTIALS_OR_AUTH_FAILED,
             reason:
-                "CreditHeroScore landed on an enrollment offer (Get Started / access fee / monthly " +
-                "membership) — the client is not enrolled, so credit monitoring is inactive.",
-            evidence: [...enroll.matched, ...(enrollUrl ? ["url:enrollment_landing"] : [])],
+                "CreditHeroScore landed on the verified enrollment-offer URL with visible enrollment " +
+                "markers — the client is not enrolled, so credit monitoring is inactive.",
+            evidence: [...enroll.matched, "url:enrollment_landing"],
         };
     }
 
