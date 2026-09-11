@@ -1,0 +1,189 @@
+name: One-time inactive workflow stability fix
+
+on:
+  push:
+    paths:
+      - '.github/workflows/stability-fix-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-catch-up:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch inactive workflow safely
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          # 1) Current same-run live inactive confirmation is sufficient authority
+          # for a genuinely due reminder. Remove the legacy date cutoff that was
+          # silently suppressing valid reminders sent before 2026-09-01.
+          p = Path('src/inactiveWorkflow.js')
+          s = p.read_text()
+          old = '''    let decision = decideNoticeAction(state);
+
+    // LEGACY REMINDER CUTOVER. Before the 2026-09-01 race/episode fix, notice
+    // timestamps could survive a reactivation and later manufacture a stale
+    // "7-day reminder." Those pre-fix timestamps remain useful audit history,
+    // but they are never again authority to message a client. Only notices sent
+    // under the corrected episode logic may generate a future reminder.
+    const legacyReminderCutoffMs = Date.parse("2026-09-01T18:00:00Z");
+    const noticeMs = Date.parse(String(state.inactive_notice_sent_at ?? ""));
+    if (
+        decision.action === PLANNED_ACTION.SEND_REMINDER &&
+        Number.isFinite(noticeMs) &&
+        noticeMs < legacyReminderCutoffMs
+    ) {
+        decision = {
+            action: PLANNED_ACTION.NO_MESSAGE_DUE,
+            reason: "legacy_pre_fix_reminder_suppressed",
+        };
+    }
+
+    report.plannedAction = decision.action;
+'''
+          new = '''    // The durable notice/reminder timestamps decide WHAT is due. The same-run
+    // live STILL_INACTIVE confirmation plus the two send-time race gates decide
+    // WHETHER it is safe to act. That makes an additional calendar cutover
+    // unnecessary and, in production, it was suppressing valid overdue reminders
+    // for clients who are still positively inactive today.
+    const decision = decideNoticeAction(state);
+
+    report.plannedAction = decision.action;
+'''
+          if old not in s:
+              raise SystemExit('inactiveWorkflow legacy reminder block not found; refusing broad edit')
+          p.write_text(s.replace(old, new, 1))
+
+          # 2) Suspended is a manual pause. If Supabase says Suspended, a stale or
+          # contradictory CRC-grid inactive observation must not re-add that client
+          # to the automated inactive sweep.
+          p = Path('src/inactiveRecheckSweep.js')
+          s = p.read_text()
+          old = '''export function buildInactiveSet(supabaseInactive = [], crcObservations = []) {
+    const byId = new Map();
+
+    for (const row of supabaseInactive) {'''
+          new = '''export function buildInactiveSet(supabaseInactive = [], crcObservations = []) {
+    const byId = new Map();
+    const suspendedIds = new Set();
+
+    for (const row of supabaseInactive) {'''
+          if old not in s:
+              raise SystemExit('inactiveRecheckSweep set initializer not found; refusing broad edit')
+          s = s.replace(old, new, 1)
+
+          old = '''        if (key(row.crc_client_status) === "suspended") continue;'''
+          new = '''        if (key(row.crc_client_status) === "suspended") {
+            suspendedIds.add(id);
+            continue;
+        }'''
+          if old not in s:
+              raise SystemExit('inactiveRecheckSweep suspended filter not found; refusing broad edit')
+          s = s.replace(old, new, 1)
+
+          old = '''        const id = obs?.crcClientId != null ? String(obs.crcClientId) : null;
+        if (!id) continue;
+
+        const existing = byId.get(id);'''
+          new = '''        const id = obs?.crcClientId != null ? String(obs.crcClientId) : null;
+        if (!id) continue;
+        // A manual Suspended state wins over a contradictory live-grid inactive
+        // observation. Never let the secondary CRC source undo the pause.
+        if (suspendedIds.has(id)) continue;
+
+        const existing = byId.get(id);'''
+          if old not in s:
+              raise SystemExit('inactiveRecheckSweep CRC merge point not found; refusing broad edit')
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+      - name: Remove one-time workflow files and commit final fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/inactive-catchup-once.yml
+          rm -f .github/workflows/stability-fix-once.yml
+          git config user.name 'Business Trappers Stability Fix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add src/inactiveWorkflow.js src/inactiveRecheckSweep.js .github/workflows
+          git commit -m 'Harden inactive reminder routing and suspended exclusion'
+          git push origin HEAD:main
+
+      - name: Wait for Railway to deploy final commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 75
+          for i in $(seq 1 30); do
+            if curl -fsS 'https://business-trappers-ai-credit-processor-production.up.railway.app/' >/dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'Railway endpoint did not become healthy in time' >&2
+          exit 1
+
+      - name: Trigger safe inactive-only catch-up sweep
+        id: trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          response=$(curl --fail-with-body -sS -X POST \
+            'https://business-trappers-ai-credit-processor-production.up.railway.app/process-client-queue' \
+            -H 'Content-Type: application/json' \
+            --data '{
+              "processingApproved": true,
+              "submitApproved": false,
+              "operationalRoutingApproved": true,
+              "inactiveWorkflowApproved": false,
+              "excludedStatuses": [
+                "Lead",
+                "Client",
+                "Credit Monitoring Inactive",
+                "Ready for Processing",
+                "AI Processing",
+                "Waiting for Bureau",
+                "Waiting For Bureau",
+                "Manual Review Required",
+                "Inactive",
+                "Cancelled",
+                "Canceled"
+              ],
+              "maxClients": 1,
+              "delayMs": 0
+            }')
+          echo "$response"
+          job_id=$(printf '%s' "$response" | python -c 'import json,sys; print(json.load(sys.stdin)["jobId"])')
+          echo "job_id=$job_id" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for catch-up sweep to finish
+        shell: bash
+        run: |
+          set -euo pipefail
+          job_id='${{ steps.trigger.outputs.job_id }}'
+          url="https://business-trappers-ai-credit-processor-production.up.railway.app/process-client-queue/$job_id"
+          for i in $(seq 1 150); do
+            response=$(curl --fail-with-body -sS "$url")
+            status=$(printf '%s' "$response" | python -c 'import json,sys; print(json.load(sys.stdin).get("status", ""))')
+            echo "catch-up status: $status"
+            case "$status" in
+              complete)
+                echo "$response"
+                exit 0
+                ;;
+              failed|stopped_system_failure)
+                echo "$response" >&2
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          echo 'Catch-up sweep did not finish inside the workflow window' >&2
+          exit 1
