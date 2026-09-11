@@ -214,7 +214,7 @@ export async function runInactiveWorkflow(opts = {}) {
     if (initialGate.newInactiveEpisode) {
         // A prior inactive episode ended when monitoring reactivated. The old
         // notice/reminder dates cannot carry into a later lapse and manufacture
-        // an immediate 7-day reminder. Reset the episode durably before deciding.
+        // an immediate stale 7-day reminder. Reset the episode durably before deciding.
         await recordCreditHeroState(crcClientId, {
             inactive_notice_sent_at: null,
             inactive_reminder_sent_at: null,
@@ -224,25 +224,11 @@ export async function runInactiveWorkflow(opts = {}) {
         report.inactiveEpisodeReset = true;
     }
 
-    let decision = decideNoticeAction(state);
-
-    // LEGACY REMINDER CUTOVER. Before the 2026-09-01 race/episode fix, notice
-    // timestamps could survive a reactivation and later manufacture a stale
-    // "7-day reminder." Those pre-fix timestamps remain useful audit history,
-    // but they are never again authority to message a client. Only notices sent
-    // under the corrected episode logic may generate a future reminder.
-    const legacyReminderCutoffMs = Date.parse("2026-09-01T18:00:00Z");
-    const noticeMs = Date.parse(String(state.inactive_notice_sent_at ?? ""));
-    if (
-        decision.action === PLANNED_ACTION.SEND_REMINDER &&
-        Number.isFinite(noticeMs) &&
-        noticeMs < legacyReminderCutoffMs
-    ) {
-        decision = {
-            action: PLANNED_ACTION.NO_MESSAGE_DUE,
-            reason: "legacy_pre_fix_reminder_suppressed",
-        };
-    }
+    // Durable timestamps decide WHAT is due. The same-run live inactive
+    // confirmation plus the two send-time race gates decide WHETHER it is safe
+    // to act. A separate calendar cutoff was suppressing legitimate overdue
+    // reminders for clients positively confirmed inactive today.
+    const decision = decideNoticeAction(state);
 
     report.plannedAction = decision.action;
     report.plannedReason = decision.reason;
