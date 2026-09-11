@@ -6,25 +6,63 @@ on:
       - '.github/workflows/inactive-catchup-once.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  trigger:
+  patch-and-catch-up:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - name: Trigger safe inactive-only production sweep
+      - uses: actions/checkout@v4
+
+      - name: Make suspended status available to inactive sweep
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail-with-body -sS -X POST \
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/clientMemory.js')
+          s = p.read_text()
+          old = '"crc_client_id, client_display_name, credit_hero_access_state, processing_state, " +\n            "last_credit_hero_check_at, last_dispute_date, next_eligible_date, current_round, " +\n            "last_report_date_used, process_complete, monitoring_reactivated_date"'
+          new = '"crc_client_id, client_display_name, crc_client_status, credit_hero_access_state, processing_state, " +\n            "last_credit_hero_check_at, last_dispute_date, next_eligible_date, current_round, " +\n            "last_report_date_used, process_complete, monitoring_reactivated_date"'
+          if old not in s:
+              raise SystemExit('Expected listInactiveClients select not found; refusing broad edit')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git config user.name 'Business Trappers Stability Fix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add src/clientMemory.js
+          git commit -m 'Include CRC status in inactive sweep state'
+          git push origin HEAD:main
+
+      - name: Wait for Railway deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 90
+          for i in $(seq 1 30); do
+            if curl -fsS 'https://business-trappers-ai-credit-processor-production.up.railway.app/' >/dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          exit 1
+
+      - name: Trigger inactive-only catch-up sweep
+        id: trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          response=$(curl --fail-with-body -sS -X POST \
             'https://business-trappers-ai-credit-processor-production.up.railway.app/process-client-queue' \
             -H 'Content-Type: application/json' \
             --data '{
               "processingApproved": true,
               "submitApproved": false,
               "operationalRoutingApproved": true,
-              "inactiveWorkflowApproved": false,
+              "inactiveWorkflowApproved": true,
               "excludedStatuses": [
+                "Lead",
                 "Client",
                 "Credit Monitoring Inactive",
                 "Ready for Processing",
@@ -38,4 +76,32 @@ jobs:
               ],
               "maxClients": 1,
               "delayMs": 0
-            }'
+            }')
+          echo "$response"
+          job_id=$(printf '%s' "$response" | python -c 'import json,sys; print(json.load(sys.stdin)["jobId"])')
+          echo "job_id=$job_id" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for catch-up to finish
+        shell: bash
+        run: |
+          set -euo pipefail
+          job_id='${{ steps.trigger.outputs.job_id }}'
+          url="https://business-trappers-ai-credit-processor-production.up.railway.app/process-client-queue/$job_id"
+          for i in $(seq 1 240); do
+            response=$(curl --fail-with-body -sS "$url")
+            status=$(printf '%s' "$response" | python -c 'import json,sys; print(json.load(sys.stdin).get("status", ""))')
+            echo "catch-up status: $status"
+            case "$status" in
+              complete)
+                echo "$response"
+                exit 0
+                ;;
+              failed|stopped_system_failure)
+                echo "$response" >&2
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          echo 'Catch-up sweep timed out' >&2
+          exit 1
