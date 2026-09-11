@@ -823,7 +823,7 @@ export async function listInactiveClients() {
     const { data, error } = await supabase
         .from(CLIENT_STATE_TABLE)
         .select(
-            "crc_client_id, client_display_name, credit_hero_access_state, processing_state, " +
+            "crc_client_id, client_display_name, crc_client_status, credit_hero_access_state, processing_state, " +
             "last_credit_hero_check_at, last_dispute_date, next_eligible_date, current_round, " +
             "last_report_date_used, process_complete, monitoring_reactivated_date"
         )
