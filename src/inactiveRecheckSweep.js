@@ -111,12 +111,13 @@ export async function runInactiveRecheckSweep(deps) {
         writers,
         setCrcStatus,
         processEligible = null,
-        // Existing inactive notice/reminder workflow, injected so the sweep can
-        // (re)attempt an owed initial notice for a STILL_INACTIVE client without
-        // duplicating any notice-decision logic. runInactiveWorkflow stays
-        // authoritative for SEND_INITIAL_NOTICE / SEND_REMINDER / NO_MESSAGE_DUE,
-        // the timestamps, and the errors. Optional: when absent (or not approved),
-        // the notice step is simply skipped and the sweep behaves as before.
+        // Existing inactive notice/reminder workflow, injected only by the
+        // production queue. processClientQueue already gates this entire sweep to
+        // an approved, non-diagnostic, full-scan operational run BEFORE this
+        // function is called. Keeping a second request-body flag here caused the
+        // live recheck to run but silently skipped due notices/reminders when the
+        // caller omitted that redundant flag. The injected workflow itself still
+        // performs the send-time inactive safety gate before any status/message.
         runInactiveWorkflow = null,
         inactiveWorkflowApproved = false,
         todayIso = new Date().toISOString().slice(0, 10),
@@ -169,20 +170,13 @@ export async function runInactiveRecheckSweep(deps) {
                 }).catch(() => {});
 
                 // Then run the EXISTING inactive notice/reminder workflow so an
-                // owed initial notice is attempted (Marcelo/Unique: never sent) or
-                // retried (Patience: prior composer failure). The sweep does NOT
-                // decide whether a notice is due — runInactiveWorkflow ->
-                // decideNoticeAction is authoritative: it sends the initial notice
-                // only when inactive_notice_sent_at is null (so a successful notice
-                // is never duplicated), records inactive_notice_last_error on
-                // failure while leaving the timestamp null (so it retries next run),
-                // and only considers a reminder after a successful initial notice.
-                //
-                // Gated exactly like the write-capable inactive path: it runs only
-                // when a real runInactiveWorkflow is injected AND the run is
-                // approved. A missing dependency or an unapproved/diagnostic run
-                // skips it and the sweep behaves exactly as before.
-                if (typeof runInactiveWorkflow === "function" && inactiveWorkflowApproved === true) {
+                // owed initial notice is attempted or retried, and an overdue
+                // 7-day reminder is sent exactly once. The sweep does NOT decide
+                // whether a notice is due — runInactiveWorkflow ->
+                // decideNoticeAction is authoritative. The production queue's
+                // outer gate already guarantees this sweep is unreachable from
+                // diagnostic, supplied-name, or routing-unapproved runs.
+                if (typeof runInactiveWorkflow === "function") {
                     try {
                         const notice = await runInactiveWorkflow({
                             clientName: client.clientName,
