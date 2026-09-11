@@ -1,0 +1,41 @@
+name: One-time inactive reminder catch-up
+
+on:
+  push:
+    paths:
+      - '.github/workflows/inactive-catchup-once.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger safe inactive-only production sweep
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail-with-body -sS -X POST \
+            'https://business-trappers-ai-credit-processor-production.up.railway.app/process-client-queue' \
+            -H 'Content-Type: application/json' \
+            --data '{
+              "processingApproved": true,
+              "submitApproved": false,
+              "operationalRoutingApproved": true,
+              "inactiveWorkflowApproved": false,
+              "excludedStatuses": [
+                "Client",
+                "Credit Monitoring Inactive",
+                "Ready for Processing",
+                "AI Processing",
+                "Waiting for Bureau",
+                "Waiting For Bureau",
+                "Manual Review Required",
+                "Inactive",
+                "Cancelled",
+                "Canceled"
+              ],
+              "maxClients": 1,
+              "delayMs": 0
+            }'
