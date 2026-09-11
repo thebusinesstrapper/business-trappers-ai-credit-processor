@@ -43,6 +43,7 @@ function key(v) {
  */
 export function buildInactiveSet(supabaseInactive = [], crcObservations = []) {
     const byId = new Map();
+    const suspendedIds = new Set();
 
     for (const row of supabaseInactive) {
         const id = row?.crc_client_id != null ? String(row.crc_client_id) : null;
@@ -51,7 +52,10 @@ export function buildInactiveSet(supabaseInactive = [], crcObservations = []) {
         // Suspended is an explicit manual pause and is excluded from ALL automated
         // processing. Do not let an old inactive-memory flag pull a suspended
         // client back into the daily CreditHero recheck sweep.
-        if (key(row.crc_client_status) === "suspended") continue;
+        if (key(row.crc_client_status) === "suspended") {
+            suspendedIds.add(id);
+            continue;
+        }
         byId.set(id, {
             crcClientId: id,
             clientName: row.client_display_name ?? null,
@@ -64,6 +68,10 @@ export function buildInactiveSet(supabaseInactive = [], crcObservations = []) {
         if (key(obs?.crcClientStatus) !== key(INACTIVE_CRC_STATUS)) continue;
         const id = obs?.crcClientId != null ? String(obs.crcClientId) : null;
         if (!id) continue;
+
+        // A manual Suspended state wins over a contradictory CRC-grid inactive
+        // observation. Never let the secondary source undo the pause.
+        if (suspendedIds.has(id)) continue;
 
         const existing = byId.get(id);
         if (existing) {
