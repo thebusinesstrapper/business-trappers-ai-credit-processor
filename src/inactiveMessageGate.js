@@ -10,13 +10,27 @@ function ms(value) {
 }
 
 // Safety cooldown for active -> inactive transitions.
-// If the durable state says the client was positively active within the last
-// six hours, one contradictory inactive classification is not enough authority
-// to message the client. The current run is suppressed; a genuinely inactive
-// account will be reconfirmed by a later run after the recent-active window has
-// expired. This intentionally favors a short notification delay over a false
-// "your monitoring is inactive" notice to an active paying client.
-const RECENT_ACTIVE_RECONFIRM_MS = 6 * 60 * 60 * 1000;
+//
+// Production runs are daily. A six-hour window was too short: an active client
+// positively confirmed by the previous nightly recheck could be misclassified
+// by the next night's normal queue roughly 24 hours later, and that single
+// contradictory observation was then allowed to change CRC status and send an
+// inactive notice BEFORE the inactive-recheck sweep got a chance to prove the
+// client active again.
+//
+// Keep the positive ACTIVE observation authoritative for 30 hours. That spans
+// one complete daily-run interval plus scheduling jitter. A single next-run
+// contradictory inactive classification is therefore suppressed; the client
+// must still be inactive on a later independent run before the normal queue may
+// write Credit Monitoring Inactive or send a notice. The inactive-recheck sweep
+// can still handle already-inactive clients because it first records the live
+// recheck result; genuinely inactive clients do not remain protected by an old
+// active state forever.
+//
+// This intentionally accepts a short delay for a newly inactive client rather
+// than sending a false "your monitoring is inactive" notice to an active paying
+// client.
+const RECENT_ACTIVE_RECONFIRM_MS = 30 * 60 * 60 * 1000;
 
 export function evaluateInactiveMessageGate(state = {}, confirmedInactiveAt = null) {
     const confirmedMs = ms(confirmedInactiveAt);
@@ -42,18 +56,18 @@ export function evaluateInactiveMessageGate(state = {}, confirmedInactiveAt = nu
     }
 
     // HARD CONTRADICTION GUARD. If this same durable record says the client was
-    // positively ACTIVE very recently, a single new inactive classification is
-    // not enough authority to change CRC status or send a client-facing notice.
-    // Require a later independent run to reconfirm inactivity. This specifically
-    // prevents healthy CreditHero dashboard/promo-text false positives from
-    // immediately reaching the inactive workflow.
+    // positively ACTIVE within the previous daily-run window, a single new
+    // inactive classification is not enough authority to change CRC status or
+    // send a client-facing notice. Require a later independent run to reconfirm
+    // inactivity. This makes the nightly active recheck win over one-off CRC/UI
+    // misreads instead of allowing the misread to message the client first.
     if (
         accessState === "active" &&
         lastCheckMs != null &&
         confirmedMs >= lastCheckMs &&
         confirmedMs - lastCheckMs < RECENT_ACTIVE_RECONFIRM_MS
     ) {
-        return { allow: false, reason: "recent_active_check_requires_reconfirmation", newInactiveEpisode: false };
+        return { allow: false, reason: "recent_active_check_requires_next_run_reconfirmation", newInactiveEpisode: false };
     }
 
     const priorNoticeMs = ms(state.inactive_notice_sent_at);
