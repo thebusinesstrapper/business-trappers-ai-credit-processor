@@ -25,7 +25,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-export const MILESTONE8_VERSION = "BT-M8-DELIVERY-1.2";
+export const MILESTONE8_VERSION = "BT-M8-DELIVERY-1.3";
 
 const WAITING_FOR_BUREAU = "Waiting For Bureau";
 
@@ -142,7 +142,10 @@ export async function runMilestone8(data = {}) {
         const page = session.page;
 
         await loginToCRC(page);
-        await openClient(page, clientName);
+        // M8 already has the authoritative CRC id. Use it to open the exact
+        // dashboard instead of relying on CRC's broad Table Search, which can
+        // return duplicate row fragments or names from other columns.
+        await openClient(page, clientName, expectedClientId);
 
         const actualClientId = String(await getCrcClientId(page));
         report.crcClientId = actualClientId;
@@ -261,7 +264,7 @@ export async function runMilestone8(data = {}) {
 
         await loginToCRC(statusPage);
 
-        const reopened = await openClient(statusPage, clientName);
+        const reopened = await openClient(statusPage, clientName, actualClientId);
 
         if (!reopened?.clientFound || !reopened?.clientOpened) {
             report.statusUpdateFailed = true;
