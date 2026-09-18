@@ -43,6 +43,19 @@ const INACTIVE_STATUS = "Credit Monitoring Inactive";
 const REMINDER_AFTER_DAYS = 7;
 
 /**
+ * Cross-run confirmation marker for a NEW inactive episode.
+ *
+ * A single CreditHero read can transiently land on customer_login.asp and show
+ * "No Active Orders Found" even when the member account is actually healthy.
+ * Three retries inside the same Browserbase session are NOT independent
+ * confirmations. Before we are allowed to change CRC status or send a client
+ * notice, a previously non-inactive client must be observed inactive on a later
+ * independent run.
+ */
+const PENDING_INACTIVE_REASON = "PENDING_INACTIVE_RECONFIRMATION";
+const MIN_RECONFIRM_GAP_MS = 12 * 60 * 60 * 1000;
+
+/**
  * PERSISTED values for client_state.credit_hero_access_state.
  *
  * The column is constrained to 'active' | 'inactive' | 'unknown', and 61 rows
@@ -200,6 +213,56 @@ export async function runInactiveWorkflow(opts = {}) {
         return report;
     }
 
+    // CROSS-RUN CONFIRMATION GATE.
+    //
+    // A NEW inactive episode is high-risk. One transient CreditHero response is
+    // not enough authority to change CRC or message the client. If the durable
+    // state was not already inactive, the first observation becomes a PENDING
+    // reconfirmation only. A later independent run (>= 12 hours later) must see
+    // inactive again before this workflow may proceed.
+    //
+    // This specifically closes the Crystal Middleton failure mode: three retries
+    // in one Browserbase session all saw the same transient
+    // "no_active_orders_found" page, so they were not independent evidence.
+    const confirmedMs = Date.parse(String(confirmedInactiveAt ?? ""));
+    const priorCheckMs = Date.parse(String(state.last_credit_hero_check_at ?? ""));
+    const accessState = String(state.credit_hero_access_state ?? "").trim().toLowerCase();
+    const pendingInactive = state.block_reason === PENDING_INACTIVE_REASON;
+
+    if (accessState !== DB_ACCESS_STATE.INACTIVE) {
+        const independentReconfirmation =
+            pendingInactive &&
+            Number.isFinite(confirmedMs) &&
+            Number.isFinite(priorCheckMs) &&
+            confirmedMs > priorCheckMs &&
+            confirmedMs - priorCheckMs >= MIN_RECONFIRM_GAP_MS;
+
+        if (!independentReconfirmation) {
+            report.plannedAction = PLANNED_ACTION.NO_MESSAGE_DUE;
+            report.plannedReason = pendingInactive
+                ? "inactive_reconfirmation_not_yet_independent"
+                : "first_inactive_observation_requires_later_run_reconfirmation";
+            report.failureReason =
+                "SUPPRESSED — inactive status/message requires confirmation on a later independent run.";
+
+            // Dry-run boundary: never persist a pending marker unless the caller
+            // explicitly approved the inactive workflow.
+            if (
+                inactiveWorkflowApproved === true &&
+                Number.isFinite(confirmedMs)
+            ) {
+                await recordCreditHeroState(crcClientId, {
+                    credit_hero_access_state: "unknown",
+                    last_credit_hero_check_at: new Date(confirmedMs).toISOString(),
+                    block_reason: PENDING_INACTIVE_REASON,
+                }).catch(() => {});
+                report.memoryWritten = true;
+            }
+
+            return report;
+        }
+    }
+
     // SEND-TIME RACE GATE. The caller must supply when CreditHero was positively
     // confirmed inactive. A stale inactive sweep is not allowed to outrank a
     // newer active/reactivated observation written by another branch of the same run.
@@ -329,6 +392,9 @@ export async function runInactiveWorkflow(opts = {}) {
             // report as creditHeroAccessState: "CHS_NOT_ACTIVATED".
             credit_hero_access_state: DB_ACCESS_STATE.INACTIVE,
             last_credit_hero_check_at: nowIso,
+            // A second, independent inactive observation has now confirmed the
+            // episode. The temporary pending marker has served its purpose.
+            block_reason: null,
         });
         report.memoryWritten = true;
     } catch (error) {
@@ -501,10 +567,20 @@ export async function recordCreditHeroActive(crcClientId) {
     };
 
     try {
-        await recordCreditHeroState(crcClientId, {
+        const existing = (await readClientState(String(crcClientId))) ?? {};
+        const fields = {
             credit_hero_access_state: DB_ACCESS_STATE.ACTIVE,
             last_credit_hero_check_at: new Date().toISOString(),
-        });
+        };
+
+        // If the previous run recorded only a PENDING inactive observation, a
+        // healthy live read cancels that pending episode. Do NOT clear other
+        // block reasons here (for example WAITING_FOR_FREE_REPORT).
+        if (existing.block_reason === PENDING_INACTIVE_REASON) {
+            fields.block_reason = null;
+        }
+
+        await recordCreditHeroState(crcClientId, fields);
         report.memoryWritten = true;
     } catch (error) {
         report.error_code = "MEMORY_WRITE_FAILED";
