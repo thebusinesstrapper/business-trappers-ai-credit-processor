@@ -23,9 +23,7 @@ function disputedInRound(row, round) {
     if (round < first || round > mostRecent) return false;
 
     const strategies = Array.isArray(row?.strategies_used) ? row.strategies_used : [];
-    if (strategies.length === 0) {
-        return round === mostRecent;
-    }
+    if (strategies.length === 0) return round === mostRecent;
 
     const index = round - first;
     return index >= 0 && index < strategies.length;
@@ -59,19 +57,47 @@ export function calculateLiveRoundProgress({
     const round = validRound(roundCompleted);
     if (!round) return { ok: false, reason: "invalid_round_completed" };
 
-    const priorRound = round - 1;
-    const priorRows = priorRound >= 1
-        ? (Array.isArray(priorHistoryRows) ? priorHistoryRows : []).filter((row) => disputedInRound(row, priorRound))
-        : [];
-
-    const priorKeys = new Set(priorRows.map((row) => asKey(row?.stable_item_key)).filter(Boolean));
-    const allPriorKeys = new Set(
-        (Array.isArray(priorHistoryRows) ? priorHistoryRows : [])
-            .map((row) => asKey(row?.stable_item_key))
-            .filter(Boolean)
-    );
+    const history = Array.isArray(priorHistoryRows) ? priorHistoryRows : [];
     const currentKeys = new Set((Array.isArray(currentItemKeys) ? currentItemKeys : []).map(asKey).filter(Boolean));
     const thisRoundKeys = deliveredKeys(chainItems, round);
+
+    if (round === 1) {
+        return {
+            ok: true,
+            priorDisputedItems: null,
+            deletedItems: null,
+            stillReportingItems: null,
+            unknownItems: null,
+            newlyDisputedItems: thisRoundKeys.size,
+            disputedThisRound: thisRoundKeys.size,
+            comparisonComplete: false,
+            outcomes: [],
+        };
+    }
+
+    const priorRound = round - 1;
+    const priorRows = history.filter((row) => disputedInRound(row, priorRound));
+    const priorKeys = new Set(priorRows.map((row) => asKey(row?.stable_item_key)).filter(Boolean));
+
+    // Legacy clients may reach their first post-launch round without any durable
+    // item history for the previous round. Do not turn "missing history" into
+    // zero deletions or "all new" items. The round itself is still recorded, but
+    // comparison metrics remain unknown until a later round has a true baseline.
+    if (priorKeys.size === 0) {
+        return {
+            ok: true,
+            priorDisputedItems: null,
+            deletedItems: null,
+            stillReportingItems: null,
+            unknownItems: null,
+            newlyDisputedItems: null,
+            disputedThisRound: thisRoundKeys.size,
+            comparisonComplete: false,
+            outcomes: [],
+        };
+    }
+
+    const allPriorKeys = new Set(history.map((row) => asKey(row?.stable_item_key)).filter(Boolean));
 
     let deleted = 0;
     let stillReporting = 0;
@@ -97,7 +123,7 @@ export function calculateLiveRoundProgress({
         unknownItems: 0,
         newlyDisputedItems: newlyDisputed,
         disputedThisRound: thisRoundKeys.size,
-        comparisonComplete: round === 1 ? true : true,
+        comparisonComplete: true,
         outcomes,
     };
 }
@@ -126,11 +152,14 @@ export async function recordLiveRoundProgress({
     if (!calculated.ok) return calculated;
 
     const supabase = getSupabase();
-    const nowIso = new Date().toISOString();
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const roundDate = nowIso.slice(0, 10);
 
     const summaryPayload = {
         crc_client_id: id,
         round_completed: round,
+        round_completed_date: roundDate,
         report_date_used: reportDateUsed,
         prior_disputed_items: calculated.priorDisputedItems,
         deleted_items: calculated.deletedItems,
@@ -140,14 +169,13 @@ export async function recordLiveRoundProgress({
         disputed_this_round: calculated.disputedThisRound,
         comparison_complete: calculated.comparisonComplete,
         data_source: "live_verified",
+        delivery_recorded_at: nowIso,
         updated_at: nowIso,
     };
 
     const { data: summary, error: summaryError } = await supabase
         .from(SUMMARY_TABLE)
-        .upsert(summaryPayload, {
-            onConflict: "crc_client_id,round_completed,report_date_used",
-        })
+        .upsert(summaryPayload, { onConflict: "crc_client_id,round_completed" })
         .select()
         .single();
 
@@ -169,13 +197,9 @@ export async function recordLiveRoundProgress({
 
         const { error } = await supabase
             .from(OUTCOME_TABLE)
-            .upsert(payload, {
-                onConflict: "crc_client_id,observed_round,report_date_used,stable_item_key",
-            });
+            .upsert(payload, { onConflict: "crc_client_id,observed_round,stable_item_key" });
 
-        if (error) {
-            outcomeErrors.push({ stableItemKey: outcome.stableItemKey, detail: error.message });
-        }
+        if (error) outcomeErrors.push({ stableItemKey: outcome.stableItemKey, detail: error.message });
     }
 
     return {
@@ -186,129 +210,149 @@ export async function recordLiveRoundProgress({
     };
 }
 
-export function calculateHistoricalRoundProgress(rows = [], roundCompleted) {
-    const round = validRound(roundCompleted);
-    if (!round) return { ok: false, reason: "invalid_round_completed" };
+function inferCompletedRoundCount(client) {
+    const current = validRound(client?.current_round) ?? 1;
 
-    const priorRound = round - 1;
-    const priorRows = priorRound >= 1
-        ? rows.filter((row) => disputedInRound(row, priorRound))
-        : [];
+    // Normal lifecycle: current_round points to the NEXT round, so current-1
+    // rounds have been completed. On final completion current_round remains 6,
+    // therefore process_complete proves round 6 was also delivered.
+    if (client?.process_complete === true && current === 6) return 6;
+
+    let completed = Math.max(0, current - 1);
+
+    // Historical/status-write exception: a confirmed dispute date with current
+    // round still at 1 proves at least Round 1 happened (e.g. a post-delivery CRC
+    // status write failed before round advancement).
+    if (completed === 0 && client?.last_dispute_date) completed = 1;
+
+    return Math.min(6, completed);
+}
+
+function historyCountsForRound(rows, round) {
     const currentRows = rows.filter((row) => disputedInRound(row, round));
+    const priorRows = round > 1 ? rows.filter((row) => disputedInRound(row, round - 1)) : [];
 
-    const priorKeys = new Set(priorRows.map((row) => asKey(row?.stable_item_key)).filter(Boolean));
     const currentKeys = new Set(currentRows.map((row) => asKey(row?.stable_item_key)).filter(Boolean));
-
-    let stillReporting = 0;
-    for (const key of priorKeys) {
-        if (currentKeys.has(key)) stillReporting += 1;
-    }
+    const priorKeys = new Set(priorRows.map((row) => asKey(row?.stable_item_key)).filter(Boolean));
 
     let newlyDisputed = 0;
     for (const row of currentRows) {
         if (Number(row?.first_round_disputed) === round) newlyDisputed += 1;
     }
 
-    const unknown = Math.max(0, priorKeys.size - stillReporting);
+    const hasCurrentEvidence = currentKeys.size > 0;
+    const hasPriorEvidence = priorKeys.size > 0;
 
     return {
-        ok: true,
-        priorDisputedItems: priorKeys.size,
-        deletedItems: 0,
-        stillReportingItems: stillReporting,
-        unknownItems: unknown,
-        newlyDisputedItems: newlyDisputed,
-        disputedThisRound: currentKeys.size,
-        comparisonComplete: unknown === 0,
+        disputedThisRound: hasCurrentEvidence ? currentKeys.size : null,
+        priorDisputedItems: hasPriorEvidence ? priorKeys.size : null,
+        newlyDisputedItems: hasCurrentEvidence ? newlyDisputed : null,
+        hasItemEvidence: hasCurrentEvidence || hasPriorEvidence,
+    };
+}
+
+/**
+ * Coverage invariant: every client whose durable client_state proves a round was
+ * completed must have one and only one round_item_progress row for that round.
+ *
+ * This is intentionally conservative for legacy history. It records that the
+ * round happened and any item counts we can actually prove, but NEVER invents
+ * deletion/still-reporting outcomes without a complete prior/current report
+ * comparison. A later live_verified write replaces the historical placeholder.
+ */
+export async function ensureRoundProgressCoverage() {
+    const supabase = getSupabase();
+
+    const [{ data: clients, error: clientError }, { data: historyRows, error: historyError }] = await Promise.all([
+        supabase
+            .from("client_state")
+            .select("crc_client_id,current_round,last_dispute_date,process_complete"),
+        supabase
+            .from("item_dispute_history")
+            .select("crc_client_id,stable_item_key,first_round_disputed,most_recent_round_disputed,strategies_used"),
+    ]);
+
+    if (clientError) return { ok: false, reason: "client_state_read_failed", detail: clientError.message };
+    if (historyError) return { ok: false, reason: "item_history_read_failed", detail: historyError.message };
+
+    const historyByClient = new Map();
+    for (const row of historyRows ?? []) {
+        const id = String(row.crc_client_id);
+        if (!historyByClient.has(id)) historyByClient.set(id, []);
+        historyByClient.get(id).push(row);
+    }
+
+    let expectedRows = 0;
+    let insertedOrUpdated = 0;
+    let preservedLive = 0;
+    const errors = [];
+
+    for (const client of clients ?? []) {
+        const id = String(client.crc_client_id);
+        const completedRounds = inferCompletedRoundCount(client);
+        const history = historyByClient.get(id) ?? [];
+
+        for (let round = 1; round <= completedRounds; round += 1) {
+            expectedRows += 1;
+
+            const { data: existing, error: existingError } = await supabase
+                .from(SUMMARY_TABLE)
+                .select("data_source")
+                .eq("crc_client_id", id)
+                .eq("round_completed", round)
+                .maybeSingle();
+
+            if (existingError) {
+                errors.push({ crcClientId: id, round, reason: existingError.message });
+                continue;
+            }
+
+            if (existing?.data_source === "live_verified") {
+                preservedLive += 1;
+                continue;
+            }
+
+            const counts = historyCountsForRound(history, round);
+            const isMostRecent = round === completedRounds;
+            const roundCompletedDate = isMostRecent && validIsoDate(client.last_dispute_date)
+                ? client.last_dispute_date
+                : null;
+
+            const { error } = await supabase
+                .from(SUMMARY_TABLE)
+                .upsert({
+                    crc_client_id: id,
+                    round_completed: round,
+                    round_completed_date: roundCompletedDate,
+                    report_date_used: null,
+                    prior_disputed_items: counts.priorDisputedItems,
+                    deleted_items: null,
+                    still_reporting_items: null,
+                    unknown_items: counts.priorDisputedItems,
+                    newly_disputed_items: counts.newlyDisputedItems,
+                    disputed_this_round: counts.disputedThisRound,
+                    comparison_complete: false,
+                    data_source: counts.hasItemEvidence ? "historical_item_evidence" : "historical_round_only",
+                    delivery_recorded_at: null,
+                    updated_at: new Date().toISOString(),
+                }, { onConflict: "crc_client_id,round_completed" });
+
+            if (error) errors.push({ crcClientId: id, round, reason: error.message });
+            else insertedOrUpdated += 1;
+        }
+    }
+
+    return {
+        ok: errors.length === 0,
+        expectedRows,
+        insertedOrUpdated,
+        preservedLive,
+        errors,
     };
 }
 
 export async function backfillHistoricalRoundProgress() {
-    const supabase = getSupabase();
-
-    const { data: historyRows, error: historyError } = await supabase
-        .from("item_dispute_history")
-        .select("crc_client_id,stable_item_key,first_round_disputed,most_recent_round_disputed,strategies_used");
-
-    if (historyError) {
-        return { ok: false, reason: "item_history_read_failed", detail: historyError.message };
-    }
-
-    const { data: runs, error: runsError } = await supabase
-        .from("processing_run_history")
-        .select("crc_client_id,round_completed,report_date_used,run_result")
-        .eq("run_result", "completed")
-        .not("round_completed", "is", null)
-        .not("report_date_used", "is", null);
-
-    if (runsError) {
-        return { ok: false, reason: "processing_history_read_failed", detail: runsError.message };
-    }
-
-    const byClient = new Map();
-    for (const row of historyRows ?? []) {
-        const id = String(row.crc_client_id);
-        if (!byClient.has(id)) byClient.set(id, []);
-        byClient.get(id).push(row);
-    }
-
-    let written = 0;
-    let skippedLive = 0;
-    const errors = [];
-
-    for (const run of runs ?? []) {
-        const id = String(run.crc_client_id);
-        const round = validRound(run.round_completed);
-        const reportDate = run.report_date_used;
-        if (!round || !validIsoDate(reportDate)) continue;
-
-        const { data: existing, error: existingError } = await supabase
-            .from(SUMMARY_TABLE)
-            .select("round_item_progress_id,data_source")
-            .eq("crc_client_id", id)
-            .eq("round_completed", round)
-            .eq("report_date_used", reportDate)
-            .maybeSingle();
-
-        if (existingError) {
-            errors.push({ crcClientId: id, round, reason: existingError.message });
-            continue;
-        }
-        if (existing?.data_source === "live_verified") {
-            skippedLive += 1;
-            continue;
-        }
-
-        const calc = calculateHistoricalRoundProgress(byClient.get(id) ?? [], round);
-        if (!calc.ok) continue;
-
-        const { error } = await supabase
-            .from(SUMMARY_TABLE)
-            .upsert({
-                crc_client_id: id,
-                round_completed: round,
-                report_date_used: reportDate,
-                prior_disputed_items: calc.priorDisputedItems,
-                deleted_items: calc.deletedItems,
-                still_reporting_items: calc.stillReportingItems,
-                unknown_items: calc.unknownItems,
-                newly_disputed_items: calc.newlyDisputedItems,
-                disputed_this_round: calc.disputedThisRound,
-                comparison_complete: calc.comparisonComplete,
-                data_source: "historical_inferred",
-                updated_at: new Date().toISOString(),
-            }, {
-                onConflict: "crc_client_id,round_completed,report_date_used",
-            });
-
-        if (error) {
-            errors.push({ crcClientId: id, round, reason: error.message });
-        } else {
-            written += 1;
-        }
-    }
-
-    return { ok: errors.length === 0, written, skippedLive, errors };
+    return ensureRoundProgressCoverage();
 }
 
 export async function getRoundResultsData() {
@@ -317,9 +361,10 @@ export async function getRoundResultsData() {
     const [{ data: summaries, error: summaryError }, { data: clients, error: clientError }] = await Promise.all([
         supabase
             .from(SUMMARY_TABLE)
-            .select("crc_client_id,round_completed,report_date_used,prior_disputed_items,deleted_items,still_reporting_items,unknown_items,newly_disputed_items,disputed_this_round,comparison_complete,data_source,updated_at")
-            .order("report_date_used", { ascending: false })
-            .order("crc_client_id", { ascending: true }),
+            .select("crc_client_id,round_completed,round_completed_date,report_date_used,prior_disputed_items,deleted_items,still_reporting_items,unknown_items,newly_disputed_items,disputed_this_round,comparison_complete,data_source,delivery_recorded_at,updated_at")
+            .order("round_completed_date", { ascending: false, nullsFirst: false })
+            .order("crc_client_id", { ascending: true })
+            .order("round_completed", { ascending: true }),
         supabase
             .from("client_state")
             .select("crc_client_id,client_display_name"),
@@ -330,14 +375,29 @@ export async function getRoundResultsData() {
 
     const names = new Map((clients ?? []).map((row) => [String(row.crc_client_id), row.client_display_name ?? null]));
 
-    const records = (summaries ?? []).map((row) => ({
-        client_name: names.get(String(row.crc_client_id)) ?? null,
-        ...row,
-        deletion_rate:
-            Number(row.prior_disputed_items) > 0 && row.comparison_complete === true
-                ? Number(row.deleted_items) / Number(row.prior_disputed_items)
-                : null,
-    }));
+    const records = (summaries ?? []).map((row) => {
+        const verifiedComparison = row.data_source === "live_verified" && row.comparison_complete === true;
+        const comparisonStatus = verifiedComparison
+            ? "Verified"
+            : row.data_source === "live_verified" && Number(row.round_completed) === 1
+                ? "Not applicable - first round"
+                : row.data_source === "live_verified"
+                    ? "Live - prior baseline unavailable"
+                    : row.data_source === "historical_item_evidence"
+                        ? "Historical - item counts only"
+                        : "Historical - round confirmed";
+
+        return {
+            client_name: names.get(String(row.crc_client_id)) ?? null,
+            ...row,
+            deletion_rate:
+                verifiedComparison && Number(row.prior_disputed_items) > 0
+                    ? Number(row.deleted_items) / Number(row.prior_disputed_items)
+                    : null,
+            comparison_status: comparisonStatus,
+            data_source_label: row.data_source === "live_verified" ? "Live Verified" : "Historical Reconstruction",
+        };
+    });
 
     const verified = records.filter((row) => row.data_source === "live_verified" && row.comparison_complete === true);
     const totals = verified.reduce((acc, row) => {
