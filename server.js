@@ -18,6 +18,7 @@ import { discoverM8CrcV2 } from "./src/discoverM8CrcV2.js"; // TEMPORARY — M8 
 import { discoverM8Messages } from "./src/discoverM8Messages.js"; // TEMPORARY — M8 Messages discovery
 import { runMilestone8 } from "./src/milestone8.js"; // M8 secure-message delivery
 import { authorizeDashboardRequest, getDashboardData } from "./src/dashboardData.js"; // read-only dashboard export
+import { getRoundResultsData } from "./src/roundProgress.js"; // read-only round-results export
 import { runStatusOnlyVerification } from "./src/verifyStatusOnly.js"; // TEMPORARY — Elizabeth/15 status-only verification
 import { runControlledClient } from "./src/processControlledClient.js"; // TEMPORARY — five-client controlled validation
 import { startClientQueue, getClientQueueJob } from "./src/processClientQueue.js"; // Production CRC queue
@@ -988,6 +989,33 @@ app.get("/dashboard-data", async (req, res) => {
         });
     }
 
+});
+
+/**
+ * GET /round-results-data — READ-ONLY export of per-client/per-round progress.
+ * Uses the same dashboard secret as /dashboard-data. No browser or CRC write path.
+ */
+app.get("/round-results-data", async (req, res) => {
+    const auth = authorizeDashboardRequest(req.get("x-dashboard-secret"));
+
+    if (!auth.ok) {
+        return res.status(auth.status).json({
+            ok: false,
+            error_code: auth.error_code,
+            error: auth.error,
+        });
+    }
+
+    try {
+        const payload = await getRoundResultsData();
+        return res.status(200).json(payload);
+    } catch (error) {
+        return res.status(500).json({
+            ok: false,
+            error_code: "ROUND_RESULTS_READ_FAILED",
+            error: "Could not read round results data.",
+        });
+    }
 });
 
 app.get("/debug/routes", (req, res) => {
