@@ -28,6 +28,7 @@ import { runInactiveRecheckSweep } from "./inactiveRecheckSweep.js";
 import { runInactiveWorkflow } from "./inactiveWorkflow.js";
 import { recognizeCreditHeroLanding, CH_LANDING_STATE } from "./creditHeroLandingState.js";
 import { classifyRecheckLandingFromM6 } from "./inactiveRecheckDecision.js";
+import { ensureRoundProgressCoverage } from "./roundProgress.js";
 
 const jobs = new Map();
 
@@ -1696,6 +1697,26 @@ async function runJob(job) {
             `${safeMessage(error?.message) ?? "Unknown queue failure"}`
         );
     } finally {
+        // Final coverage reconciliation. This is a second line of defense behind
+        // the per-delivery writer: every completed round proven by client_state
+        // must have exactly one round_item_progress row. Missing legacy/detail
+        // data becomes an explicit historical placeholder, never a silent omission.
+        if (
+            job.operationalRoutingApproved === true &&
+            job.diagnosticOnly !== true &&
+            job.clientNames.length === 0
+        ) {
+            try {
+                job.summary.roundCoverage = await ensureRoundProgressCoverage();
+            } catch (error) {
+                job.summary.roundCoverage = {
+                    ok: false,
+                    reason: "round_coverage_reconciliation_failed",
+                    detail: safeMessage(error?.message),
+                };
+            }
+        }
+
         job.currentClient = null;
         job.completedAt = new Date().toISOString();
         console.log(
