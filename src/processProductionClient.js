@@ -19,6 +19,7 @@ import {
 import { runMilestone8 } from "./milestone8.js";
 import { recordSuccessfulProcessingRun } from "./processingRunHistory.js";
 import { readItemDisputeHistory, recordDeliveredItemHistory } from "./itemDisputeHistory.js";
+import { recordLiveRoundProgress } from "./roundProgress.js";
 
 /**
  * Read-only, sanitized projection of the raw m7.withheld array into the four
@@ -980,8 +981,38 @@ export async function runProductionClient(data = {}) {
         roundOutcome?.processComplete === true;
 
     let itemHistoryAudit = null;
+    let roundProgressAudit = null;
 
     if (deliveryConfirmed && lifecycleSucceeded) {
+        // Capture round-over-round outcome BEFORE mutating item_dispute_history.
+        // The current M7 item decisions are a complete inventory of items observed
+        // on the freshly verified report; prior history is the durable snapshot of
+        // what was disputed in the preceding round. Absence from a complete current
+        // report is therefore a verified deletion for this live transition.
+        const currentItemKeys = Array.isArray(m7?.item_decisions)
+            ? m7.item_decisions.map((item) => item?.stableItemKey).filter(Boolean)
+            : [];
+
+        roundProgressAudit = await recordLiveRoundProgress({
+            crcClientId,
+            roundCompleted: deliveredRound,
+            reportDateUsed: successCapture?.lastReportDate ?? null,
+            priorHistoryRows: Array.isArray(itemHistoryRead?.rows) ? itemHistoryRead.rows : [],
+            currentItemKeys,
+            chainItems: Array.isArray(m7?.dispute_chain_items) ? m7.dispute_chain_items : [],
+        }).catch((error) => ({
+            ok: false,
+            reason: "round_progress_writer_exception",
+            detail: error.message,
+        }));
+
+        if (roundProgressAudit?.ok !== true) {
+            console.error(
+                `round_item_progress persistence failed for CRC ${crcClientId}, round ${deliveredRound}: ` +
+                `${roundProgressAudit?.reason ?? "unknown"}${roundProgressAudit?.detail ? ` — ${roundProgressAudit.detail}` : ""}`
+            );
+        }
+
         itemHistoryAudit = await recordDeliveredItemHistory({
             crcClientId,
             roundCompleted: deliveredRound,
@@ -1056,6 +1087,7 @@ export async function runProductionClient(data = {}) {
             reason: itemHistoryRead?.ok === true ? null : (itemHistoryRead?.reason ?? "unknown"),
         },
         itemHistoryAudit,
+        roundProgressAudit,
         m7Summary: {
             success: m7.success !== false,
             lettersOk: m7LettersOk,
