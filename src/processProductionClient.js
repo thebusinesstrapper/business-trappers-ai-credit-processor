@@ -929,6 +929,26 @@ export async function runProductionClient(data = {}) {
         m8?.deliveryMarkerPersisted === true &&
         m8?.statusUpdateResult?.ok === true;
 
+    // Separate the FACT that the dispute package was delivered from the later
+    // lifecycle/status transition. A client-facing secure message can succeed
+    // even when CRC's status update verification fails. Round-result history
+    // must record the actual dispute event in that case rather than disappearing
+    // just because a downstream status write failed.
+    //
+    // duplicatePrevented is also durable evidence that this exact round/report
+    // was already delivered on a prior attempt; recording history is idempotent
+    // and repairs any earlier audit gap without resending anything.
+    const deliveryEvidenceConfirmed =
+        submitApproved &&
+        (
+            (
+                duplicatePrevented !== true &&
+                m8?.messageSuccessConfirmed === true &&
+                m8?.deliveryMarkerPersisted === true
+            ) ||
+            duplicatePrevented === true
+        );
+
     let roundOutcome = null;
     const deliveredRound = Number(m8?.round);
 
@@ -983,8 +1003,11 @@ export async function runProductionClient(data = {}) {
     let itemHistoryAudit = null;
     let roundProgressAudit = null;
 
-    if (deliveryConfirmed && lifecycleSucceeded) {
+    if (deliveryEvidenceConfirmed && Number.isInteger(deliveredRound) && deliveredRound >= 1) {
         // Capture round-over-round outcome BEFORE mutating item_dispute_history.
+        // This deliberately does NOT require lifecycleSucceeded. If the secure
+        // message was delivered but CRC status verification failed afterward,
+        // the dispute still happened and must remain visible in results history.
         // The current M7 item decisions are a complete inventory of items observed
         // on the freshly verified report; prior history is the durable snapshot of
         // what was disputed in the preceding round. Absence from a complete current
