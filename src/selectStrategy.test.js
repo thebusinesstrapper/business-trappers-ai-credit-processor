@@ -158,9 +158,9 @@ check("TU escalates", S(r7, "bt_tl_tu").escalated, true);
 check("EXP stops (it worked)", S(r7, "bt_tl_exp").strategy.strategy, "BT-ST-0016");
 check("...same account, different outcomes", S(r7, "bt_tl_tu").stableAccountKey === S(r7, "bt_tl_exp").stableAccountKey, true);
 
-console.log("\n=== The six-round ceiling holds ===\n");
+console.log("\n=== The five-round ceiling holds ===\n");
 
-const sixRounds = {
+const maxRoundsHistory = {
     bt_tl_tu: {
         rounds: Array.from({ length: MAX_ROUNDS }, (_, i) => ({
             round: i + 1, strategy: "BT-ST-0010", outcome: PRIOR_OUTCOME.VERIFIED,
@@ -168,7 +168,7 @@ const sixRounds = {
     },
 };
 
-const r8 = await selectStrategy(decisions, { itemHistory: sixRounds });
+const r8 = await selectStrategy(decisions, { itemHistory: maxRoundsHistory });
 const tu8 = S(r8, "bt_tl_tu");
 
 check(`${MAX_ROUNDS} rounds done -> No Further Action`, tu8.strategy.strategy, "BT-ST-0016");
