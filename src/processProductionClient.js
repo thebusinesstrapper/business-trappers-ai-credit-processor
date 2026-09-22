@@ -766,7 +766,7 @@ export async function runProductionClient(data = {}) {
 
     // ---- CORRECTION 2: NO ELIGIBLE NEGATIVE ITEMS (DFY COMPLETION) ---------
     //
-    // The DFY service ends after 6 successful rounds OR when there are no
+    // The DFY service ends after 5 successful AI rounds OR when there are no
     // remaining eligible negative items to dispute. This branch handles the
     // second case: M7 positively confirms there is nothing eligible left, so the
     // client is COMPLETE rather than a pipeline failure. A zero-letter M7 result
@@ -971,7 +971,7 @@ export async function runProductionClient(data = {}) {
                 proposedAction: routingApproved ? null : "SET_COMPLETE",
             };
         } else {
-            // Rounds 1-5: advance and enter the waiting lifecycle. The writer
+            // Rounds 1-4: advance and enter the waiting lifecycle. The writer
             // sets next_eligible_date 31 days out, which is what the daily
             // preflight reads to avoid re-disputing off the same report
             // tomorrow.
