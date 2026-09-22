@@ -51,7 +51,7 @@ import { AUTOMATION_TIER } from "./decisionRecords.js";
 
 export const STRATEGY_SCHEMA_VERSION = "BT-STRATEGY-1.0";
 
-export const MAX_ROUNDS = 6; // AI Processing Decision Engine v1.0. Six, not five.
+export const MAX_ROUNDS = 5; // Business Trappers DFY lifecycle: five AI dispute rounds maximum.
 
 /**
  * DECISION RECORD -> STRATEGY RECORD, for a FIRST dispute (round 1).
