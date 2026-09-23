@@ -872,7 +872,14 @@ export async function listInactiveClients() {
             "last_credit_hero_check_at, last_dispute_date, next_eligible_date, current_round, " +
             "last_report_date_used, process_complete, monitoring_reactivated_date"
         )
-        .eq("credit_hero_access_state", "inactive")
+        // Recheck both confirmed-inactive clients AND first-observation
+        // pending candidates. The pending path deliberately stores access_state
+        // as "unknown" to avoid a false inactive classification, so filtering
+        // only on access_state=inactive would strand the candidate forever and
+        // prevent the required independent confirmation run.
+        .or(
+            "credit_hero_access_state.eq.inactive,block_reason.eq.PENDING_INACTIVE_RECONFIRMATION"
+        )
         .not("process_complete", "is", true);
 
     if (error) {
