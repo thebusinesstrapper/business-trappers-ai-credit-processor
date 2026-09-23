@@ -21,6 +21,7 @@ import {
     recordCreditHeroState, recordManualReview, clearManualReview,
     requiresManualReview, manualReviewWritesAllowed,
     listInactiveClients, recordMonitoringReactivated, recordNextEligibleDate,
+    markReactivatedEligibleReady,
 } from "./clientMemory.js";
 import { runMilestone6 } from "./milestone6.js";
 import { statusOnlyUpdate } from "./statusOnlyUpdate.js";
@@ -1644,6 +1645,7 @@ async function runJob(job) {
                         recordMonitoringReactivated,
                         recordCreditHeroState,
                         recordNextEligibleDate,
+                        markReactivatedEligibleReady,
                         // Enables the sweep to route a reactivated historical
                         // client with no recoverable last_dispute_date to Manual
                         // Review (HISTORICAL_DISPUTE_DATE_UNKNOWN) instead of
