@@ -935,19 +935,14 @@ export async function runProductionClient(data = {}) {
     // must record the actual dispute event in that case rather than disappearing
     // just because a downstream status write failed.
     //
-    // duplicatePrevented is also durable evidence that this exact round/report
-    // was already delivered on a prior attempt; recording history is idempotent
-    // and repairs any earlier audit gap without resending anything.
+    // A blocked/duplicate-looking delivery lock is NOT delivery evidence.
+    // Only CRC-confirmed message success plus the persisted delivery marker may
+    // create round results, item history, or a successful processing audit.
     const deliveryEvidenceConfirmed =
         submitApproved &&
-        (
-            (
-                duplicatePrevented !== true &&
-                m8?.messageSuccessConfirmed === true &&
-                m8?.deliveryMarkerPersisted === true
-            ) ||
-            duplicatePrevented === true
-        );
+        duplicatePrevented !== true &&
+        m8?.messageSuccessConfirmed === true &&
+        m8?.deliveryMarkerPersisted === true;
 
     let roundOutcome = null;
     const deliveredRound = Number(m8?.round);
