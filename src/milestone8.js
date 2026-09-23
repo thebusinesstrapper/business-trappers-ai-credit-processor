@@ -167,11 +167,11 @@ export async function runMilestone8(data = {}) {
             );
 
             if (!deliveryLock.ok) {
-                report.duplicatePrevented = [
-                    "duplicate_delivery_prevented",
-                    "delivery_already_in_progress",
-                    "delivery_lock_conflict",
-                ].includes(deliveryLock.reason);
+                // Only an independently proven duplicate may be labelled as one.
+                // A generic waiting/in-progress/conflict state is a safe BLOCK,
+                // but is not evidence that a message was previously delivered.
+                report.duplicatePrevented =
+                    deliveryLock.reason === "duplicate_delivery_prevented";
                 report.blockedReason = deliveryLock.reason;
                 report.failureReason =
                     `Live delivery lock was not acquired: ${deliveryLock.reason}.`;
