@@ -103,6 +103,7 @@ export function buildInactiveSet(supabaseInactive = [], crcObservations = []) {
  * @param {(id, nowIso) => Promise<object>} deps.writers.recordMonitoringReactivated
  * @param {(id, fields) => Promise<object>} deps.writers.recordCreditHeroState
  * @param {(id, isoDate) => Promise<object>} deps.writers.recordNextEligibleDate
+ * @param {(id) => Promise<object>} deps.writers.markReactivatedEligibleReady
  * @param {(id, fields) => Promise<object>} [deps.writers.recordManualReview]
  * @param {(id, isoDate) => Promise<object>} [deps.writers.recordLastReportDate]
  * @param {(client, targetStatus) => Promise<object>} deps.setCrcStatus  CRC status writer
@@ -261,6 +262,24 @@ export async function runInactiveRecheckSweep(deps) {
 
             // ---- REACTIVATED_ELIGIBLE: hand to normal processing this run ---
             if (decision.action === RECHECK_ACTION.REACTIVATED_ELIGIBLE) {
+                // A reactivated client may still be parked in processing_state
+                // "waiting" from the inactive/waiting lifecycle. The delivery
+                // lock correctly refuses waiting rows, so explicitly re-arm it
+                // ONLY after live CreditHero has proven a strictly newer report.
+                if (typeof writers.markReactivatedEligibleReady !== "function") {
+                    throw new Error("markReactivatedEligibleReady writer is required for reactivated eligible clients.");
+                }
+
+                const rearmed = await writers.markReactivatedEligibleReady(client.crcClientId);
+                entry.rearmed = rearmed?.ok === true;
+
+                if (rearmed?.ok !== true) {
+                    entry.reason = rearmed?.reason ?? "reactivated_client_not_rearmed";
+                    summary.errors += 1;
+                    summary.results.push(entry);
+                    continue;
+                }
+
                 if (processEligible) {
                     const processed = await processEligible(client);
                     entry.processed = processed?.stage ?? processed?.outcome ?? true;
