@@ -211,9 +211,13 @@ export async function acquireDeliveryLock(crcClientId, clientDisplayName, round)
     const deliveredState = "waiting";
 
     if (previousState === deliveredState) {
+        // IMPORTANT: "waiting" is not independent proof that this round was
+        // delivered. Reactivation/report-waiting paths can also legitimately
+        // park a client in waiting. Treat it as a blocked lifecycle state, never
+        // as evidence of a prior secure-message delivery.
         return {
             ok: false,
-            reason: "duplicate_delivery_prevented",
+            reason: "waiting_state_requires_reconciliation",
             currentState: previousState,
             deliveredState,
         };
@@ -804,6 +808,47 @@ export async function recordMonitoringReactivated(crcClientId, nowIso = new Date
         reactivatedDate: stateRow.monitoring_reactivated_date ?? null,
         firstReactivation: !!firstRow, // true only on the transitioning run
     };
+}
+
+/**
+ * Re-arm a positively reactivated client for delivery after the live recheck
+ * has already proven a strictly newer report exists.
+ *
+ * SAFETY: this is a narrow compare-and-swap only. It never changes round,
+ * report baseline, dispute dates, or completion state. It only converts
+ * waiting -> ready when CreditHero is already stored active.
+ */
+export async function markReactivatedEligibleReady(crcClientId) {
+    const id = String(crcClientId);
+
+    if (!/^\d+$/.test(id)) {
+        throw new Error(`markReactivatedEligibleReady: invalid crcClientId "${crcClientId}".`);
+    }
+
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+        .from(CLIENT_STATE_TABLE)
+        .update({
+            processing_state: "ready",
+            block_reason: null,
+            next_eligible_date: null,
+        })
+        .eq("crc_client_id", id)
+        .eq("processing_state", "waiting")
+        .eq("credit_hero_access_state", "active")
+        .eq("process_complete", false)
+        .select("crc_client_id, current_round, processing_state, credit_hero_access_state")
+        .maybeSingle();
+
+    if (error) {
+        throw new Error(`Failed to re-arm reactivated client: ${error.message}`);
+    }
+
+    if (!data) {
+        return { ok: false, reason: "reactivated_client_not_waiting_or_not_active" };
+    }
+
+    return { ok: true, state: data };
 }
 
 /**
