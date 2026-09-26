@@ -77,6 +77,7 @@ function findLetterMismatch(letters, clientName, crcClientId) {
  * @param {string|number} data.crcClientId       expected authoritative CRC id
  * @param {boolean} data.submitApproved
  * @param {object} data.letterResult             finalized M7 result for this client
+ * @param {string|null} [data.crcClientStatusObserved] exact CRC DataGrid status observed earlier in this same queue run
  */
 export async function runMilestone8(data = {}) {
     const clientName = exactText(data?.clientName);
@@ -244,6 +245,26 @@ export async function runMilestone8(data = {}) {
         }
 
         report.deliveryMarkerPersisted = true;
+
+        // If the live CRC DataGrid observation from THIS SAME queue run already
+        // showed Waiting for Bureau, there is nothing to write after delivery.
+        // Treat that positively observed target status as satisfied instead of
+        // reopening Edit Profile and risking a redundant PRE_WRITE snapshot
+        // failure. This is safe because the observation came from CRC itself,
+        // not from Supabase memory, and secure-message delivery does not change
+        // the client's status field.
+        if (exactText(data?.crcClientStatusObserved).toLowerCase() === WAITING_FOR_BUREAU.toLowerCase()) {
+            report.statusUpdateResult = {
+                ok: true,
+                statusWritten: WAITING_FOR_BUREAU,
+                error_code: null,
+                alreadyCorrect: true,
+                source: "same_run_crc_datagrid_observation",
+            };
+            report.finalStatus = WAITING_FOR_BUREAU;
+            report.failureReason = null;
+            return report;
+        }
 
         // sendSecureMessage finishes on CRC's secure-message page, not on the
         // client dashboard. crcClientStatus requires a verified client-dashboard
