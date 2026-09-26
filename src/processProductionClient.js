@@ -14,7 +14,7 @@ import { statusOnlyUpdate } from "./statusOnlyUpdate.js";
 import {
     recordCreditHeroState, readClientState, decideDailyPreflight, PREFLIGHT,
     advanceRoundAfterDelivery, markProcessComplete, recordNextEligibleDate,
-    FINAL_ROUND,
+    markReactivatedEligibleReady, FINAL_ROUND,
 } from "./clientMemory.js";
 import { runMilestone8 } from "./milestone8.js";
 import { recordSuccessfulProcessingRun } from "./processingRunHistory.js";
@@ -860,11 +860,44 @@ export async function runProductionClient(data = {}) {
     // Fresh-report policy: report freshness is the sole next-round timing gate.
     // A report must be strictly newer than last_report_date_used; there is no
     // separate 31-day delivery-date gate.
+    //
+    // IMPORTANT LIFECYCLE BRIDGE:
+    // A client can legitimately be in processing_state="waiting" after the prior
+    // round. Once M7 has positively verified an eligible newer report, the next
+    // round must be re-armed to "ready" BEFORE M8 attempts its delivery lock.
+    // Otherwise M8 sees "waiting" and correctly refuses the lock even though the
+    // fresh-report gate has already proven the next round is due.
+    const stateBeforeM8 = await readClientState(String(crcClientId)).catch(() => null);
+    if (stateBeforeM8?.processing_state === "waiting") {
+        const rearmed = await markReactivatedEligibleReady(String(crcClientId)).catch((error) => ({
+            ok: false,
+            reason: "eligible_waiting_rearm_exception",
+            detail: error.message,
+        }));
+
+        if (rearmed?.ok !== true) {
+            return {
+                ...base,
+                ok: false,
+                stage: "lifecycle_rearm",
+                blockedReason: rearmed?.reason ?? "eligible_waiting_rearm_failed",
+                failureReason: rearmed?.detail ?? "Fresh report was eligible, but the waiting client could not be re-armed to ready.",
+                crcClientId,
+                m7,
+                m8: null,
+            };
+        }
+    }
+
     const m8 = await runMilestone8({
         clientName,
         crcClientId,
         submitApproved,
         letterResult: { ...m7, lettersOk: m7LettersOk },
+        // Live DataGrid observation from this same queue run. If CRC was already
+        // Waiting for Bureau before delivery, M8 does not need to perform a
+        // redundant profile write after the secure message succeeds.
+        crcClientStatusObserved: data.crcClientStatus ?? null,
     });
 
     const duplicatePrevented =
