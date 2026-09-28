@@ -79,6 +79,7 @@ export function decideInactiveRecheck({
     }
 
     const baseline = storedState?.last_report_date_used ?? null;
+    const disputeFloor = storedState?.last_dispute_date ?? null;
     const validDate = (value) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 
     if (validDate(baseline) && validDate(liveReportDate) && liveReportDate > baseline) {
@@ -91,12 +92,32 @@ export function decideInactiveRecheck({
         };
     }
 
+    // Legacy migration bridge: some clients were brought online before
+    // last_report_date_used was populated, but they DO have a confirmed prior
+    // dispute delivery date. In that narrow case, a live report strictly newer
+    // than the confirmed dispute date is sufficient evidence that this is a new
+    // cycle report. This matches the normal freshness engine's legacy dispute
+    // floor and prevents a reactivated client from being stranded forever just
+    // because the historical report baseline was never captured.
+    if (!validDate(baseline) && validDate(disputeFloor) && validDate(liveReportDate) && liveReportDate > disputeFloor) {
+        return {
+            action: RECHECK_ACTION.REACTIVATED_ELIGIBLE,
+            reason:
+                `Monitoring is active and this legacy client has a live report (${liveReportDate}) ` +
+                `strictly newer than the confirmed prior dispute date (${disputeFloor}). Process this client this run.`,
+            waitForFreshReport: false,
+            legacyDisputeFloorApplied: true,
+        };
+    }
+
     return {
         action: RECHECK_ACTION.REACTIVATED_WAITING,
         reason:
             validDate(baseline)
                 ? "Monitoring is positively active again, but no report strictly newer than the prior successful-cycle report is available yet. Route the client to Waiting For Bureau."
-                : "Monitoring is positively active again, but this legacy row has no authoritative prior report baseline. Route the client to Waiting For Bureau and do not process from an unproven report.",
+                : validDate(disputeFloor)
+                    ? "Monitoring is positively active again, but no live report strictly newer than the confirmed prior dispute date is available yet. Route the client to Waiting For Bureau."
+                    : "Monitoring is positively active again, but this legacy row has neither an authoritative report baseline nor a confirmed prior dispute date. Route the client to Waiting For Bureau and do not process from an unproven report.",
         nextEligibleDate: null,
         targetCrcStatus: "Waiting For Bureau",
         waitForFreshReport: true,
