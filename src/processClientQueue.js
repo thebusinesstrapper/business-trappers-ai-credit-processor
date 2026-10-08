@@ -1651,6 +1651,10 @@ async function runJob(job) {
                         // Review (HISTORICAL_DISPUTE_DATE_UNKNOWN) instead of
                         // fabricating a next_eligible_date. Already imported above.
                         recordManualReview,
+                        // If a prior reconciliation attempt was manually flagged
+                        // but a later live active check + CRC status repair succeeds,
+                        // clear that stale review automatically.
+                        clearManualReview,
                     },
                     setCrcStatus: (client, targetStatus) =>
                         statusOnlyUpdate({
