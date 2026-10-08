@@ -105,6 +105,7 @@ export function buildInactiveSet(supabaseInactive = [], crcObservations = []) {
  * @param {(id, isoDate) => Promise<object>} deps.writers.recordNextEligibleDate
  * @param {(id) => Promise<object>} deps.writers.markReactivatedEligibleReady
  * @param {(id, fields) => Promise<object>} [deps.writers.recordManualReview]
+ * @param {(id) => Promise<object>} [deps.writers.clearManualReview]
  * @param {(id, isoDate) => Promise<object>} [deps.writers.recordLastReportDate]
  * @param {(client, targetStatus) => Promise<object>} deps.setCrcStatus  CRC status writer
  * @param {(client) => Promise<object>} [deps.processEligible]  normal processing hand-off
@@ -216,6 +217,56 @@ export async function runInactiveRecheckSweep(deps) {
             entry.firstReactivation = react?.firstReactivation === true;
             entry.reactivatedDate = react?.reactivatedDate ?? null;
 
+            // ACTIVE/CRC CONTRADICTION RECONCILIATION.
+            //
+            // A positive live CreditHero result ends the inactive episode. If CRC
+            // still visibly says Credit Monitoring Inactive, repair that status
+            // immediately to Waiting For Bureau BEFORE any further processing.
+            // If the status write cannot be positively verified, fail closed into
+            // Manual Review rather than leaving a silent dashboard contradiction.
+            const crcStillInactive =
+                client.sources.includes("crc") ||
+                key(client.storedState?.crc_client_status) === key(INACTIVE_CRC_STATUS);
+
+            let activeStatusReconciled = false;
+
+            if (crcStillInactive) {
+                const reconcile = await setCrcStatus(client, "Waiting For Bureau");
+                entry.activeStatusReconcile = {
+                    ok: reconcile?.statusUpdated === true && !!reconcile?.statusWritten,
+                    statusWritten: reconcile?.statusWritten ?? null,
+                    error_code: reconcile?.error_code ?? null,
+                };
+
+                if (reconcile?.statusUpdated !== true || !reconcile?.statusWritten) {
+                    const reason =
+                        `CreditHero is positively active, but CRC could not be reconciled out of ` +
+                        `Credit Monitoring Inactive (${reconcile?.error_code ?? "STATUS_RECONCILE_FAILED"}).`;
+
+                    if (typeof writers.recordManualReview === "function") {
+                        await writers.recordManualReview(client.crcClientId, {
+                            stage: "reactivation_status_reconcile",
+                            reason,
+                            clientDisplayName: client.clientName ?? null,
+                        }).catch(() => {});
+                    }
+
+                    entry.manualReview = reason;
+                    summary.errors += 1;
+                    summary.results.push(entry);
+                    continue;
+                }
+
+                activeStatusReconciled = true;
+                await writers.recordCreditHeroState(client.crcClientId, {
+                    crc_client_status: reconcile.statusWritten,
+                }).catch(() => {});
+
+                if (typeof writers.clearManualReview === "function") {
+                    await writers.clearManualReview(client.crcClientId).catch(() => {});
+                }
+            }
+
             // Surface live report date diagnostically only. The freshness baseline
             // remains the report used by the prior successful dispute cycle.
             if (live?.reportDate) entry.reportDate = live.reportDate;
@@ -245,16 +296,46 @@ export async function runInactiveRecheckSweep(deps) {
                 if (decision.nextEligibleDate) {
                     await writers.recordNextEligibleDate(client.crcClientId, decision.nextEligibleDate).catch(() => {});
                 }
-                const statusResult = await setCrcStatus(client, decision.targetCrcStatus ?? "Waiting For Bureau");
+                const statusResult = activeStatusReconciled
+                    ? {
+                        statusUpdated: true,
+                        statusWritten: "Waiting For Bureau",
+                        alreadyReconciled: true,
+                    }
+                    : await setCrcStatus(client, decision.targetCrcStatus ?? "Waiting For Bureau");
+
                 entry.crcStatusWritten = statusResult?.statusWritten ?? null;
+
+                if (statusResult?.statusUpdated !== true || !statusResult?.statusWritten) {
+                    const reason =
+                        `Monitoring is active, but CRC Waiting For Bureau status could not be verified ` +
+                        `(${statusResult?.error_code ?? "STATUS_RECONCILE_FAILED"}).`;
+
+                    if (typeof writers.recordManualReview === "function") {
+                        await writers.recordManualReview(client.crcClientId, {
+                            stage: "reactivation_status_reconcile",
+                            reason,
+                            clientDisplayName: client.clientName ?? null,
+                        }).catch(() => {});
+                    }
+
+                    entry.manualReview = reason;
+                    summary.errors += 1;
+                    summary.results.push(entry);
+                    continue;
+                }
+
                 // Persist the block reason + confirmed CRC status (mirrors the
                 // existing routeToWaitingForBureau bookkeeping).
-                if (statusResult?.statusUpdated === true && statusResult?.statusWritten) {
-                    await writers.recordCreditHeroState(client.crcClientId, {
-                        crc_client_status: statusResult.statusWritten,
-                        block_reason: "WAITING_FOR_FREE_REPORT",
-                    }).catch(() => {});
+                await writers.recordCreditHeroState(client.crcClientId, {
+                    crc_client_status: statusResult.statusWritten,
+                    block_reason: "WAITING_FOR_FREE_REPORT",
+                }).catch(() => {});
+
+                if (typeof writers.clearManualReview === "function") {
+                    await writers.clearManualReview(client.crcClientId).catch(() => {});
                 }
+
                 summary.reactivatedWaiting += 1;
                 summary.results.push(entry);
                 continue;
