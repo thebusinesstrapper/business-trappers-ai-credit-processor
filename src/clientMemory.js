@@ -765,34 +765,42 @@ export async function recordMonitoringReactivated(crcClientId, nowIso = new Date
 
     const supabase = getSupabase();
 
-    // 1) Set the reactivation date ONLY if it is currently null (first transition).
-    //    A no-op when already set, which preserves the original date.
-    const { data: firstRow, error: firstErr } = await supabase
+    // Read the durable state first so "reactivated" means THIS inactive episode
+    // actually transitioned back to active. The old implementation only wrote
+    // monitoring_reactivated_date once in the client's lifetime, which allowed a
+    // later inactive notice/reminder episode to survive future reactivations.
+    const { data: before, error: beforeErr } = await supabase
         .from(CLIENT_STATE_TABLE)
-        .update({ monitoring_reactivated_date: nowIso })
+        .select("crc_client_id, credit_hero_access_state, monitoring_reactivated_date")
         .eq("crc_client_id", id)
-        .is("monitoring_reactivated_date", null)
-        .select("crc_client_id, monitoring_reactivated_date")
         .maybeSingle();
 
-    if (firstErr) {
-        throw new Error(`Failed to record monitoring_reactivated_date: ${firstErr.message}`);
+    if (beforeErr) {
+        throw new Error(`Failed to read monitoring state before reactivation: ${beforeErr.message}`);
     }
 
-    // 2) Unconditionally reconcile access to active, stamp the check time, and
-    //    clear the stale inactive block. Safe to repeat every run.
+    if (!before) return { ok: false, reason: "client_state_row_not_found" };
+
+    const priorAccess = String(before.credit_hero_access_state ?? "").trim().toLowerCase();
+    const isTransition = priorAccess !== "active";
+
+    const update = {
+        credit_hero_access_state: "active",
+        last_credit_hero_check_at: nowIso,
+        block_reason: null,
+    };
+
+    // Refresh this timestamp on EVERY real inactive/unknown -> active transition,
+    // not merely the first one in the client's lifetime. It is the episode
+    // boundary used by the inactive-message gate to invalidate old notices and
+    // reminders after monitoring has been restored.
+    if (isTransition) {
+        update.monitoring_reactivated_date = nowIso;
+    }
+
     const { data: stateRow, error: stateErr } = await supabase
         .from(CLIENT_STATE_TABLE)
-        .update({
-            credit_hero_access_state: "active",
-            last_credit_hero_check_at: nowIso,
-            // Clear ONLY the inactive block marker. block_reason also carries
-            // WAITING_FOR_FREE_REPORT, which the caller sets separately AFTER this
-            // when routing to Waiting For Bureau, so clearing it here is correct:
-            // the reactivation removes the "inactive" reason; the timing decision
-            // writes the next reason if one applies.
-            block_reason: null,
-        })
+        .update(update)
         .eq("crc_client_id", id)
         .select("crc_client_id, credit_hero_access_state, monitoring_reactivated_date")
         .maybeSingle();
@@ -806,7 +814,7 @@ export async function recordMonitoringReactivated(crcClientId, nowIso = new Date
     return {
         ok: true,
         reactivatedDate: stateRow.monitoring_reactivated_date ?? null,
-        firstReactivation: !!firstRow, // true only on the transitioning run
+        firstReactivation: isTransition,
     };
 }
 
