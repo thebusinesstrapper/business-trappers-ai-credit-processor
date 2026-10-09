@@ -60,21 +60,41 @@ async function readStatusOptions(page, crcClientId) {
         await page.goto(dashboardUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
     }
 
-    const link = page.getByText(PROFILE_LINK_TEXT, { exact: false }).first();
+    // CRC's client dashboard can finish navigation before the profile action is
+    // rendered. A single immediate count() created false PROFILE_LINK_NOT_FOUND
+    // failures across otherwise healthy clients. Reuse an already-open modal
+    // when present; otherwise poll for the link for the full timeout.
+    let modal = await findModal(page);
 
-    if (!(await link.count())) {
-        return { ok: false, labels: [], error_code: "PROFILE_LINK_NOT_FOUND" };
-    }
+    if (!modal) {
+        const link = page.getByText(PROFILE_LINK_TEXT, { exact: false }).first();
+        const linkDeadline = Date.now() + TIMEOUT;
+        let linkReady = false;
 
-    await link.click({ timeout: TIMEOUT }).catch(() => {});
+        while (Date.now() < linkDeadline) {
+            try {
+                if ((await link.count()) > 0 && await link.isVisible().catch(() => true)) {
+                    linkReady = true;
+                    break;
+                }
+            } catch {
+                // dashboard is still settling; keep polling
+            }
+            await page.waitForTimeout(300);
+        }
 
-    const deadline = Date.now() + TIMEOUT;
-    let modal = null;
+        if (!linkReady) {
+            return { ok: false, labels: [], error_code: "PROFILE_LINK_NOT_FOUND" };
+        }
 
-    while (Date.now() < deadline) {
-        modal = await findModal(page);
-        if (modal) break;
-        await page.waitForTimeout(300);
+        await link.click({ timeout: TIMEOUT }).catch(() => {});
+
+        const deadline = Date.now() + TIMEOUT;
+        while (Date.now() < deadline) {
+            modal = await findModal(page);
+            if (modal) break;
+            await page.waitForTimeout(300);
+        }
     }
 
     if (!modal) return { ok: false, labels: [], error_code: "MODAL_NOT_VISIBLE" };
