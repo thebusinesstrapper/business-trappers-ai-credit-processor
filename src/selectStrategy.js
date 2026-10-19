@@ -320,13 +320,19 @@ function evaluateEscalation(history, evidenceClass) {
     }
 
     // 5. Nothing came back at all.
-    if (last.outcome === PRIOR_OUTCOME.UNCHANGED || last.outcome === PRIOR_OUTCOME.UNKNOWN) {
+    if (last.outcome === PRIOR_OUTCOME.UNKNOWN) {
+        return {
+            escalate: false,
+            manualReviewRequired: true,
+            grounds: "Prior dispute outcome is unknown. A missing recorded response does not prove nonresponse, an unchanged report, or bureau misconduct. Reconcile the response and current report before selecting another tactic.",
+        };
+    }
+
+    if (last.outcome === PRIOR_OUTCOME.UNCHANGED) {
         return {
             escalate: true,
             strategy: ESCALATION.FURNISHER,
-            grounds:
-                `The previous dispute produced no documented response or change. The furnisher is ` +
-                `addressed directly.`,
+            grounds: "The previous dispute remains unchanged according to a documented comparison. Address the furnisher without alleging an unproven bureau investigation failure.",
         };
     }
 
@@ -458,6 +464,19 @@ export async function selectStrategy(decisions, context = {}) {
                     escalation.grounds,
                     `Strategy: ${STRATEGY_NO_FURTHER_ACTION.strategy} (${STRATEGY_NO_FURTHER_ACTION.name}).`,
                 ],
+            };
+        }
+
+        if (escalation.manualReviewRequired) {
+            return {
+                ...base,
+                strategy: STRATEGY_NO_FURTHER_ACTION,
+                round: null,
+                escalated: false,
+                automationTier: AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED,
+                humanReview: true,
+                humanReviewReasons: [escalation.grounds],
+                reasoningChain: [escalation.grounds],
             };
         }
 
