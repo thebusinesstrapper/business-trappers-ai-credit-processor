@@ -380,6 +380,27 @@ export async function runProductionClient(data = {}) {
 
     }
 
+    // Never generate a later-round dispute as if it were a first dispute.
+    // A missing or unreadable durable history requires manual reconciliation.
+    const persistedRound = Number(storedState?.current_round);
+    const historyRows = Array.isArray(itemHistoryRead?.rows) ? itemHistoryRead.rows : [];
+    const missingPriorRoundHistory = Number.isInteger(persistedRound) && persistedRound > 1 &&
+        !historyRows.some((row) => Number(row?.most_recent_round_disputed) >= persistedRound - 1);
+    if (preflightId && (itemHistoryRead?.ok !== true || missingPriorRoundHistory)) {
+        console.error(`Dispute generation blocked for CRC ${preflightId}: prior item history unavailable or incomplete`);
+        return {
+            ...base,
+            ok: false,
+            stage: "round_history_manual_review",
+            outcome: "MANUAL_REVIEW_REQUIRED",
+            reason: itemHistoryRead?.ok !== true ? "item_history_read_failed" : "missing_prior_round_item_history",
+            crcClientId: preflightId,
+            browserOpened: false,
+            m7: null,
+            m8: null,
+        };
+    }
+
     const m7 = await runMilestone7({
         clientName,
         // Preserve the authoritative CRC id already supplied by the queue. M6
