@@ -76,6 +76,20 @@ check("NOT escalated", tu1.escalated, false);
 check("Metro 2 -> BT-ST-0010", tu1.strategy.strategy, "BT-ST-0010");
 check("zero escalations", r1.summary.escalations, 0);
 
+
+// Regression: missing prior outcome must never be interpreted as bureau nonresponse.
+console.log("\n=== Unknown outcome must be held for human reconciliation ===\n");
+const unknownHistory = {
+    bt_tl_tu: {
+        rounds: [{ round: 1, strategy: "BT-ST-0010", outcome: PRIOR_OUTCOME.UNKNOWN }],
+    },
+};
+const unknownResult = await selectStrategy(decisions, { itemHistory: unknownHistory, currentRoundFloor: 2 });
+const unknownItem = S(unknownResult, "bt_tl_tu");
+check("unknown outcome requires human review", unknownItem.humanReview, true);
+check("unknown outcome is not escalated", unknownItem.escalated, false);
+check("unknown outcome does not generate a strategy", unknownItem.strategy.strategy, "BT-ST-0016");
+
 console.log("\n=== Escalation is EARNED by conduct, not by round number ===\n");
 
 // The bureau VERIFIED an item that contradicts itself. It cannot have
