@@ -429,6 +429,21 @@ export async function selectStrategy(decisions, context = {}) {
             ? Math.max(priorRounds.length + 1, validCurrentRoundFloor)
             : priorRounds.length + 1;
 
+        // A client-level round number cannot prove this item is newly disputed.
+        // Require history reconciliation before generating later-round first tactics.
+        if (validCurrentRoundFloor !== null && validCurrentRoundFloor > 1 && priorRounds.length === 0) {
+            return {
+                ...base,
+                strategy: STRATEGY_NO_FURTHER_ACTION,
+                round: null,
+                escalated: false,
+                automationTier: AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED,
+                humanReview: true,
+                humanReviewReasons: ["Missing item history in a later client round; reconcile prior letters/reports or confirm a genuinely new item."],
+                reasoningChain: [`Client round ${validCurrentRoundFloor}: no prior item history for ${decision.stableItemKey}. Held for reconciliation.`],
+            };
+        }
+
         // ---- Round ceiling --------------------------------------------------
         if (nextRound > MAX_ROUNDS) {
             return {
