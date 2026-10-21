@@ -384,8 +384,21 @@ export async function runProductionClient(data = {}) {
     // A missing or unreadable durable history requires manual reconciliation.
     const persistedRound = Number(storedState?.current_round);
     const historyRows = Array.isArray(itemHistoryRead?.rows) ? itemHistoryRead.rows : [];
+    // Require continuous evidence of completed rounds, not merely one recent
+    // item row. Legacy backfilled progress summaries are not item-level proof.
+    const priorRoundsWithItemEvidence = new Set();
+    for (const row of historyRows) {
+        const first = Number(row?.first_round_disputed);
+        const last = Number(row?.most_recent_round_disputed);
+        const strategies = Array.isArray(row?.strategies_used) ? row.strategies_used : [];
+        if (!Number.isInteger(first) || !Number.isInteger(last) || first < 1 || last < first) continue;
+        for (let round = first; round <= last; round++) {
+            if (strategies[round - first]) priorRoundsWithItemEvidence.add(round);
+        }
+    }
     const missingPriorRoundHistory = Number.isInteger(persistedRound) && persistedRound > 1 &&
-        !historyRows.some((row) => Number(row?.most_recent_round_disputed) >= persistedRound - 1);
+        Array.from({ length: persistedRound - 1 }, (_, i) => i + 1)
+            .some((round) => !priorRoundsWithItemEvidence.has(round));
     if (preflightId && (itemHistoryRead?.ok !== true || missingPriorRoundHistory)) {
         console.error(`Dispute generation blocked for CRC ${preflightId}: prior item history unavailable or incomplete`);
         return {
