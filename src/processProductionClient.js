@@ -211,10 +211,10 @@ async function routeToWaitingForBureau(
 }
 
 /** The exact CRC dropdown labels. Confirmed against the live Status control. */
-const CRC_STATUS_COMPLETE = "Closed";
+const CRC_STATUS_COMPLETE = "Complete";
 
 /**
- * Set CRC to the exact label "Closed", then mark internal processing complete.
+ * Set CRC to the exact label "Complete", then mark internal processing complete.
  *
  * ORDER IS DELIBERATE. CRC first, memory second, and memory ONLY on a confirmed
  * CRC write. A client marked complete in Supabase but still showing an active
@@ -803,7 +803,7 @@ export async function runProductionClient(data = {}) {
     // The DFY service ends at its configured round ceiling OR when there are no
     // remaining eligible negative items to dispute. This branch handles the
     // second case: M7 positively confirms there is nothing eligible left, so the
-    // client is CLOSED rather than a pipeline failure. A zero-letter M7 result
+    // client is COMPLETE rather than a pipeline failure. A zero-letter M7 result
     // must NOT be treated as an error and must NOT be sent to M8 (which would
     // reject it as "m7_letters_missing").
     //
@@ -828,7 +828,7 @@ export async function runProductionClient(data = {}) {
     // unknown), completion is NOT taken — the result falls through to the
     // existing M8 path, which blocks it as m7_letters_missing / manual review.
     //
-    // CRC becomes Closed only after eligibility is positively confirmed. current_round is untouched, no
+    // CRC becomes Complete only after eligibility is positively confirmed. current_round is untouched, no
     // delivery lock is taken, and M8 is never invoked.
     const lettersKnown = Array.isArray(m7.letters);
     const withheldKnown = Array.isArray(m7.withheld);
