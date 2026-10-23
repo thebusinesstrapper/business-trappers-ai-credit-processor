@@ -5,7 +5,7 @@ const OUTCOME_TABLE = "item_round_outcomes";
 
 function validRound(value) {
     const n = Number(value);
-    return Number.isInteger(n) && n >= 1 && n <= 6 ? n : null;
+    return Number.isInteger(n) && n >= 1 && n <= 7 ? n : null;
 }
 
 function validIsoDate(value) {
@@ -225,7 +225,7 @@ function inferCompletedRoundCount(client) {
     // status write failed before round advancement).
     if (completed === 0 && client?.last_dispute_date) completed = 1;
 
-    return Math.min(6, completed);
+    return Math.min(7, completed);
 }
 
 function historyCountsForRound(rows, round) {
