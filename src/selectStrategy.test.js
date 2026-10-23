@@ -202,7 +202,7 @@ check("identical input -> identical output", JSON.stringify(d1) === JSON.stringi
 
 console.log("\n=== FOCUSED TEST: currentRoundFloor from stored client_state ===\n");
 console.log("Scenario: empty itemHistory, currentRoundFloor=2 (from Supabase client_state)");
-console.log("Expected: round=2 (max of 0+1 and 2), escalated=false (no history to earn escalation)\n");
+console.log("Expected: manual review; never generate a later-round first-dispute tactic without item history\n");
 
 const r9 = await selectStrategy(decisions, {
     itemHistory: new Map(),  // empty: no prior disputes
@@ -213,12 +213,14 @@ const exp9 = S(r9, "bt_tl_exp");
 
 check("missing history in round 2 is held (TU)", tu9.humanReview, true);
 check("missing history in round 2 is held (EXP)", exp9.humanReview, true);
+check("missing history TU does not produce a dispute round", tu9.round, null);
+check("missing history EXP does not produce a dispute round", exp9.round, null);
 check("NO escalation without earned history (TU)", tu9.escalated, false);
 check("NO escalation without earned history (EXP)", exp9.escalated, false);
 check("floor not confused with prior rounds (TU)", tu9.priorRounds, 0);
 check("floor not confused with prior rounds (EXP)", exp9.priorRounds, 0);
 
-console.log("\n--- Invalid currentRoundFloor is ignored (fail-open) ---");
+console.log("\n--- Invalid currentRoundFloor is ignored for isolated strategy unit tests ---");
 
 const r10 = await selectStrategy(decisions, {
     itemHistory: new Map(),
