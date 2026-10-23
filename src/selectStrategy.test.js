@@ -210,8 +210,8 @@ const r9 = await selectStrategy(decisions, {
 const tu9 = S(r9, "bt_tl_tu");
 const exp9 = S(r9, "bt_tl_exp");
 
-check("empty itemHistory + currentRoundFloor=2 -> round 2 (TU)", tu9.round, 2);
-check("empty itemHistory + currentRoundFloor=2 -> round 2 (EXP)", exp9.round, 2);
+check("missing history in round 2 is held (TU)", tu9.humanReview, true);
+check("missing history in round 2 is held (EXP)", exp9.humanReview, true);
 check("NO escalation without earned history (TU)", tu9.escalated, false);
 check("NO escalation without earned history (EXP)", exp9.escalated, false);
 check("floor not confused with prior rounds (TU)", tu9.priorRounds, 0);
