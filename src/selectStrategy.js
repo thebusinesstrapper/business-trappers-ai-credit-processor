@@ -51,7 +51,7 @@ import { AUTOMATION_TIER } from "./decisionRecords.js";
 
 export const STRATEGY_SCHEMA_VERSION = "BT-STRATEGY-1.0";
 
-export const MAX_ROUNDS = 5; // Business Trappers DFY lifecycle: five AI dispute rounds maximum.
+export const MAX_ROUNDS = 7; // Seven-round ceiling; later rounds still require verified item history and earned escalation.
 
 /**
  * DECISION RECORD -> STRATEGY RECORD, for a FIRST dispute (round 1).
