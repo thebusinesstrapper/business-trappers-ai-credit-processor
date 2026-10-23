@@ -88,6 +88,7 @@ const unknownResult = await selectStrategy(decisions, { itemHistory: unknownHist
 const unknownItem = S(unknownResult, "bt_tl_tu");
 check("unknown outcome requires human review", unknownItem.humanReview, true);
 check("unknown outcome is not escalated", unknownItem.escalated, false);
+check("unknown outcome has no dispute round", unknownItem.round, null);
 check("unknown outcome does not generate a strategy", unknownItem.strategy.strategy, "BT-ST-0016");
 
 console.log("\n=== Escalation is EARNED by conduct, not by round number ===\n");
