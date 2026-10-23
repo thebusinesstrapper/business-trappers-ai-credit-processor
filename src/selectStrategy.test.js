@@ -173,7 +173,7 @@ check("TU escalates", S(r7, "bt_tl_tu").escalated, true);
 check("EXP stops (it worked)", S(r7, "bt_tl_exp").strategy.strategy, "BT-ST-0016");
 check("...same account, different outcomes", S(r7, "bt_tl_tu").stableAccountKey === S(r7, "bt_tl_exp").stableAccountKey, true);
 
-console.log("\n=== The five-round ceiling holds ===\n");
+console.log("\n=== The seven-round ceiling holds ===\n");
 
 const maxRoundsHistory = {
     bt_tl_tu: {
@@ -266,11 +266,11 @@ check("1 prior round + currentRoundFloor=2 -> round 2", tu14.round, 2);
 
 const r15 = await selectStrategy(decisions, {
     itemHistory: verifiedSelfEvident,  // 1 prior round
-    currentRoundFloor: 5  // within ceiling
+    currentRoundFloor: 7  // within ceiling
 });
 const tu15 = S(r15, "bt_tl_tu");
 
-check("1 prior round + currentRoundFloor=5 -> round 5", tu15.round, 5);
+check("1 prior round + currentRoundFloor=7 -> round 7", tu15.round, 7);
 
 console.log("\n=== FULL CHAIN — Facts -> Decision -> Strategy ===\n");
 console.log(S(r2, "bt_tl_tu").reasoningChain.join("\n"));
