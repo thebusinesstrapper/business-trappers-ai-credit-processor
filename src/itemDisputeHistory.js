@@ -8,7 +8,7 @@ function asArray(value) {
 
 function validRound(value) {
     const n = Number(value);
-    return Number.isInteger(n) && n >= 1 && n <= 6 ? n : null;
+    return Number.isInteger(n) && n >= 1 && n <= 7 ? n : null;
 }
 
 /**
@@ -48,7 +48,7 @@ export async function readItemDisputeHistory(crcClientId) {
         }
 
         const rounds = strategies.map((strategy, index) => {
-            const round = Math.min(6, firstRound + index);
+            const round = Math.min(7, firstRound + index);
             return {
                 round,
                 strategy,
