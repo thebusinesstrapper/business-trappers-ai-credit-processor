@@ -214,9 +214,9 @@ function inferCompletedRoundCount(client) {
     const current = validRound(client?.current_round) ?? 1;
 
     // Normal lifecycle: current_round points to the NEXT round, so current-1
-    // rounds have been completed. On final completion current_round remains 5,
-    // therefore process_complete proves round 5 was also delivered.
-    if (client?.process_complete === true && current === 5) return 5;
+    // rounds have been completed. A terminal state alone does NOT prove a
+    // dispute was delivered in the last round: zero-eligible-item completion
+    // can occur without sending any letters.
 
     let completed = Math.max(0, current - 1);
 
