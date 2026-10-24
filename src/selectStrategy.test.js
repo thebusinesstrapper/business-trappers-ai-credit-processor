@@ -217,8 +217,8 @@ check("missing history TU does not produce a dispute round", tu9.round, null);
 check("missing history EXP does not produce a dispute round", exp9.round, null);
 check("NO escalation without earned history (TU)", tu9.escalated, false);
 check("NO escalation without earned history (EXP)", exp9.escalated, false);
-check("floor not confused with prior rounds (TU)", tu9.priorRounds, 0);
-check("floor not confused with prior rounds (EXP)", exp9.priorRounds, 0);
+check("missing history with floor requires review (TU)", tu9.humanReview, true);
+check("missing history with floor requires review (EXP)", exp9.humanReview, true);
 
 console.log("\n--- Invalid currentRoundFloor is ignored for isolated strategy unit tests ---");
 
