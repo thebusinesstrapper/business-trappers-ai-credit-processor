@@ -51,7 +51,7 @@ import { AUTOMATION_TIER } from "./decisionRecords.js";
 
 export const STRATEGY_SCHEMA_VERSION = "BT-STRATEGY-1.0";
 
-export const MAX_ROUNDS = 5; // Business Trappers DFY lifecycle: five AI dispute rounds maximum.
+export const MAX_ROUNDS = 7; // Seven-round ceiling; later rounds still require verified item history and earned escalation.
 
 /**
  * DECISION RECORD -> STRATEGY RECORD, for a FIRST dispute (round 1).
@@ -320,13 +320,19 @@ function evaluateEscalation(history, evidenceClass) {
     }
 
     // 5. Nothing came back at all.
-    if (last.outcome === PRIOR_OUTCOME.UNCHANGED || last.outcome === PRIOR_OUTCOME.UNKNOWN) {
+    if (last.outcome === PRIOR_OUTCOME.UNKNOWN) {
+        return {
+            escalate: false,
+            manualReviewRequired: true,
+            grounds: "Prior dispute outcome is unknown. A missing recorded response does not prove nonresponse, an unchanged report, or bureau misconduct. Reconcile the response and current report before selecting another tactic.",
+        };
+    }
+
+    if (last.outcome === PRIOR_OUTCOME.UNCHANGED) {
         return {
             escalate: true,
             strategy: ESCALATION.FURNISHER,
-            grounds:
-                `The previous dispute produced no documented response or change. The furnisher is ` +
-                `addressed directly.`,
+            grounds: "The previous dispute remains unchanged according to a documented comparison. Address the furnisher without alleging an unproven bureau investigation failure.",
         };
     }
 
@@ -423,6 +429,21 @@ export async function selectStrategy(decisions, context = {}) {
             ? Math.max(priorRounds.length + 1, validCurrentRoundFloor)
             : priorRounds.length + 1;
 
+        // A client-level round number cannot prove this item is newly disputed.
+        // Require history reconciliation before generating later-round first tactics.
+        if (validCurrentRoundFloor !== null && validCurrentRoundFloor > 1 && priorRounds.length === 0) {
+            return {
+                ...base,
+                strategy: STRATEGY_NO_FURTHER_ACTION,
+                round: null,
+                escalated: false,
+                automationTier: AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED,
+                humanReview: true,
+                humanReviewReasons: ["Missing item history in a later client round; reconcile prior letters/reports or confirm a genuinely new item."],
+                reasoningChain: [`Client round ${validCurrentRoundFloor}: no prior item history for ${decision.stableItemKey}. Held for reconciliation.`],
+            };
+        }
+
         // ---- Round ceiling --------------------------------------------------
         if (nextRound > MAX_ROUNDS) {
             return {
@@ -458,6 +479,19 @@ export async function selectStrategy(decisions, context = {}) {
                     escalation.grounds,
                     `Strategy: ${STRATEGY_NO_FURTHER_ACTION.strategy} (${STRATEGY_NO_FURTHER_ACTION.name}).`,
                 ],
+            };
+        }
+
+        if (escalation.manualReviewRequired) {
+            return {
+                ...base,
+                strategy: STRATEGY_NO_FURTHER_ACTION,
+                round: null,
+                escalated: false,
+                automationTier: AUTOMATION_TIER.HUMAN_REVIEW_REQUIRED,
+                humanReview: true,
+                humanReviewReasons: [escalation.grounds],
+                reasoningChain: [escalation.grounds],
             };
         }
 

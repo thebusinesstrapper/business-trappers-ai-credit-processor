@@ -1,0 +1,14 @@
+import { compareVerifiedSnapshots } from "./historicalRecovery.js";
+import assert from "node:assert/strict";
+const item = stableItemKey => ({ stableItemKey, bureau: "TU" });
+const snap = (reportDate, items, overrides = {}) => ({ reportDate, items, verified: true, extractionComplete: true, ...overrides });
+const prior = snap("2026-09-15", [item("a"), item("b")]);
+const current = snap("2026-10-16", [item("a"), item("c")]);
+const result = compareVerifiedSnapshots(prior, current);
+assert.equal(result.ok, true);
+assert.deepEqual(result.outcomes.map(x => x.outcome), ["still_reporting", "not_observed_in_new_report", "newly_observed"]);
+assert.equal(result.outcomes.every(x => x.priorDisputeVerified === false), true);
+assert.equal(compareVerifiedSnapshots(prior, snap("2026-09-15", [])).ok, false);
+assert.equal(compareVerifiedSnapshots(prior, snap("2026-10-16", [], {extractionComplete:false})).ok, false);
+assert.equal(compareVerifiedSnapshots(prior, snap("2026-10-16", [item("a"), item("a")])).ok, false);
+console.log("Historical recovery evidence-only comparison tests passed");

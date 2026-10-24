@@ -8,7 +8,7 @@ function asArray(value) {
 
 function validRound(value) {
     const n = Number(value);
-    return Number.isInteger(n) && n >= 1 && n <= 6 ? n : null;
+    return Number.isInteger(n) && n >= 1 && n <= 7 ? n : null;
 }
 
 /**
@@ -32,14 +32,23 @@ export async function readItemDisputeHistory(crcClientId) {
     if (error) return { ok: false, reason: "item_history_read_failed", detail: error.message, itemHistory: {} };
 
     const itemHistory = {};
+    const integrityIssues = [];
     for (const row of data ?? []) {
         const strategies = asArray(row.strategies_used);
         const reasons = asArray(row.reasons_used);
         const firstRound = validRound(row.first_round_disputed) ?? 1;
         const mostRecent = validRound(row.most_recent_round_disputed) ?? firstRound;
+        const expectedCount = mostRecent - firstRound + 1;
+        // Do not fabricate a continuous timeline from a sparse strategy array.
+        // A missing entry could conceal a skipped round or an older dispute.
+        if (!validRound(row.first_round_disputed) || !validRound(row.most_recent_round_disputed) ||
+            mostRecent < firstRound || strategies.length !== expectedCount) {
+            integrityIssues.push({ stableItemKey: row.stable_item_key, reason: "incomplete_round_sequence" });
+            continue;
+        }
 
         const rounds = strategies.map((strategy, index) => {
-            const round = Math.min(6, firstRound + index);
+            const round = Math.min(7, firstRound + index);
             return {
                 round,
                 strategy,
@@ -65,6 +74,7 @@ export async function readItemDisputeHistory(crcClientId) {
         };
     }
 
+    if (integrityIssues.length) return { ok: false, reason: "item_history_integrity_failed", detail: `${integrityIssues.length} item histories have incomplete round sequences`, itemHistory: {}, rows: data ?? [], integrityIssues };
     return { ok: true, itemHistory, rows: data ?? [] };
 }
 
