@@ -1046,6 +1046,8 @@ async function captureAndNormalize(data = {}, identityState = {}) {
             `(${normalized.counts.observations_shared} SHARED observations).`
         );
 
+        const snapshotResult = toVerifiedTradelineSnapshot({ report: normalized.report, reportDate: freshness.newestReportDate, verifiedActive: active.ok === true, extractionOk: normalized.extraction_ok === true });
+        if (!snapshotResult.ok) return errorResponse("VERIFIED_SNAPSHOT_FAILED", snapshotResult.reason, { milestone: "M6_CAPTURE", requiresHumanReview: true, creditHeroAccessVerified });
         return successResponse({
             milestone: "M6_CAPTURE",
             result: "CAPTURED",
@@ -1121,7 +1123,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
             // The model itself, for the pipeline. Kept separate from the summary
             // above so the response stays readable.
             btCreditReportModel: normalized.report,
-            verifiedTradelineSnapshot: toVerifiedTradelineSnapshot({ report: normalized.report, reportDate: freshness.newestReportDate, verifiedActive: active.ok === true, extractionOk: normalized.extraction_ok === true }),
+            verifiedTradelineSnapshot: snapshotResult.snapshot,
 
             // Every JSON response seen, so the choice above can be CHECKED rather
             // than trusted. If the wrong one was picked, this shows it.
