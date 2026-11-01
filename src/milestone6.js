@@ -68,6 +68,7 @@ import { openCreditReport } from "./openCreditReport.js";
 import { normalizeReport } from "./reportNormalize.js";
 import { readReportSelector, selectReport, verifyActiveReport } from "./reportSelector.js";
 import { selectUnambiguousReportPayload } from "./reportPayloadSelection.js";
+import { toVerifiedTradelineSnapshot } from "./historicalSnapshotAdapter.js";
 import { captureReportedAddresses } from "./captureReportedAddresses.js";
 import { decideFreshness, hasNewerReport, ACTION } from "./reportFreshness.js";
 import { analyzeReportShape, buildSkeleton } from "./spikeReportJson.js";
@@ -1120,6 +1121,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
             // The model itself, for the pipeline. Kept separate from the summary
             // above so the response stays readable.
             btCreditReportModel: normalized.report,
+            verifiedTradelineSnapshot: toVerifiedTradelineSnapshot({ report: normalized.report, reportDate: freshness.newestReportDate, verifiedActive: active.ok === true, extractionOk: normalized.extraction_ok === true }),
 
             // Every JSON response seen, so the choice above can be CHECKED rather
             // than trusted. If the wrong one was picked, this shows it.
