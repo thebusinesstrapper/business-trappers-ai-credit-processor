@@ -21,6 +21,9 @@ function validate(snapshot) {
     return { ok: true };
 }
 export function compareVerifiedSnapshots(prior, current) {
+    if (prior?.crossReportIdentityVerified === false || current?.crossReportIdentityVerified === false) {
+        return { ok: false, reason: "cross_report_identity_not_verified", outcomes: [] };
+    }
     const a = validate(prior), b = validate(current);
     if (!a.ok || !b.ok) return { ok: false, reason: !a.ok ? a.reason : b.reason, outcomes: [] };
     if (current.reportDate <= prior.reportDate) {
