@@ -67,6 +67,7 @@ import { randomUUID } from "node:crypto";
 import { openCreditReport } from "./openCreditReport.js";
 import { normalizeReport } from "./reportNormalize.js";
 import { readReportSelector, selectReport, verifyActiveReport } from "./reportSelector.js";
+import { selectUnambiguousReportPayload } from "./reportPayloadSelection.js";
 import { captureReportedAddresses } from "./captureReportedAddresses.js";
 import { decideFreshness, hasNewerReport, ACTION } from "./reportFreshness.js";
 import { analyzeReportShape, buildSkeleton } from "./spikeReportJson.js";
@@ -948,7 +949,15 @@ async function captureAndNormalize(data = {}, identityState = {}) {
 
         // The largest report-shaped payload is the report. Stated, not assumed —
         // and every candidate is returned so this can be checked rather than trusted.
-        const report = reportPayloads.sort((a, b) => b.size - a.size)[0];
+        const payloadSelection = selectUnambiguousReportPayload(captured, selectionStartedAt);
+        if (!payloadSelection.ok) {
+            return errorResponse(
+                "REPORT_PAYLOAD_AMBIGUOUS",
+                `Cannot prove which response belongs to the selected report: ${payloadSelection.reason} (${payloadSelection.candidates ?? 0} candidates).`,
+                { milestone: "M6_CAPTURE", requiresHumanReview: true, creditHeroAccessVerified }
+            );
+        }
+        const report = payloadSelection.report;
 
         console.log(`Captured report payload: ${report.url.slice(0, 100)} (${report.size} bytes)`);
 
