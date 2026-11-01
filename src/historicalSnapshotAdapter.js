@@ -34,6 +34,7 @@ export function toVerifiedTradelineSnapshot({ report, reportDate, verifiedActive
             extractionComplete: true,
             reportDate,
             scope: "tradelines_only",
+            crossReportIdentityVerified: false, // No prior key registry was supplied by M6.
             items,
         },
     };
