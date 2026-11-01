@@ -891,6 +891,9 @@ async function captureAndNormalize(data = {}, identityState = {}) {
 
         console.log(`Selecting newest report: ${target.text} (${freshness.newestReportDate})`);
 
+        const selectionStartedAt = Date.now();
+
+
         const selected = await selectReport(chPage, target);
 
         if (!selected.ok) {
@@ -929,7 +932,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
         // reports and reactivate monitoring. Nothing here clicks any of them.
         await chPage.waitForTimeout(5000);
 
-        const reportPayloads = captured.filter((c) => c.looksLikeCreditReport);
+        const reportPayloads = captured.filter((c) => c.looksLikeCreditReport && c.responseStartedAt >= selectionStartedAt);
 
         if (reportPayloads.length === 0) {
             return errorResponse(
@@ -1192,6 +1195,7 @@ function capturePayloads(context) {
     // context.on("response") fires for EVERY page in the session — including tabs
     // that do not exist yet when this listener is attached. That is the point.
     context.on("response", async (response) => {
+        const responseStartedAt = Date.now();
         try {
             const url = response.url();
             const contentType = (response.headers()["content-type"] || "").toLowerCase();
@@ -1211,6 +1215,7 @@ function capturePayloads(context) {
             const topLevelKeys = payload && typeof payload === "object" ? Object.keys(payload) : [];
 
             captured.push({
+                responseStartedAt,
                 url,
                 size: body.length,
                 topLevelKeys,
