@@ -11,4 +11,5 @@ assert.equal(result.outcomes.every(x => x.priorDisputeVerified === false), true)
 assert.equal(compareVerifiedSnapshots(prior, snap("2026-09-15", [])).ok, false);
 assert.equal(compareVerifiedSnapshots(prior, snap("2026-10-16", [], {extractionComplete:false})).ok, false);
 assert.equal(compareVerifiedSnapshots(prior, snap("2026-10-16", [item("a"), item("a")])).ok, false);
+assert.equal(compareVerifiedSnapshots({...prior,crossReportIdentityVerified:false},current).reason,"cross_report_identity_not_verified");
 console.log("Historical recovery evidence-only comparison tests passed");
