@@ -20,13 +20,17 @@ export function assessHistoricalEvidence({ snapshots, deliveryRecords } = {}) {
     }
     const unverifiedDeliveries = deliveryRecords.filter(r =>
         r?.verified !== true ||
-        !Number.isInteger(Number(r?.round)) ||
-        Number(r.round) < 1 || Number(r.round) > 7 ||
+        !Number.isInteger(r?.round) ||
+        r.round < 1 || r.round > 7 ||
         typeof r?.stableItemKey !== "string" || !r.stableItemKey.trim() ||
         typeof r?.strategy !== "string" || !r.strategy.trim()
     );
     if (unverifiedDeliveries.length) {
         return { ok: false, reason: "unverified_delivery_records", unverifiedCount: unverifiedDeliveries.length };
+    }
+    const deliveryKeys = deliveryRecords.map(r => [r.round, r.stableItemKey.trim()].join(":"));
+    if (new Set(deliveryKeys).size !== deliveryKeys.length) {
+        return { ok: false, reason: "duplicate_delivery_records" };
     }
     return { ok: true, comparisons, verifiedDeliveries: deliveryRecords };
 }
