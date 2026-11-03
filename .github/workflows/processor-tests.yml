@@ -9,4 +9,7 @@ jobs:
         with:
           node-version: '22'
       - run: npm install --no-audit --no-fund
-      - run: npm test
+      - name: Run repair safety regression tests
+        run: node --test src/compareCapturedReports.test.js src/crossReportKeyContinuity.test.js src/historicalEvidenceGate.test.js src/historicalRecovery.test.js src/historicalSnapshotAdapter.test.js src/reportPayloadSelection.test.js src/selectStrategy.test.js
+      - name: Run complete legacy and repair suite
+        run: npm test
