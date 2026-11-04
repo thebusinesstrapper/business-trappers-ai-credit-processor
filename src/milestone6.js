@@ -1106,7 +1106,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
             // decision. The Strategy Engine determines those from these facts plus
             // Business Trappers policy — which is why a closed account and a
             // positively-reporting DoE student loan both survive to this point.
-            normalized: {
+            normalizationSummary: {
                 extraction_ok: normalized.extraction_ok,
                 model_version: normalized.report.model_version,
                 report_metadata: normalized.report.report_metadata,
@@ -1138,14 +1138,13 @@ async function captureAndNormalize(data = {}, identityState = {}) {
             // unit-tested against a REAL fixture, with no browser and no credentials.
             payload: report.payload,
 
-            normalized: false,   // INVARIANT for this milestone
+            normalized: false,   // Legacy milestone flag; see normalizationSummary and btCreditReportModel
             reconciled: false,   // INVARIANT for this milestone
             lettersGenerated: 0, // INVARIANT for this milestone
 
             message:
-                "Report captured and verified active. NOT normalized, NOT reconciled, NO letters. " +
-                "The Normalization Engine is written against this payload — never against a guessed " +
-                "schema.",
+                "Report captured, verified active, and normalized to the BT Credit Report Model. " +
+                "No reconciliation or letters were generated in this milestone.",
 
             replayUrl,
         });
