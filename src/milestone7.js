@@ -204,8 +204,8 @@ export async function runMilestone7(data = {}) {
             capture: {
                 report_metadata: report.report_metadata,
                 counts: m6.normalizationSummary?.counts ?? null,
-                key_resolution: m6.normalized?.key_resolution ?? null,
-                completeness: m6.normalized?.completeness ?? null,
+                key_resolution: m6.normalizationSummary?.key_resolution ?? null,
+                completeness: m6.normalizationSummary?.completeness ?? null,
 
                 // Stage 1 read-only rollout eligibility metadata (diagnostic).
                 classification: m6.classification ?? null,
