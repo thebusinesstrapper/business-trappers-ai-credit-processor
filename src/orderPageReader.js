@@ -94,11 +94,11 @@ export function parseAvailableFrom(text) {
 /** Parse visible price evidence conservatively, rejecting conflicting amounts. */
 export function parseCost(text) {
     if (typeof text !== "string" || !text.trim()) return { cost: null };
-    const amounts = [...text.matchAll(/\\$\\s*(\\d+(?:\\.\\d{1,2})?)/g)].map(m => Number(m[1]));
+    const amounts = [...text.matchAll(/\$\s*(\d+(?:\.\d{1,2})?)/g)].map(m => Number(m[1]));
     const unique = [...new Set(amounts)];
     if (unique.length > 1) return { cost: null };
     if (unique.length === 1) return { cost: unique[0] };
-    return { cost: /\\bFREE\\b/i.test(text) ? 0 : null };
+    return { cost: /\bFREE\b/i.test(text) ? 0 : null };
 }
 
 /** MM/DD/YYYY (as captured on the page) -> ISO YYYY-MM-DD. Null if absent. */
