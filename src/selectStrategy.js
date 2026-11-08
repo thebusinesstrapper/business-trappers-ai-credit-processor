@@ -144,7 +144,7 @@ export const REMEDY = Object.freeze({
     PERSONAL_INFO_CORRECT: "Correct or remove the inaccurate personal-information entry.",
     REMOVE_DUPLICATE: "Remove the duplicate reporting while preserving the correctly reported account or inquiry.",
     UPDATE_VERIFIED: "Update the reporting to reflect the verified current information; delete if it cannot be accurately corrected.",
-    PERMISSIBLE_PURPOSE: "Investigate permissible purpose and remove the inquiry only if authorization or another permissible purpose cannot be verified.",
+    PERMISSIBLE_PURPOSE: "Remove the disputed hard inquiry if its reporting is inaccurate, incomplete, or cannot be substantiated following a reasonable investigation; provide the investigation results.",
     OBSOLESCENCE_GATED: "Delete only when the applicable reporting period can be affirmatively calculated and has expired; otherwise route to review or request verification without alleging obsolescence.",
     IDENTITY_THEFT_BLOCK: "Block or remove identity-theft information only after required consumer documentation and identity verification are satisfied.",
     ESCALATION_REMEDY: "Apply the approved escalation remedy supported by prior dispute history, response evidence, and contractual or statutory prerequisites.",
