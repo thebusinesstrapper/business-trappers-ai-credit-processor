@@ -203,8 +203,8 @@ const identityCopies = allModules(join(ROOT, "src")).filter((p) => p.endsWith("c
 check("exactly one clientIdentity.js exists", identityCopies.length === 1,
     `found ${identityCopies.length}: ${identityCopies.map((p) => p.replace(ROOT, "")).join(", ")}`);
 
-check("...and it lives in src/intelligence/", identityCopies[0]?.includes("/intelligence/") === true,
-    `found at ${identityCopies[0]?.replace(ROOT, "")} — seven modules import it expecting src/intelligence/`);
+check("...and it lives at the canonical src/clientIdentity.js path", identityCopies[0] === join(ROOT, "src", "clientIdentity.js"),
+    `found at ${identityCopies[0]?.replace(ROOT, "")}; import resolution is checked above`);
 
 console.log(`\n${passed} passed, ${failed} failed.\n`);
 if (failed > 0) process.exit(1);
