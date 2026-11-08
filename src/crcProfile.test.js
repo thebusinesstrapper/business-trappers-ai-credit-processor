@@ -21,7 +21,7 @@
 import { readFileSync } from "fs";
 import { PROTECTED_FIELDS, WRITABLE_FIELDS } from "./crcClientStatus.js";
 import { FIELD_LABELS, REQUIRED_FIELDS } from "./crcClientProfile.js";
-import { verifyIdentity, IDENTITY_SOURCE, normalizeIdentity, canonicalState } from "./intelligence/clientIdentity.js";
+import { verifyIdentity, IDENTITY_SOURCE, normalizeIdentity, canonicalState } from "./clientIdentity.js";
 
 let passed = 0, failed = 0;
 const check = (n, a, e) => {
