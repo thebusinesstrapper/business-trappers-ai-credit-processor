@@ -44,6 +44,23 @@ const CLIPBOARD_POLL_INTERVAL_MS = 250; // poll cadence within an attempt
  * @returns {Promise<{ok:true, addresses:Array}|{ok:false, reason:string, stage:string}>}
  */
 export async function captureReportedAddresses(page) {
+    // Credit Hero may display the report's Personal Information table directly
+    // while omitting its legacy Copy As HTML control. Prefer reading the already
+    // rendered DOM, using the SAME strict bureau-column parser as the clipboard
+    // path. A mismatched table or missing bureau header must never be interpreted
+    // as a successful empty address list. No client data is logged.
+    try {
+        const visibleReport = await page.evaluate((coreSource) => {
+            const parse = new Function("return (" + coreSource + ")")();
+            return parse(document);
+        }, PARSE_CORE_SOURCE);
+        if (visibleReport?.ok === true) {
+            return { ok: true, addresses: visibleReport.addresses };
+        }
+    } catch {
+        // The legacy clipboard route below remains available where supported.
+    }
+
     // ---- 1. Locate the "Copy As HTML" control by its VISIBLE TEXT ----------
     // Primary locator is the link text, scoped to the credit-report controls.
     // Not a position-only selector. getByRole covers <a>/<button>; the .or()
