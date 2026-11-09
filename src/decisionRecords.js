@@ -489,9 +489,9 @@ export const FINDING_TO_DECISION = Object.freeze({
     // Automation is authorized for this path; BT-DM-0001's CONSUMER_INPUT mapping
     // survives only for the UNRESOLVED case above.
     INQ_NO_ASSOCIATED_ACCOUNT: {
-        record: "BT-DM-0001",
-        name: "Unauthorized Hard Inquiry",
-        evidence: "SELF_EVIDENT",
+        record: null,
+        evidence: "REQUIRES_CONSUMER",
+        reason: "No matching tradeline does not establish that the consumer did not authorize the inquiry or that the requester lacked a permissible purpose. Obtain inquiry-specific consumer evidence before drafting a removal dispute.",
     },
 
     // ---- Context only ------------------------------------------------------
