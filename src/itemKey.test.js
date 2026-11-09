@@ -133,7 +133,7 @@ const tlTU = tradelineSignatures({ "@TradelineHashSimple": "hs-tu", masked_accou
 const tlEX = tradelineSignatures({ "@TradelineHashSimple": "hs-ex", masked_account: "****1234", furnisher: "JPMCB", bureau: "experian" }, "bt_ac_1");
 
 check("T0 strongest", tlTU[0].tier, "T0");
-check("T1 = account + bureau", tlTU.some((s) => s.value === "T1|bt_ac_1|transunion"), true);
+check("T1 distinguishes full displayed account number within account and bureau", tlTU.some((s) => s.tier === "T1" && s.value.startsWith("T1|bt_ac_1|transunion|") && s.value.endsWith("****1234")), true);
 
 // SAME account, DIFFERENT bureaus -> DIFFERENT item keys. This is the point.
 check("same account, different bureau -> different T1", tlTU.find((s) => s.tier === "T1").value === tlEX.find((s) => s.tier === "T1").value, false);
