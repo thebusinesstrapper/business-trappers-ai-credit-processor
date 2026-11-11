@@ -82,7 +82,7 @@ console.log("\n=== OTHER MEMORY STATES ===\n");
 // Already analyzed July 13. This is a decision about whether a DISPUTE CYCLE is
 // due — not about whether we may READ the report. Capture proceeds regardless.
 const seen = decideFreshness(parsed, { last_report_date_used: "2026-07-13" });
-check("already-analyzed -> NO_ACTION_REQUIRED", seen.action, ACTION.NO_ACTION_REQUIRED);
+check("already-analyzed -> ACQUISITION_REQUIRED (never reuse)", seen.action, ACTION.ACQUISITION_REQUIRED);
 
 // A newer report exists than the one memory last used.
 const stale = decideFreshness(parsed, { last_report_date_used: "2026-05-28" });
