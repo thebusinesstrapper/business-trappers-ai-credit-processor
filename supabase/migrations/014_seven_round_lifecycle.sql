@@ -13,6 +13,11 @@ ALTER TABLE public.item_round_outcomes DROP CONSTRAINT IF EXISTS item_round_outc
 ALTER TABLE public.item_round_outcomes ADD CONSTRAINT item_round_outcomes_prior_round_disputed_check CHECK (prior_round_disputed BETWEEN 1 AND 7);
 ALTER TABLE public.round_item_progress DROP CONSTRAINT IF EXISTS round_item_progress_round_completed_check;
 ALTER TABLE public.round_item_progress ADD CONSTRAINT round_item_progress_round_completed_check CHECK (round_completed BETWEEN 1 AND 7);
+-- Keep processing history aligned with the seven-round lifecycle.
+ALTER TABLE public.processing_run_history DROP CONSTRAINT IF EXISTS run_history_round_attempted_range;
+ALTER TABLE public.processing_run_history ADD CONSTRAINT run_history_round_attempted_range CHECK (round_attempted BETWEEN 1 AND 7);
+ALTER TABLE public.processing_run_history DROP CONSTRAINT IF EXISTS run_history_round_completed_range;
+ALTER TABLE public.processing_run_history ADD CONSTRAINT run_history_round_completed_range CHECK (round_completed IS NULL OR round_completed BETWEEN 1 AND 7);
 -- Never infer a final-round delivery solely from process_complete.
 CREATE OR REPLACE FUNCTION public.ensure_round_progress_from_client_state()
 RETURNS trigger LANGUAGE plpgsql AS $$
