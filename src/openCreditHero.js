@@ -712,7 +712,8 @@ export async function openCreditHero(page, context) {
             const currentUrl = creditHeroPage.url();
             const pageTitle = await creditHeroPage.title();
 
-            console.log("CreditHeroScore URL:", currentUrl);
+            // Log only the URL origin and path: query parameters may contain session tokens.
+        console.log("CreditHeroScore URL:", sanitizeUrl(currentUrl));
             console.log("CreditHeroScore title:", pageTitle);
 
             const screenshotBuffer = await creditHeroPage.screenshot();
