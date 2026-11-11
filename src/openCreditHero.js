@@ -355,7 +355,7 @@ async function attemptOpen(page, context, attempt) {
     if (!onDashboard) {
         return {
             ok: false,
-            reason: `The "${CREDIT_HERO_LABEL}" link is not present — the client dashboard does not appear to be active. Current URL: ${page.url()}`,
+            reason: `The "${CREDIT_HERO_LABEL}" link is not present — the client dashboard does not appear to be active. Current URL: ${sanitizeUrl(page.url())}`,
         };
     }
 
