@@ -144,7 +144,7 @@ check("...context.on(\"response\")", /context\.on\("response"/.test(m6), true);
 check("...NOT page.on(\"response\")", /page\.on\("response"/.test(m6), false);
 check("...attached BEFORE the CreditHero click", m6.indexOf("capturePayloads(context)") < m6.indexOf("openCreditHero(page, context)"), true);
 
-console.log("\n=== NOTHING IS EXTRACTED OR NORMALIZED HERE ===\n");
+console.log("\n=== NORMALIZATION DOES NOT AUTHORIZE LETTERS OR RECONCILIATION ===\n");
 
 const { readFileSync } = await import("fs");
 const src = readFileSync(new URL("./milestone6.js", import.meta.url), "utf-8");
@@ -152,7 +152,8 @@ const src = readFileSync(new URL("./milestone6.js", import.meta.url), "utf-8");
 check("milestone6 declares normalized: false", /normalized: false/.test(src), true);
 check("...reconciled: false", /reconciled: false/.test(src), true);
 check("...lettersGenerated: 0", /lettersGenerated: 0/.test(src), true);
-check("does NOT import a normalizer", /reportNormalize|itemKey/.test(src), false);
+check("normalization is explicitly invoked for extracted payload", /normalizeReport\(report\.payload,\s*\{/.test(src), true);
+check("does not generate letters at this milestone", /lettersGenerated: 0/.test(src), true);
 
 // The report page carries controls that order reports and reactivate monitoring.
 check("no click on any report-page control", /\.click\(\)/.test(src), false);
