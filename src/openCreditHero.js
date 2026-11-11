@@ -507,9 +507,9 @@ async function attemptOpen(page, context, attempt) {
             diagnostics,
             reason: noDestination
                 ? `The "${CREDIT_HERO_LABEL}" control has no usable href and the click did not ` +
-                  `navigate — still on CRC (${url}). This is a technical navigation failure, not ` +
+                  `navigate — still on CRC (${sanitizeUrl(url)}). This is a technical navigation failure, not ` +
                   `evidence that monitoring is inactive.`
-                : `The click did not navigate — still on CRC (${url}). The control was likely not yet wired up.`,
+                : `The click did not navigate — still on CRC (${sanitizeUrl(url)}). The control was likely not yet wired up.`,
         };
     }
 
@@ -600,7 +600,7 @@ async function attemptOpen(page, context, attempt) {
                     error_code: "CREDENTIALS_OR_AUTH_FAILED",
                     requiresInactiveWorkflow: true,
                     reason:
-                        `CreditHero landed on "${currentUrl}" but the page shows an inactive-monitoring ` +
+                        `CreditHero landed on "${sanitizeUrl(currentUrl)}" but the page shows an inactive-monitoring ` +
                         `state (${(preLanding.evidence ?? []).join(", ") || "recognized marker"}). ` +
                         `Credit monitoring is inactive — routed to the existing inactive workflow, not ` +
                         `manual review, and the report page is NOT searched.`,
