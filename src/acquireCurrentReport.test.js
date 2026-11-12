@@ -131,7 +131,7 @@ console.log("\n=== TIMEOUT: we STOP. We never analyze the older report. ===\n");
 // The ordered report NEVER arrives.
 const page6 = fakePage(
     [R("3", "July 13, 2026"), R("4", "August 14, 2026", true)],
-    { pollsBeforeArrival: 9999 }
+    { pollsBeforeArrival: Number.MAX_SAFE_INTEGER }
 );
 
 const r6 = await fulfillReportCycle(
