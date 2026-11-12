@@ -15,7 +15,7 @@ import {
 } from "./openings.js";
 
 import {
-    evaluatePermissiblePurpose,
+    evaluateInquiryPermissiblePurpose,
     evaluateInquiries,
     furnisherHasTradeline,
     BT_DM_0055,
@@ -128,7 +128,7 @@ const inq = (k) => report.inquiries.find((i) => i.stable_item_key === k);
 
 console.log("--- With NO attestation, nothing is disputed. Ever. ---");
 
-const noAttest = evaluatePermissiblePurpose({ inquiry: inq("bt_iq_unknown"), report, attestation: null });
+const noAttest = evaluateInquiryPermissiblePurpose({ inquiry: inq("bt_iq_unknown"), report, attestation: null });
 
 check("no attestation -> NOT eligible", noAttest.eligible, false);
 check("...blocked by NO_CONSUMER_ATTESTATION", noAttest.blockedBy, "NO_CONSUMER_ATTESTATION");
@@ -145,7 +145,7 @@ const attestation = (key) => ({
 
 console.log("\n--- A complete attestation, furnisher NOT on the report -> eligible ---");
 
-const good = evaluatePermissiblePurpose({
+const good = evaluateInquiryPermissiblePurpose({
     inquiry: inq("bt_iq_unknown"),
     report,
     attestation: attestation("bt_iq_unknown"),
@@ -167,7 +167,7 @@ console.log("\n--- THE REPORT MAY OVERRIDE THE CONSUMER ---");
 // sitting on the same page.
 check("JPMCB matches CHASE tradeline", furnisherHasTradeline("JPMCB CARD SERVICES", report), true);
 
-const contradicted = evaluatePermissiblePurpose({
+const contradicted = evaluateInquiryPermissiblePurpose({
     inquiry: inq("bt_iq_chase"),
     report,
     attestation: attestation("bt_iq_chase"),
@@ -179,7 +179,7 @@ check("...reason names the account relationship", /appears as an account/i.test(
 
 console.log("\n--- Partial attestations are not attestations ---");
 
-const partial = evaluatePermissiblePurpose({
+const partial = evaluateInquiryPermissiblePurpose({
     inquiry: inq("bt_iq_unknown"),
     report,
     attestation: { stableItemKey: "bt_iq_unknown", didNotApply: true, didNotAuthorize: false, noAccountRelationship: true },
@@ -187,7 +187,7 @@ const partial = evaluatePermissiblePurpose({
 check("incomplete attestation -> BLOCKED", partial.eligible, false);
 
 // A general "some inquiries look wrong" is not an attestation about THIS one.
-const mismatched = evaluatePermissiblePurpose({
+const mismatched = evaluateInquiryPermissiblePurpose({
     inquiry: inq("bt_iq_unknown"),
     report,
     attestation: attestation("bt_iq_SOMETHING_ELSE"),
@@ -196,7 +196,7 @@ check("attestation for a DIFFERENT inquiry -> BLOCKED", mismatched.eligible, fal
 
 console.log("\n--- Soft inquiries are not disputable on this ground ---");
 
-const soft = evaluatePermissiblePurpose({
+const soft = evaluateInquiryPermissiblePurpose({
     inquiry: inq("bt_iq_soft"),
     report,
     attestation: attestation("bt_iq_soft"),
