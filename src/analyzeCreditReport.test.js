@@ -254,7 +254,7 @@ const untrusted = await analyzeCreditReport({ extraction_ok: false, accounts: []
 
 check("extraction_ok:false -> analysisOk false", untrusted.analysisOk, false);
 check("...and no findings", untrusted.tradelines.length, 0);
-check("...and not ready", untrusted.readyForLetterGeneration, false);
+check("...and not ready", untrusted.analysisReadyForDecision, false);
 
 console.log("\n=== Determinism ===\n");
 
@@ -265,7 +265,7 @@ check("identical input -> byte-identical output", JSON.stringify(a) === JSON.str
 
 console.log("\n=== The engine chooses no remedies ===\n");
 
-const actions = new Set(result.recommendedActions.map((a) => a.action));
+const actions = new Set(result.itemsRequiringReview.map((a) => a.action));
 check("only one action value exists", actions.size, 1);
 check("...and it defers to the Decision Engine", [...actions][0], "REVIEW_BY_DECISION_ENGINE");
 check("priority is ranked worst-first", result.overallPriority[0].topSeverity, "CRITICAL");
