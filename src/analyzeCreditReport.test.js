@@ -201,11 +201,13 @@ check("no INCORRECT_BALANCE code exists", "INCORRECT_BALANCE" in FINDING_CODES, 
 check("no INCORRECT_NAME code exists", "INCORRECT_NAME" in FINDING_CODES, false);
 
 const inq1 = codesFor(result, "bt_iq_1");
-check("authorization reported as UNVERIFIABLE, not 'unauthorized'", inq1.includes("INQ_AUTHORIZATION_UNVERIFIABLE"), true);
+check("no associated account is detected from the bureau report", inq1.includes("INQ_NO_ASSOCIATED_ACCOUNT"), true);
+check("absence of an account is NOT treated as proof of nonauthorization", inq1.includes("UNAUTHORIZED_INQUIRY"), false);
+check("unverifiable authorization finding is reserved for unresolved association", inq1.includes("INQ_AUTHORIZATION_UNVERIFIABLE"), false);
 
 const inqItem = result.inquiries.find((i) => i.stableItemKey === "bt_iq_1");
-const authFinding = inqItem.findings.find((f) => f.code === "INQ_AUTHORIZATION_UNVERIFIABLE");
-check("...and it is INFO, not an accusation", authFinding.severity, "INFO");
+const associationFinding = inqItem.findings.find((f) => f.code === "INQ_NO_ASSOCIATED_ACCOUNT");
+check("association finding is medium priority, not a fraud accusation", associationFinding?.severity, "MEDIUM");
 
 console.log("\n=== Re-aging is UNDETECTABLE without a previous report ===\n");
 
