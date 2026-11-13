@@ -488,7 +488,7 @@ export async function recordCreditHeroState(crcClientId, fields = {}) {
  */
 
 /** The final dispute round. Delivering it completes the client. */
-export const FINAL_ROUND = 5;
+export const FINAL_ROUND = 7;
 
 /**
  * Days from confirmed delivery until the client is next eligible.
@@ -556,8 +556,8 @@ export async function advanceRoundAfterDelivery(crcClientId, deliveredRound, rep
     }
 
     if (round >= FINAL_ROUND) {
-        // Round 5 completes rather than advances. Refuse rather than silently
-        // rolling a finished client into a sixth round.
+        // Round 7 completes rather than advances. Refuse rather than silently
+        // rolling a finished client into an eighth round.
         return { ok: false, reason: "final_round_requires_completion", deliveredRound: round };
     }
 
@@ -597,7 +597,7 @@ export async function advanceRoundAfterDelivery(crcClientId, deliveredRound, rep
  * Two approved routes, and the compare-and-swap differs because the states they
  * arrive from differ:
  *
- *   "final_round_delivered"      — from processing_state 'waiting' at round 5,
+ *   "final_round_delivered"      — from processing_state 'waiting' at round 7,
  *                                  i.e. a confirmed delivery, same guarantee as
  *                                  advanceRoundAfterDelivery().
  *   "no_disputable_items"        — from any NON-complete state; no delivery

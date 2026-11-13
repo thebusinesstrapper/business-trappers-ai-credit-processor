@@ -214,7 +214,7 @@ async function routeToWaitingForBureau(
 const CRC_STATUS_COMPLETE = "Complete";
 
 /**
- * Set CRC to the exact label "Complete", then mark memory complete.
+ * Set CRC to the exact label "Complete", then mark internal processing complete.
  *
  * ORDER IS DELIBERATE. CRC first, memory second, and memory ONLY on a confirmed
  * CRC write. A client marked complete in Supabase but still showing an active
@@ -378,6 +378,40 @@ export async function runProductionClient(data = {}) {
             };
         }
 
+    }
+
+    // Never generate a later-round dispute as if it were a first dispute.
+    // A missing or unreadable durable history requires manual reconciliation.
+    const persistedRound = Number(storedState?.current_round);
+    const historyRows = Array.isArray(itemHistoryRead?.rows) ? itemHistoryRead.rows : [];
+    // Require continuous evidence of completed rounds, not merely one recent
+    // item row. Legacy backfilled progress summaries are not item-level proof.
+    const priorRoundsWithItemEvidence = new Set();
+    for (const row of historyRows) {
+        const first = Number(row?.first_round_disputed);
+        const last = Number(row?.most_recent_round_disputed);
+        const strategies = Array.isArray(row?.strategies_used) ? row.strategies_used : [];
+        if (!Number.isInteger(first) || !Number.isInteger(last) || first < 1 || last < first) continue;
+        for (let round = first; round <= last; round++) {
+            if (strategies[round - first]) priorRoundsWithItemEvidence.add(round);
+        }
+    }
+    const missingPriorRoundHistory = Number.isInteger(persistedRound) && persistedRound > 1 &&
+        Array.from({ length: persistedRound - 1 }, (_, i) => i + 1)
+            .some((round) => !priorRoundsWithItemEvidence.has(round));
+    if (preflightId && (itemHistoryRead?.ok !== true || missingPriorRoundHistory)) {
+        console.error(`Dispute generation blocked for CRC ${preflightId}: prior item history unavailable or incomplete`);
+        return {
+            ...base,
+            ok: false,
+            stage: "round_history_manual_review",
+            outcome: "MANUAL_REVIEW_REQUIRED",
+            reason: itemHistoryRead?.ok !== true ? "item_history_read_failed" : "missing_prior_round_item_history",
+            crcClientId: preflightId,
+            browserOpened: false,
+            m7: null,
+            m8: null,
+        };
     }
 
     const m7 = await runMilestone7({
@@ -766,7 +800,7 @@ export async function runProductionClient(data = {}) {
 
     // ---- CORRECTION 2: NO ELIGIBLE NEGATIVE ITEMS (DFY COMPLETION) ---------
     //
-    // The DFY service ends after 5 successful AI rounds OR when there are no
+    // The DFY service ends at its configured round ceiling OR when there are no
     // remaining eligible negative items to dispute. This branch handles the
     // second case: M7 positively confirms there is nothing eligible left, so the
     // client is COMPLETE rather than a pipeline failure. A zero-letter M7 result
@@ -794,7 +828,7 @@ export async function runProductionClient(data = {}) {
     // unknown), completion is NOT taken — the result falls through to the
     // existing M8 path, which blocks it as m7_letters_missing / manual review.
     //
-    // NO CRC status change beyond COMPLETE. current_round is untouched, no
+    // CRC becomes Complete only after eligibility is positively confirmed. current_round is untouched, no
     // delivery lock is taken, and M8 is never invoked.
     const lettersKnown = Array.isArray(m7.letters);
     const withheldKnown = Array.isArray(m7.withheld);

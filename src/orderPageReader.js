@@ -81,6 +81,26 @@ export const ROLLOUT_CUTOFF_ISO = "2026-07-01";
 
 const READ_TIMEOUT = 8000;
 
+/** Parse an explicitly displayed availability date; never infer one. */
+export function parseAvailableFrom(text) {
+    if (typeof text !== "string") return null;
+    const iso = parseAvailableDate(text);
+    if (!iso) return null;
+    const [, mm, dd] = iso.split("-").map(Number);
+    const d = new Date(iso + "T00:00:00Z");
+    return d.getUTCMonth() + 1 === mm && d.getUTCDate() === dd ? iso : null;
+}
+
+/** Parse visible price evidence conservatively, rejecting conflicting amounts. */
+export function parseCost(text) {
+    if (typeof text !== "string" || !text.trim()) return { cost: null };
+    const amounts = [...text.matchAll(/\$\s*(\d+(?:\.\d{1,2})?)/g)].map(m => Number(m[1]));
+    const unique = [...new Set(amounts)];
+    if (unique.length > 1) return { cost: null };
+    if (unique.length === 1) return { cost: unique[0] };
+    return { cost: /\bFREE\b/i.test(text) ? 0 : null };
+}
+
 /** MM/DD/YYYY (as captured on the page) -> ISO YYYY-MM-DD. Null if absent. */
 function parseAvailableDate(text) {
     const m = (text || "").match(AVAILABLE_DATE_RE);

@@ -82,7 +82,7 @@ console.log("\n=== OTHER MEMORY STATES ===\n");
 // Already analyzed July 13. This is a decision about whether a DISPUTE CYCLE is
 // due — not about whether we may READ the report. Capture proceeds regardless.
 const seen = decideFreshness(parsed, { last_report_date_used: "2026-07-13" });
-check("already-analyzed -> NO_ACTION_REQUIRED", seen.action, ACTION.NO_ACTION_REQUIRED);
+check("already-analyzed -> ACQUISITION_REQUIRED (never reuse)", seen.action, ACTION.ACQUISITION_REQUIRED);
 
 // A newer report exists than the one memory last used.
 const stale = decideFreshness(parsed, { last_report_date_used: "2026-05-28" });
@@ -144,7 +144,7 @@ check("...context.on(\"response\")", /context\.on\("response"/.test(m6), true);
 check("...NOT page.on(\"response\")", /page\.on\("response"/.test(m6), false);
 check("...attached BEFORE the CreditHero click", m6.indexOf("capturePayloads(context)") < m6.indexOf("openCreditHero(page, context)"), true);
 
-console.log("\n=== NOTHING IS EXTRACTED OR NORMALIZED HERE ===\n");
+console.log("\n=== NORMALIZATION DOES NOT AUTHORIZE LETTERS OR RECONCILIATION ===\n");
 
 const { readFileSync } = await import("fs");
 const src = readFileSync(new URL("./milestone6.js", import.meta.url), "utf-8");
@@ -152,7 +152,8 @@ const src = readFileSync(new URL("./milestone6.js", import.meta.url), "utf-8");
 check("milestone6 declares normalized: false", /normalized: false/.test(src), true);
 check("...reconciled: false", /reconciled: false/.test(src), true);
 check("...lettersGenerated: 0", /lettersGenerated: 0/.test(src), true);
-check("does NOT import a normalizer", /reportNormalize|itemKey/.test(src), false);
+check("normalization is explicitly invoked for extracted payload", /normalizeReport\(report\.payload,\s*\{/.test(src), true);
+check("does not generate letters at this milestone", /lettersGenerated: 0/.test(src), true);
 
 // The report page carries controls that order reports and reactivate monitoring.
 check("no click on any report-page control", /\.click\(\)/.test(src), false);

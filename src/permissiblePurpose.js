@@ -369,19 +369,19 @@ export function letterTextFor(evaluation) {
                 "I did not apply for credit with this company and did not authorize them to access my " +
                 "credit file.",
             request:
-                "Please verify the permissible purpose under which my credit file was furnished to this " +
-                "company and provide me with that verification. If a permissible purpose cannot be " +
-                "verified, please remove this inquiry from my credit file.",
+                "I dispute this hard inquiry and request its removal from my credit file. " +
+                "Please investigate the disputed inquiry and delete it if its reporting is inaccurate, " +
+                "incomplete, or cannot be substantiated. Please provide the results of your investigation.",
             authority: evaluation.authority,
         };
     }
 
     return {
-        defect: "I do not recognize this inquiry on my credit file.",
+        defect: "I dispute the accuracy and reporting of this hard inquiry on my credit file.",
         request:
-            "Please verify the permissible purpose under which my credit file was furnished to this " +
-            "company and provide me with that verification. If a permissible purpose cannot be " +
-            "verified, please remove this inquiry from my credit file.",
+            "I request removal of this disputed hard inquiry from my credit file. " +
+            "Please investigate its accuracy and permissible reporting basis and delete it if " +
+            "inaccurate, incomplete, or unverifiable. Please provide the results of your investigation.",
         authority: evaluation.authority,
     };
 }

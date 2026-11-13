@@ -15,7 +15,7 @@ import {
 } from "./openings.js";
 
 import {
-    evaluatePermissiblePurpose,
+    evaluateInquiryPermissiblePurpose,
     evaluateInquiries,
     furnisherHasTradeline,
     BT_DM_0055,
@@ -126,13 +126,13 @@ const report = {
 
 const inq = (k) => report.inquiries.find((i) => i.stable_item_key === k);
 
-console.log("--- With NO attestation, nothing is disputed. Ever. ---");
+console.log("--- Without attestation, a verification request makes no unauthorized claim ---");
 
-const noAttest = evaluatePermissiblePurpose({ inquiry: inq("bt_iq_unknown"), report, attestation: null });
-
-check("no attestation -> NOT eligible", noAttest.eligible, false);
-check("...blocked by NO_CONSUMER_ATTESTATION", noAttest.blockedBy, "NO_CONSUMER_ATTESTATION");
-check("...reason explains the report cannot prove it", /cannot establish a lack of permissible purpose/i.test(noAttest.reason), true);
+const noAttest = evaluateInquiryPermissiblePurpose({ inquiry: inq("bt_iq_unknown"), report, attestation: null });
+check("no attestation -> verification request eligible for human review", noAttest.eligible, true);
+check("...mode does not claim consumer nonauthorization", noAttest.mode, "VERIFICATION_REQUEST");
+check("...never asserts lack of permissible purpose", noAttest.assertsLackOfPermissiblePurpose, false);
+check("...requires human review", noAttest.humanReview, true);
 
 const attestation = (key) => ({
     stableItemKey: key,
@@ -145,7 +145,7 @@ const attestation = (key) => ({
 
 console.log("\n--- A complete attestation, furnisher NOT on the report -> eligible ---");
 
-const good = evaluatePermissiblePurpose({
+const good = evaluateInquiryPermissiblePurpose({
     inquiry: inq("bt_iq_unknown"),
     report,
     attestation: attestation("bt_iq_unknown"),
@@ -153,10 +153,10 @@ const good = evaluatePermissiblePurpose({
 
 check("eligible", good.eligible, true);
 check("record BT-DM-0055", good.record, "BT-DM-0055");
-check("evidence REQUIRES_CONSUMER", good.evidenceClass, "REQUIRES_CONSUMER");
-check("NEVER automated", good.automationTier, "NEVER_AUTOMATED");
+check("consumer statement selects disputed mode", good.mode, "CONSUMER_DISPUTED");
+check("consumer-disputed inquiry still requires review", good.humanReview, true);
 check("human review required even when clean", good.humanReview, true);
-check("cites § 1681b", BT_DM_0055.authority.includes("1681b"), true);
+check("cites § 1681b", BT_DM_0055.authority.INQUIRY.includes("1681b"), true);
 check("valid on round 1, not escalation-only", BT_DM_0055.escalationOnly, false);
 
 console.log("\n--- THE REPORT MAY OVERRIDE THE CONSUMER ---");
@@ -167,7 +167,7 @@ console.log("\n--- THE REPORT MAY OVERRIDE THE CONSUMER ---");
 // sitting on the same page.
 check("JPMCB matches CHASE tradeline", furnisherHasTradeline("JPMCB CARD SERVICES", report), true);
 
-const contradicted = evaluatePermissiblePurpose({
+const contradicted = evaluateInquiryPermissiblePurpose({
     inquiry: inq("bt_iq_chase"),
     report,
     attestation: attestation("bt_iq_chase"),
@@ -179,24 +179,24 @@ check("...reason names the account relationship", /appears as an account/i.test(
 
 console.log("\n--- Partial attestations are not attestations ---");
 
-const partial = evaluatePermissiblePurpose({
+const partial = evaluateInquiryPermissiblePurpose({
     inquiry: inq("bt_iq_unknown"),
     report,
     attestation: { stableItemKey: "bt_iq_unknown", didNotApply: true, didNotAuthorize: false, noAccountRelationship: true },
 });
-check("incomplete attestation -> BLOCKED", partial.eligible, false);
+check("incomplete attestation -> verification-only mode", partial.mode, "VERIFICATION_REQUEST");
 
 // A general "some inquiries look wrong" is not an attestation about THIS one.
-const mismatched = evaluatePermissiblePurpose({
+const mismatched = evaluateInquiryPermissiblePurpose({
     inquiry: inq("bt_iq_unknown"),
     report,
     attestation: attestation("bt_iq_SOMETHING_ELSE"),
 });
-check("attestation for a DIFFERENT inquiry -> BLOCKED", mismatched.eligible, false);
+check("attestation for a DIFFERENT inquiry -> verification-only mode", mismatched.mode, "VERIFICATION_REQUEST");
 
 console.log("\n--- Soft inquiries are not disputable on this ground ---");
 
-const soft = evaluatePermissiblePurpose({
+const soft = evaluateInquiryPermissiblePurpose({
     inquiry: inq("bt_iq_soft"),
     report,
     attestation: attestation("bt_iq_soft"),
@@ -210,9 +210,9 @@ console.log("\n--- No blanket inquiry sweeps ---");
 // There is no code path from "an inquiry exists" to "dispute it".
 const sweep = evaluateInquiries(report, {});
 
-check("3 inquiries, 0 attestations -> 0 disputes", sweep.summary.eligibleForDispute, 0);
-check("...all blocked", sweep.summary.blocked, 3);
-check("...2 for want of attestation", sweep.summary.blockedByNoAttestation, 2);
+check("3 inquiries, 0 attestations -> one verification request", sweep.summary.eligibleForDispute, 1);
+check("...associated and soft inquiries blocked", sweep.summary.blocked, 2);
+check("...no consumer authorization claims", sweep.eligible.every((x) => x.assertsLackOfPermissiblePurpose === false), true);
 
 console.log(`\n${passed} passed, ${failed} failed.\n`);
 if (failed > 0) process.exit(1);

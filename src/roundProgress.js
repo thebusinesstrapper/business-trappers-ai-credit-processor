@@ -5,7 +5,7 @@ const OUTCOME_TABLE = "item_round_outcomes";
 
 function validRound(value) {
     const n = Number(value);
-    return Number.isInteger(n) && n >= 1 && n <= 6 ? n : null;
+    return Number.isInteger(n) && n >= 1 && n <= 7 ? n : null;
 }
 
 function validIsoDate(value) {
@@ -214,9 +214,9 @@ function inferCompletedRoundCount(client) {
     const current = validRound(client?.current_round) ?? 1;
 
     // Normal lifecycle: current_round points to the NEXT round, so current-1
-    // rounds have been completed. On final completion current_round remains 5,
-    // therefore process_complete proves round 5 was also delivered.
-    if (client?.process_complete === true && current === 5) return 5;
+    // rounds have been completed. A terminal state alone does NOT prove a
+    // dispute was delivered in the last round: zero-eligible-item completion
+    // can occur without sending any letters.
 
     let completed = Math.max(0, current - 1);
 
@@ -225,7 +225,7 @@ function inferCompletedRoundCount(client) {
     // status write failed before round advancement).
     if (completed === 0 && client?.last_dispute_date) completed = 1;
 
-    return Math.min(6, completed);
+    return Math.min(7, completed);
 }
 
 function historyCountsForRound(rows, round) {

@@ -42,8 +42,8 @@ function fakePage(reports, opts = {}) {
             return [{
                 id: "reportSelect",
                 name: "reportSelect",
-                selectedValue: visible[0]?.value ?? "",
-                options: visible.map((r) => ({ value: r.value, text: r.text, selected: false })),
+                selectedValue: state.selected ?? visible[0]?.value ?? "",
+                options: visible.map((r) => ({ value: r.value, text: r.text, selected: (state.selected ?? visible[0]?.value) === r.value })),
             }];
         },
         locator: () => ({
@@ -83,7 +83,7 @@ check("...selects the newest", r2.selectedReport.text, "March 2, 2031");
 // Already analyzed the newest -> nothing due.
 const page3 = fakePage([R("3", "July 13, 2026")]);
 const r3 = await fulfillReportCycle(page3, { last_report_date_used: "2026-07-13" });
-check("already analyzed newest -> NO_ACTION_REQUIRED", r3.result, CYCLE_RESULT.NO_ACTION_REQUIRED);
+check("already analyzed newest -> CAPABILITY_UNAVAILABLE (new report required)", r3.result, CYCLE_RESULT.CAPABILITY_UNAVAILABLE);
 
 console.log("\n=== The hand-off is a CAPABILITY GAP, not a stage ===\n");
 
@@ -131,7 +131,7 @@ console.log("\n=== TIMEOUT: we STOP. We never analyze the older report. ===\n");
 // The ordered report NEVER arrives.
 const page6 = fakePage(
     [R("3", "July 13, 2026"), R("4", "August 14, 2026", true)],
-    { pollsBeforeArrival: 9999 }
+    { pollsBeforeArrival: Number.MAX_SAFE_INTEGER }
 );
 
 const r6 = await fulfillReportCycle(

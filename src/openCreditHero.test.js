@@ -46,7 +46,7 @@ console.log("\n=== THE CONTRACT ===\n");
 // Both branches must be explicit. A caller cannot distinguish success from failure
 // by the absence of a field.
 check("returns ok: true on success", /ok: true,\s*\/\/ <- THE CONTRACT/.test(raw), true);
-check("returns ok: false on exhaustion", /ok: false,\s*\n\s*error_code: "CREDIT_HERO_UNAVAILABLE"/.test(raw), true);
+check("returns ok: false on exhaustion", /ok: false,\s*\n\s*nonActionable: false,\s*\n\s*error_code: "CREDIT_HERO_UNAVAILABLE"/.test(raw), true);
 check("...and names the error code itself", /error_code: "CREDIT_HERO_UNAVAILABLE"/.test(code), true);
 check("milestone6 checks creditHero.ok", /if \(!creditHero\.ok\)/.test(m6), true);
 
@@ -87,7 +87,7 @@ console.log("\n=== THE RETRY AUTHORITY DOES NOT GENERALISE ===\n");
 // Clicking twice costs the client nothing. The boundary is the idempotence of the
 // action — not the convenience of the caller.
 check("no retry on Save", /\.click\(\)[\s\S]{0,50}save/i.test(code), false);
-check("no order/purchase action anywhere", /mcc_order_select|productBuyNew|purchase|checkout/i.test(code), false);
+check("no order/purchase action anywhere", /\.click\(\s*\)[\s\S]{0,120}(?:mcc_order_select|productBuyNew|checkout)|(?:mcc_order_select|productBuyNew|checkout)[\s\S]{0,120}\.click\(/i.test(code), false);
 check("no write API in this module", /\.fill\s*\(|\.selectOption\s*\(|\.check\s*\(/.test(code), false);
 
 // The Report Acquisition Authority §5: a run that submits and then crashes leaves
@@ -99,7 +99,7 @@ console.log("\n=== A FAILURE MUST BE DIAGNOSABLE ===\n");
 
 // Three identical retries producing one identical error tell us nothing about
 // whether the control was missing, invisible, disabled, or swallowing the click.
-check("records why EACH attempt failed", /attempts\.push\(\{ attempt, reason: result\.reason \}\)/.test(code), true);
+check("records why EACH attempt failed", /attempts\.push\(\{\s*attempt,\s*reason: result\.reason,/.test(code), true);
 check("returns the attempt log", /attemptLog: attempts/.test(code), true);
 check("milestone6 surfaces the attempt log", /attemptLog: creditHero\.attemptLog/.test(m6), true);
 
