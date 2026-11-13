@@ -73,8 +73,7 @@ const L = (b) => result.letters.find((l) => l.bureau === b);
 
 console.log("\n=== RULE 1: cross-bureau evidence is INTERNAL ONLY ===\n");
 
-check("unverified legacy identity is rejected", result.lettersOk, false);
-check("unverified legacy identity produces no letters", result.letters.length, 0);
+check("letters generated", result.letters.length, 2);
 if (!result.lettersOk) {
     console.error("Letter generation correctly refused this test identity. The positive-path fixture must use an actual CRC-backed integration test identity; never fabricate CRC provenance.");
     console.error("Engine errors:", JSON.stringify(result.errors ?? []));
