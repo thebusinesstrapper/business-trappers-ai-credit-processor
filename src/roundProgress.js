@@ -51,11 +51,15 @@ function deliveredKeys(chainItems, round) {
 export function calculateLiveRoundProgress({
     roundCompleted,
     priorHistoryRows = [],
-    currentItemKeys = [],
+    currentItemKeys,
     chainItems = [],
 } = {}) {
     const round = validRound(roundCompleted);
     if (!round) return { ok: false, reason: "invalid_round_completed" };
+    // Missing inventory is not evidence that previously disputed items disappeared.
+    if (!Array.isArray(currentItemKeys) || currentItemKeys.some((key) => !asKey(key))) {
+        return { ok: false, reason: "current_inventory_unverified" };
+    }
 
     const history = Array.isArray(priorHistoryRows) ? priorHistoryRows : [];
     const currentKeys = new Set((Array.isArray(currentItemKeys) ? currentItemKeys : []).map(asKey).filter(Boolean));
@@ -133,7 +137,7 @@ export async function recordLiveRoundProgress({
     roundCompleted,
     reportDateUsed,
     priorHistoryRows = [],
-    currentItemKeys = [],
+    currentItemKeys,
     chainItems = [],
 } = {}) {
     const id = crcClientId == null ? "" : String(crcClientId).trim();
