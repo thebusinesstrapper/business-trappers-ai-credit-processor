@@ -56,4 +56,23 @@ assert.equal(legacyNoBaseline.stillReportingItems, null);
 assert.equal(legacyNoBaseline.newlyDisputedItems, null);
 assert.equal(legacyNoBaseline.comparisonComplete, false);
 
+
+// Missing or malformed inventory cannot establish deletion outcomes.
+const missingInventory = calculateLiveRoundProgress({
+    roundCompleted: 2,
+    priorHistoryRows: prior,
+    chainItems: [],
+});
+assert.equal(missingInventory.ok, false);
+assert.equal(missingInventory.reason, "current_inventory_unverified");
+
+const malformedInventory = calculateLiveRoundProgress({
+    roundCompleted: 2,
+    priorHistoryRows: prior,
+    currentItemKeys: ["a", null],
+    chainItems: [],
+});
+assert.equal(malformedInventory.ok, false);
+assert.equal(malformedInventory.reason, "current_inventory_unverified");
+
 console.log("roundProgress tests passed");
