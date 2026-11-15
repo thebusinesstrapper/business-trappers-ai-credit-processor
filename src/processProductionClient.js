@@ -1074,9 +1074,11 @@ export async function runProductionClient(data = {}) {
         // on the freshly verified report; prior history is the durable snapshot of
         // what was disputed in the preceding round. Absence from a complete current
         // report is therefore a verified deletion for this live transition.
+        // An absent decision inventory must never be mistaken for an empty report.
+        // Preserve malformed keys so roundProgress can reject them, not filter them away.
         const currentItemKeys = Array.isArray(m7?.item_decisions)
-            ? m7.item_decisions.map((item) => item?.stableItemKey).filter(Boolean)
-            : [];
+            ? m7.item_decisions.map((item) => item?.stableItemKey)
+            : null;
 
         roundProgressAudit = await recordLiveRoundProgress({
             crcClientId,
