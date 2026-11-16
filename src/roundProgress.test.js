@@ -22,6 +22,7 @@ assert.equal(firstRound.deletedItems, null);
 
 const live = calculateLiveRoundProgress({
     roundCompleted: 2,
+    currentInventoryVerified: true,
     priorHistoryRows: prior,
     currentItemKeys: ["a", "c"],
     chainItems: [
@@ -38,6 +39,17 @@ assert.equal(live.newlyDisputedItems, 1);
 assert.equal(live.disputedThisRound, 2);
 assert.equal(live.unknownItems, 0);
 assert.equal(live.comparisonComplete, true);
+
+const unverifiedPartial = calculateLiveRoundProgress({
+    roundCompleted: 2,
+    priorHistoryRows: prior,
+    currentItemKeys: ["a"],
+    chainItems: [],
+});
+assert.equal(unverifiedPartial.ok, true);
+assert.equal(unverifiedPartial.comparisonComplete, false);
+assert.equal(unverifiedPartial.deletedItems, null);
+assert.equal(unverifiedPartial.unknownItems, 2);
 
 const legacyNoBaseline = calculateLiveRoundProgress({
     roundCompleted: 3,
