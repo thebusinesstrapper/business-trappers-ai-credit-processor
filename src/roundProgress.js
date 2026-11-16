@@ -52,6 +52,7 @@ export function calculateLiveRoundProgress({
     roundCompleted,
     priorHistoryRows = [],
     currentItemKeys,
+    currentInventoryVerified = false,
     chainItems = [],
 } = {}) {
     const round = validRound(roundCompleted);
@@ -87,6 +88,17 @@ export function calculateLiveRoundProgress({
     // item history for the previous round. Do not turn "missing history" into
     // zero deletions or "all new" items. The round itself is still recorded, but
     // comparison metrics remain unknown until a later round has a true baseline.
+    // An inventory can be well-formed but partial. Do not infer deletion without
+    // an independently verified complete current-report inventory.
+    if (currentInventoryVerified !== true) {
+        return {
+            ok: true, priorDisputedItems: priorKeys.size,
+            deletedItems: null, stillReportingItems: null, unknownItems: priorKeys.size,
+            newlyDisputedItems: null, disputedThisRound: thisRoundKeys.size,
+            comparisonComplete: false, outcomes: [],
+        };
+    }
+
     if (priorKeys.size === 0) {
         return {
             ok: true,
@@ -138,6 +150,7 @@ export async function recordLiveRoundProgress({
     reportDateUsed,
     priorHistoryRows = [],
     currentItemKeys,
+    currentInventoryVerified = false,
     chainItems = [],
 } = {}) {
     const id = crcClientId == null ? "" : String(crcClientId).trim();
@@ -151,6 +164,7 @@ export async function recordLiveRoundProgress({
         roundCompleted: round,
         priorHistoryRows,
         currentItemKeys,
+        currentInventoryVerified,
         chainItems,
     });
     if (!calculated.ok) return calculated;
