@@ -1,0 +1,10 @@
+import assert from "node:assert/strict";
+import { toVerifiedTradelineSnapshot } from "./historicalSnapshotAdapter.js";
+const report = {report_metadata:{report_date:"2026-10-16"},accounts:[{stable_account_key:"acct",bureau_tradelines:[{stable_item_key:"tl-1",bureau:"EX"}]}]};
+const input = {report,reportDate:"2026-10-16",verifiedActive:true,extractionOk:true};
+assert.equal(toVerifiedTradelineSnapshot(input).snapshot.items[0].stableItemKey,"tl-1");
+assert.equal(toVerifiedTradelineSnapshot({...input,verifiedActive:false}).ok,false);
+assert.equal(toVerifiedTradelineSnapshot({...input,reportDate:"2026-09-15"}).ok,false);
+assert.equal(toVerifiedTradelineSnapshot({...input,report:{...report,accounts:[{bureau_tradelines:null}]}}).ok,false);
+assert.equal(toVerifiedTradelineSnapshot({...input,report:{...report,accounts:[{bureau_tradelines:[{stable_item_key:"tl-1"},{stable_item_key:"tl-1"}]}]}}).ok,false);
+console.log("Historical snapshot adapter tests passed");

@@ -9,8 +9,8 @@
  * report date reaches the analysis summary.
  */
 import { normalizeReport } from "./reportNormalize.js";
-import { analyzeCreditReport } from "./intelligence/analyzeCreditReport.js";
-import { decideDisputes } from "./intelligence/decideDisputes.js";
+import { analyzeCreditReport } from "./analyzeCreditReport.js";
+import { decideDisputes } from "./decideDisputes.js";
 
 let passed = 0, failed = 0;
 const check = (label, actual, expected) => {

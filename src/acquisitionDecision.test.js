@@ -177,12 +177,12 @@ check(
 );
 
 check(
-    "paid option missing (page unrecognised) -> manual_review",
+    "verified free-only page -> submit free report (approved business rule)",
     decideAcquisition(
         goodPage({ options: [goodPage().options[0]] }),
         NEED
     ).decision,
-    DECISIONS.MANUAL_REVIEW
+    DECISIONS.SUBMIT_FREE_REPORT
 );
 
 check(

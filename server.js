@@ -1086,6 +1086,6 @@ app.listen(PORT, () => {
     console.log(
         process.env.DEBUG_TOKEN
             ? "DEBUG_TOKEN: set."
-            : "DEBUG_TOKEN: NOT SET — debug routes will return 404 to every caller."
+            : "DEBUG_TOKEN is NOT SET — debug routes will return 404 to every caller."
     );
 });

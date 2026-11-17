@@ -161,8 +161,8 @@ console.log("\n--- The inquiry wording ---");
 console.log(`  ${iqText.defect}`);
 console.log(`  ${iqText.request}\n`);
 
-check("refers to the FILE being furnished", /my credit file was furnished to this company/i.test(iqText.request), true);
-check("asks to remove the INQUIRY", /remove this inquiry/i.test(iqText.request), true);
+check("requests removal of the inquiry", /request removal of this disputed hard inquiry/i.test(iqText.request), true);
+check("asks to remove the INQUIRY", /removal of this disputed hard inquiry/i.test(iqText.request), true);
 check("does NOT ask to delete an account", /delete this account/i.test(iqAll), false);
 check("assertsLackOfPermissiblePurpose FALSE", iq.assertsLackOfPermissiblePurpose, false);
 check("no assertion of absence", /had no permissible purpose|lacked permissible purpose|without permissible purpose/i.test(iqAll), false);
@@ -186,7 +186,7 @@ check("STILL asserts no lack of permissible purpose", attested.assertsLackOfPerm
 const attestedText = letterTextFor(attested);
 // She may state HER OWN fact. We may not convert it into OUR legal conclusion.
 check("reports HER statement", /I did not apply/i.test(attestedText.defect), true);
-check("...but still REQUESTS verification", /verify the permissible purpose/i.test(attestedText.request), true);
+check("...requests removal rather than verification-only", /request its removal/i.test(attestedText.request), true);
 check("...draws no legal conclusion", /unlawful|illegal|violation|must remove/i.test(attestedText.request), false);
 
 console.log("\n--- Inquiry blocks ---");

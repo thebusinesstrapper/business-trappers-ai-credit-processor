@@ -1,0 +1,15 @@
+name: Processor safety tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-audit --no-fund
+      - name: Run repair safety regression tests
+        run: node --test src/compareCapturedReports.test.js src/crossReportKeyContinuity.test.js src/historicalEvidenceGate.test.js src/historicalRecovery.test.js src/historicalSnapshotAdapter.test.js src/reportPayloadSelection.test.js src/selectStrategy.test.js
+      - name: Run complete legacy and repair suite
+        run: npm test

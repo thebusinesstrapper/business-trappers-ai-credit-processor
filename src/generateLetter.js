@@ -187,17 +187,17 @@ const AUTH = {
         "FCRA § 604 (15 U.S.C. § 1681b) — a consumer report may be furnished only for a permissible purpose.",
 };
 
-// BT-DM-0001 v2.1 Addendum — required wording, stated verbatim.
+// Removal-first inquiry language. Do not assert that the consumer failed to
+// recognize or authorize an inquiry without an actual consumer statement.
 const INQUIRY_STATEMENT =
-    "I do not recognize this inquiry. Please identify and verify the permissible purpose " +
-    "for accessing my credit file. If you cannot verify a lawful permissible purpose, " +
-    "delete the inquiry.";
+    "I dispute the accuracy and reporting of this hard inquiry on my credit file. " +
+    "I request its removal. Investigate the inquiry and delete it if its reporting " +
+    "is inaccurate, incomplete, or cannot be substantiated.";
 
-// Mirrors BT-DM-0001's governed remedy. Used only when the Strategy Engine
-// supplies none, so the letter still does not invent a remedy of its own.
+// The Strategy Engine can supply a more specific evidence-supported remedy.
 const INQUIRY_REMEDY =
-    "Identify and verify the permissible purpose for this inquiry, and delete the inquiry " +
-    "if a lawful permissible purpose cannot be verified.";
+    "Remove this disputed hard inquiry if inaccurate, incomplete, or unverifiable; " +
+    "provide the results of the investigation.";
 
 // STRONGEST FIRST. Exactly ONE authority is cited per account.
 //

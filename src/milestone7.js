@@ -203,9 +203,9 @@ export async function runMilestone7(data = {}) {
             // Pass-through only: read from m6, no recomputation, no new behavior.
             capture: {
                 report_metadata: report.report_metadata,
-                counts: m6.normalized?.counts ?? null,
-                key_resolution: m6.normalized?.key_resolution ?? null,
-                completeness: m6.normalized?.completeness ?? null,
+                counts: m6.normalizationSummary?.counts ?? null,
+                key_resolution: m6.normalizationSummary?.key_resolution ?? null,
+                completeness: m6.normalizationSummary?.completeness ?? null,
 
                 // Stage 1 read-only rollout eligibility metadata (diagnostic).
                 classification: m6.classification ?? null,

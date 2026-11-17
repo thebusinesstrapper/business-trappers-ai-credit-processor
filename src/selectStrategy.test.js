@@ -76,6 +76,21 @@ check("NOT escalated", tu1.escalated, false);
 check("Metro 2 -> BT-ST-0010", tu1.strategy.strategy, "BT-ST-0010");
 check("zero escalations", r1.summary.escalations, 0);
 
+
+// Regression: missing prior outcome must never be interpreted as bureau nonresponse.
+console.log("\n=== Unknown outcome must be held for human reconciliation ===\n");
+const unknownHistory = {
+    bt_tl_tu: {
+        rounds: [{ round: 1, strategy: "BT-ST-0010", outcome: PRIOR_OUTCOME.UNKNOWN }],
+    },
+};
+const unknownResult = await selectStrategy(decisions, { itemHistory: unknownHistory, currentRoundFloor: 2 });
+const unknownItem = S(unknownResult, "bt_tl_tu");
+check("unknown outcome requires human review", unknownItem.humanReview, true);
+check("unknown outcome is not escalated", unknownItem.escalated, false);
+check("unknown outcome has no dispute round", unknownItem.round, null);
+check("unknown outcome does not generate a strategy", unknownItem.strategy.strategy, "BT-ST-0016");
+
 console.log("\n=== Escalation is EARNED by conduct, not by round number ===\n");
 
 // The bureau VERIFIED an item that contradicts itself. It cannot have
@@ -158,7 +173,7 @@ check("TU escalates", S(r7, "bt_tl_tu").escalated, true);
 check("EXP stops (it worked)", S(r7, "bt_tl_exp").strategy.strategy, "BT-ST-0016");
 check("...same account, different outcomes", S(r7, "bt_tl_tu").stableAccountKey === S(r7, "bt_tl_exp").stableAccountKey, true);
 
-console.log("\n=== The five-round ceiling holds ===\n");
+console.log("\n=== The seven-round ceiling holds ===\n");
 
 const maxRoundsHistory = {
     bt_tl_tu: {
@@ -187,7 +202,7 @@ check("identical input -> identical output", JSON.stringify(d1) === JSON.stringi
 
 console.log("\n=== FOCUSED TEST: currentRoundFloor from stored client_state ===\n");
 console.log("Scenario: empty itemHistory, currentRoundFloor=2 (from Supabase client_state)");
-console.log("Expected: round=2 (max of 0+1 and 2), escalated=false (no history to earn escalation)\n");
+console.log("Expected: manual review; never generate a later-round first-dispute tactic without item history\n");
 
 const r9 = await selectStrategy(decisions, {
     itemHistory: new Map(),  // empty: no prior disputes
@@ -196,14 +211,16 @@ const r9 = await selectStrategy(decisions, {
 const tu9 = S(r9, "bt_tl_tu");
 const exp9 = S(r9, "bt_tl_exp");
 
-check("empty itemHistory + currentRoundFloor=2 -> round 2 (TU)", tu9.round, 2);
-check("empty itemHistory + currentRoundFloor=2 -> round 2 (EXP)", exp9.round, 2);
+check("missing history in round 2 is held (TU)", tu9.humanReview, true);
+check("missing history in round 2 is held (EXP)", exp9.humanReview, true);
+check("missing history TU does not produce a dispute round", tu9.round, null);
+check("missing history EXP does not produce a dispute round", exp9.round, null);
 check("NO escalation without earned history (TU)", tu9.escalated, false);
 check("NO escalation without earned history (EXP)", exp9.escalated, false);
-check("floor not confused with prior rounds (TU)", tu9.priorRounds, 0);
-check("floor not confused with prior rounds (EXP)", exp9.priorRounds, 0);
+check("missing history with floor requires review (TU)", tu9.humanReview, true);
+check("missing history with floor requires review (EXP)", exp9.humanReview, true);
 
-console.log("\n--- Invalid currentRoundFloor is ignored (fail-open) ---");
+console.log("\n--- Invalid currentRoundFloor is ignored for isolated strategy unit tests ---");
 
 const r10 = await selectStrategy(decisions, {
     itemHistory: new Map(),
@@ -249,11 +266,11 @@ check("1 prior round + currentRoundFloor=2 -> round 2", tu14.round, 2);
 
 const r15 = await selectStrategy(decisions, {
     itemHistory: verifiedSelfEvident,  // 1 prior round
-    currentRoundFloor: 5  // within ceiling
+    currentRoundFloor: 7  // within ceiling
 });
 const tu15 = S(r15, "bt_tl_tu");
 
-check("1 prior round + currentRoundFloor=5 -> round 5", tu15.round, 5);
+check("1 prior round + currentRoundFloor=7 -> round 7", tu15.round, 7);
 
 console.log("\n=== FULL CHAIN — Facts -> Decision -> Strategy ===\n");
 console.log(S(r2, "bt_tl_tu").reasoningChain.join("\n"));

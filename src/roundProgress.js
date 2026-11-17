@@ -5,7 +5,7 @@ const OUTCOME_TABLE = "item_round_outcomes";
 
 function validRound(value) {
     const n = Number(value);
-    return Number.isInteger(n) && n >= 1 && n <= 6 ? n : null;
+    return Number.isInteger(n) && n >= 1 && n <= 7 ? n : null;
 }
 
 function validIsoDate(value) {
@@ -51,11 +51,16 @@ function deliveredKeys(chainItems, round) {
 export function calculateLiveRoundProgress({
     roundCompleted,
     priorHistoryRows = [],
-    currentItemKeys = [],
+    currentItemKeys,
+    currentInventoryVerified = false,
     chainItems = [],
 } = {}) {
     const round = validRound(roundCompleted);
     if (!round) return { ok: false, reason: "invalid_round_completed" };
+    // Missing inventory is not evidence that previously disputed items disappeared.
+    if (!Array.isArray(currentItemKeys) || currentItemKeys.some((key) => !asKey(key))) {
+        return { ok: false, reason: "current_inventory_unverified" };
+    }
 
     const history = Array.isArray(priorHistoryRows) ? priorHistoryRows : [];
     const currentKeys = new Set((Array.isArray(currentItemKeys) ? currentItemKeys : []).map(asKey).filter(Boolean));
@@ -97,6 +102,17 @@ export function calculateLiveRoundProgress({
         };
     }
 
+    // An inventory can be well-formed but partial. Do not infer deletion without
+    // an independently verified complete current-report inventory.
+    if (currentInventoryVerified !== true) {
+        return {
+            ok: true, priorDisputedItems: priorKeys.size,
+            deletedItems: null, stillReportingItems: null, unknownItems: priorKeys.size,
+            newlyDisputedItems: null, disputedThisRound: thisRoundKeys.size,
+            comparisonComplete: false, outcomes: [],
+        };
+    }
+
     const allPriorKeys = new Set(history.map((row) => asKey(row?.stable_item_key)).filter(Boolean));
 
     let deleted = 0;
@@ -133,7 +149,8 @@ export async function recordLiveRoundProgress({
     roundCompleted,
     reportDateUsed,
     priorHistoryRows = [],
-    currentItemKeys = [],
+    currentItemKeys,
+    currentInventoryVerified = false,
     chainItems = [],
 } = {}) {
     const id = crcClientId == null ? "" : String(crcClientId).trim();
@@ -147,6 +164,7 @@ export async function recordLiveRoundProgress({
         roundCompleted: round,
         priorHistoryRows,
         currentItemKeys,
+        currentInventoryVerified,
         chainItems,
     });
     if (!calculated.ok) return calculated;
@@ -214,9 +232,9 @@ function inferCompletedRoundCount(client) {
     const current = validRound(client?.current_round) ?? 1;
 
     // Normal lifecycle: current_round points to the NEXT round, so current-1
-    // rounds have been completed. On final completion current_round remains 5,
-    // therefore process_complete proves round 5 was also delivered.
-    if (client?.process_complete === true && current === 5) return 5;
+    // rounds have been completed. A terminal state alone does NOT prove a
+    // dispute was delivered in the last round: zero-eligible-item completion
+    // can occur without sending any letters.
 
     let completed = Math.max(0, current - 1);
 
@@ -225,7 +243,7 @@ function inferCompletedRoundCount(client) {
     // status write failed before round advancement).
     if (completed === 0 && client?.last_dispute_date) completed = 1;
 
-    return Math.min(6, completed);
+    return Math.min(7, completed);
 }
 
 function historyCountsForRound(rows, round) {
