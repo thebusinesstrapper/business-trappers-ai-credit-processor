@@ -949,23 +949,15 @@ async function captureAndNormalize(data = {}, identityState = {}) {
 
         console.log(`Captured report payload: ${report.url.slice(0, 100)} (${report.size} bytes)`);
 
-        // Read bureau-reported addresses from the rendered report after JSON capture.
-        // A capture failure requires manual review so missing data is never treated
-        // as confirmation that the bureaus reported no addresses.
-        const addressCapture = await captureReportedAddresses(chPage);
-        if (!addressCapture.ok) {
-            return errorResponse("REPORTED_ADDRESS_CAPTURE_FAILED",
-                `The report JSON was captured, but the bureau-reported addresses could not be ` +
-                    `extracted from the rendered Credit Hero report (${addressCapture.stage}): ${addressCapture.reason}`,
-                {
-                    milestone: "M6_CAPTURE",
-                    stage: `address_capture:${addressCapture.stage}`,
-                    crcClientId: client.crcClientId,
-                    requiresHumanReview: true,
-                    creditHeroAccessVerified,
-                });
-        }
-        console.log(`Captured ${addressCapture.addresses.length} bureau-reported address(es).`);
+        // TEMPORARY OPERATIONAL BYPASS (2026-11-19): address disputes are disabled.
+        // Credit Hero's rendered Personal Information section is not reliably
+        // accessible to the browser parser. Do not fabricate an empty address
+        // inventory or infer that the bureaus reported no addresses.
+        // Passing null intentionally excludes address-specific dispute findings
+        // and items; the verified CRC mailing address remains authoritative.
+        // Restore the extraction gate only after a live DOM-verified fix.
+        const reportedAddresses = null;
+        console.log("[ADDRESS_DISPUTES_DISABLED] Skipping rendered address capture and address disputes; no address inventory asserted.");
 
         // ---- NORMALIZE: RAW MISMO -> BT CREDIT REPORT MODEL ------------------
         //
@@ -979,7 +971,7 @@ async function captureAndNormalize(data = {}, identityState = {}) {
         const normalized = normalizeReport(report.payload, {
             crcClientId: client.crcClientId,
             previousReport: null,
-            reportedAddresses: addressCapture.addresses,
+            reportedAddresses,
         });
 
         // ---- FAIL CLOSED ON PARTIAL EXTRACTION ------------------------------

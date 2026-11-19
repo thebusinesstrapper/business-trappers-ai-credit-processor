@@ -1,0 +1,26 @@
+name: Emergency address bypass checks
+on:
+  push:
+    branches:
+      - hotfix/temporarily-disable-address-disputes-20261119
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check src/milestone6.js
+      - run: node --test src/captureReportedAddresses.test.js
+      - name: Verify temporary bypass wiring
+        run: |
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          const s = fs.readFileSync('src/milestone6.js', 'utf8');
+          assert.match(s, /const reportedAddresses = null;/);
+          assert.match(s, /reportedAddresses,\s*\}/);
+          assert.doesNotMatch(s, /await captureReportedAddresses\(chPage\)/);
+          console.log('Address capture is bypassed, with null inventory rather than false empty inventory');
+          EOF
