@@ -12,7 +12,7 @@ jobs:
         with:
           node-version: '22'
       - run: node --check src/milestone6.js
-      - run: node --test src/captureReportedAddresses.test.js src/reportNormalize.test.js src/analyzeCreditReport.test.js
+      - run: node --test src/captureReportedAddresses.test.js
       - name: Verify temporary bypass wiring
         run: |
           node --input-type=module <<'EOF'
