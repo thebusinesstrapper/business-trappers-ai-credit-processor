@@ -27,8 +27,11 @@
 import { successResponse, errorResponse } from "./response.js";
 import { runMilestone6 } from "./milestone6.js";
 import { verifyIdentity } from "./clientIdentity.js";
+import { readClientState } from "./clientMemory.js";
+import { readItemDisputeHistory } from "./itemDisputeHistory.js";
 
 import { runPipeline } from "./pipeline.js";
+import { loadProductionRoundContext } from "./productionRoundContext.js";
 
 const REQUIRED_IDENTITY_LABELS = Object.freeze([
     "First Name",
@@ -183,13 +186,28 @@ export async function runMilestone7(data = {}) {
         // AUTHORITATIVE CURRENT ROUND FLOOR. Thread the stored client_state's
         // current_round into runPipeline so selectStrategy has the durable source.
         // This prevents round mismatch when selectStrategy computes nextRound.
-        const currentRoundFloor = Number.isInteger(data.currentRound) && data.currentRound > 0
+        let currentRoundFloor = Number.isInteger(data.currentRound) && data.currentRound > 0
             ? data.currentRound
             : null;
-        const pipeline = await runPipeline(report, identity, {
-            currentRoundFloor,
-            itemHistory: data.itemHistory ?? {},
-        });
+        let itemHistory = data.itemHistory ?? {};
+        // A supplied-name queue learns the authoritative ID only after M6.
+        // Resolve memory before strategy selection can default to Round 1.
+        if (data.resolveProductionRound === true && currentRoundFloor === null) {
+            const crcClientId = String(report.crc_client_id ?? "");
+            const context = identity ? await loadProductionRoundContext(
+                crcClientId, readClientState, readItemDisputeHistory
+            ) : null;
+            if (!context) {
+                return errorResponse(
+                    "PRODUCTION_ROUND_CONTEXT_UNVERIFIED",
+                    "The stored dispute round or item history could not be verified before generating letters.",
+                    { milestone: "M7_FULL_PIPELINE", stage: "round_context", crcClientId, requiresHumanReview: true }
+                );
+            }
+            currentRoundFloor = context.currentRoundFloor;
+            itemHistory = context.itemHistory;
+        }
+        const pipeline = await runPipeline(report, identity, { currentRoundFloor, itemHistory });
 
         return successResponse({
             milestone: "M7_FULL_PIPELINE",
