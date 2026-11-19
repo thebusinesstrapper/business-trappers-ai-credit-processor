@@ -1475,7 +1475,7 @@ export function normalizeReport(payload, { crcClientId, previousReport = null, r
             // nothing downstream may populate a letter header from this block.
             //
             // addresses: bureau-reported CONSUMER addresses captured at the M6
-            // capture stage from the Credit Hero "Copy As HTML" report (they are
+            // capture stage from the rendered Credit Hero report (they are
             // NOT present in the JSON payload). Shape: [{ value, bureaus, raw }].
             // Attached only when the capture succeeded; omitted (null) otherwise,
             // so the analyzer can tell "none reported" from "not captured".
