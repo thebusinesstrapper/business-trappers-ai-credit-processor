@@ -1,14 +1,31 @@
 // Read bureau-reported consumer addresses from the rendered Credit Hero report.
 export async function captureReportedAddresses(page) {
-    try {
-        return await page.evaluate(parsePiTableCore);
-    } catch (error) {
-        return {
-            ok: false,
-            stage: "evaluate",
-            reason: `Reading the rendered Credit Hero report failed: ${error.message}`,
-        };
-    }
+    const deadline = Date.now() + 10_000;
+    let failure;
+    do {
+        const frames = typeof page.frames === "function" ? page.frames() : [page];
+        const matches = [];
+        for (const frame of frames) {
+            try {
+                const result = await frame.evaluate(parsePiTableCore);
+                if (result.ok) matches.push(result);
+                else if (!failure || failure.stage === "locate_table" || failure.stage === "evaluate") failure = result;
+            } catch (error) {
+                failure ??= {
+                    ok: false,
+                    stage: "evaluate",
+                    reason: `Reading the rendered Credit Hero report failed: ${error.message}`,
+                };
+            }
+        }
+        if (matches.length > 1) {
+            return { ok: false, stage: "locate_table", reason: "Multiple report frames supplied addresses." };
+        }
+        if (matches.length === 1) return matches[0];
+        if (typeof page.frames !== "function" || Date.now() >= deadline) break;
+        await new Promise(resolve => setTimeout(resolve, 250));
+    } while (Date.now() < deadline);
+    return failure ?? { ok: false, stage: "locate_table", reason: "No report frame was available." };
 }
 
 /**
