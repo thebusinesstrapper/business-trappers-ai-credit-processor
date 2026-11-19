@@ -409,6 +409,7 @@ export async function runProductionClient(data = {}) {
             ? Number(storedState.current_round)
             : null,
         itemHistory: storedItemHistory,
+        resolveProductionRound: submitApproved && preflightId === null,
     });
     const m7LettersOk = m7?.lettersOk === true || m7?.letters_ok === true;
 
@@ -867,6 +868,18 @@ export async function runProductionClient(data = {}) {
     // round must be re-armed to "ready" BEFORE M8 attempts its delivery lock.
     // Otherwise M8 sees "waiting" and correctly refuses the lock even though the
     // fresh-report gate has already proven the next round is due.
+    if (submitApproved && preflightId === null) {
+        itemHistoryRead = await readItemDisputeHistory(String(crcClientId)).catch(() => null);
+        if (itemHistoryRead?.ok !== true) {
+            return {
+                ...base, ok: false, stage: "round_context",
+                blockedReason: "item_history_unverified",
+                failureReason: "Stored item history could not be verified before delivery.",
+                crcClientId, m7, m8: null,
+            };
+        }
+    }
+
     const stateBeforeM8 = await readClientState(String(crcClientId)).catch(() => null);
     if (stateBeforeM8?.processing_state === "waiting") {
         const rearmed = await markReactivatedEligibleReady(String(crcClientId)).catch((error) => ({
