@@ -643,7 +643,7 @@ function detectPersonalInformationFindings(report, clientIdentity) {
         }
 
         // ADDRESS comparison. Bureau-reported CONSUMER addresses were captured at
-        // the M6 capture stage from the Credit Hero "Copy As HTML" report and
+        // the M6 capture stage from the rendered Credit Hero report and
         // attached as reported_personal_information.addresses = [{value,bureaus,raw}].
         // Only run when they were captured (null means "not captured", which the
         // capture stage already fails closed on — so here null simply means this
