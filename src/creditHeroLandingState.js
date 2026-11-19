@@ -69,15 +69,7 @@ const AUTH_MARKERS = [
     /customer_login\.asp/i,
 ];
 
-// OBSERVED LIVE (16 clients, production): the CreditHeroScore Member Login page
-// states inactive monitoring as an orders line rather than a payment/auth
-// sentence — "No Active Orders Found. If you believe this to be an error,
-// please contact us...". This is a POSITIVELY recognized Credit Monitoring
-// Inactive state (no active monitoring order exists), not an unknown navigation
-// failure. It shares no phrase with the AUTH sentence above, which is why the
-// prior gate could not see it. It routes to the SAME inactive state
-// (CREDENTIALS_OR_AUTH_FAILED) and therefore the SAME existing inactive
-// workflow — it is an additional marker, not a new workflow.
+// This login-page message has also appeared for clients with active monitoring.
 const NO_ACTIVE_ORDERS_MARKER = /no active orders found/i;
 
 // OBSERVED LIVE (Amber Hoover, CRC 101, production): clicking "View
@@ -221,18 +213,11 @@ export async function recognizeCreditHeroLanding(page) {
         };
     }
 
-    // ---- 1b. "No Active Orders Found" on the Member Login page -------------
-    //
-    // A positively recognized Credit Monitoring Inactive state: the member has no
-    // active monitoring order, so CRC's stored access resolves to a login page
-    // that reports exactly this. It maps to the SAME inactive state and existing
-    // inactive workflow as the auth/payment cases — NOT Manual Review, and NOT an
-    // unknown navigation failure. The phrase is specific enough to stand on its
-    // own; no second marker is required.
+    // This screen alone cannot authorize an inactive status or client notice.
     if (NO_ACTIVE_ORDERS_MARKER.test(text)) {
         return {
-            state: CH_LANDING_STATE.CREDENTIALS_OR_AUTH_FAILED,
-            reason: "CreditHeroScore Member Login shows \"No Active Orders Found\" — credit monitoring is inactive.",
+            state: CH_LANDING_STATE.UNKNOWN,
+            reason: "Credit Hero showed No Active Orders Found. Monitoring status could not be verified.",
             evidence: ["marker:no_active_orders_found"],
         };
     }
