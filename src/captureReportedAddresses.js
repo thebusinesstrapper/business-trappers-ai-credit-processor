@@ -46,102 +46,145 @@ export function parsePiTableCore(doc = document) {
     const cellsOf = (row) =>
         Array.prototype.filter.call(row.children, (c) => c.tagName === "TD" || c.tagName === "TH");
 
-    // 1. locate the Personal Information table by its two address label rows
-    //    (rpt_table4column class is reused by other sections, so not by class).
-    const tables = Array.prototype.slice.call(doc.querySelectorAll("table"));
-    let piTable = null;
-    for (const t of tables) {
-        const rws = Array.prototype.slice.call(t.querySelectorAll("tr"));
-        let hasCurrent = false, hasPrevious = false;
-        for (const r of rws) {
-            const cells = cellsOf(r);
-            const label = normLabel(cells[0] ? cells[0].textContent : "");
-            if (label === "current address(es):") hasCurrent = true;
-            if (label === "previous address(es):") hasPrevious = true;
-        }
-        if (hasCurrent && hasPrevious) {
-            if (piTable) return { ok: false, stage: "locate_table", reason: "More than one Personal Information table matched." };
-            piTable = t;
-        }
-    }
-    if (!piTable) return { ok: false, stage: "locate_table", reason: "Personal Information table not found." };
-
-    const rows = Array.prototype.slice.call(piTable.querySelectorAll("tr"));
-
-    // 2. map the three bureau columns by HEADER TEXT (order-independent)
-    let headerCells = null;
-    for (const r of rows) {
-        const texts = cellsOf(r).map((c) => normLabel(c.textContent));
-        if (texts.indexOf("transunion") >= 0 && texts.indexOf("experian") >= 0 && texts.indexOf("equifax") >= 0) {
-            headerCells = cellsOf(r);
-            break;
-        }
-    }
-    if (!headerCells) return { ok: false, stage: "map_columns", reason: "Bureau header row (TransUnion/Experian/Equifax) not found." };
-
-    const colOf = {};
-    headerCells.forEach((c, i) => {
-        const t = normLabel(c.textContent);
-        if (t in BUREAUS) colOf[BUREAUS[t]] = i;
-    });
-    if (Object.keys(colOf).length < 3) {
-        return { ok: false, stage: "map_columns", reason: "Could not resolve all three bureau columns by header." };
-    }
-
-    // 3/4. extract addresses per bureau column; separate the MM/YYYY date beneath
-    //      as METADATA (kept in raw, excluded from value).
-    const extractCell = (cell) => {
-        if (!cell) return [];
-        const only = normLabel(cell.textContent);
-        if (only === "-" || only === "") return [];
-        const out = [];
-        const blocks = Array.prototype.filter.call(
-            cell.children, (c) => c.tagName === "NG-REPEAT" || c.tagName === "DIV"
-        );
-        const blockList = blocks.length ? blocks : [cell];
-        for (const block of blockList) {
-            const wrapper =
-                block.tagName === "DIV"
-                    ? block
-                    : Array.prototype.find.call(block.children, (c) => c.tagName === "DIV") || block;
-            const childDivs = Array.prototype.filter.call(wrapper.children, (c) => c.tagName === "DIV");
-            const dateDiv = childDivs.length ? childDivs[childDivs.length - 1] : null;
-            const dateText = dateDiv ? normLabel(dateDiv.textContent) : "";
-            const dateMeta = dateText && isDateOnly(dateText) ? dateDiv.textContent.trim() : null;
-
-            let valueSource;
-            const include = Array.prototype.find.call(wrapper.children, (c) => c.tagName === "NG-INCLUDE");
-            if (include) {
-                valueSource = include.textContent;
-            } else {
-                let full = wrapper.textContent || "";
-                if (dateMeta) full = full.split(dateMeta).join(" ");
-                valueSource = full;
-            }
-            let value = (valueSource || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
-            value = value.replace(/\s*\d{1,2}\/\d{2,4}\s*$/, "").trim();
-            if (!value) continue;
-            out.push({ value, raw: value + (dateMeta ? "  [" + dateMeta + "]" : ""), date: dateMeta });
-        }
-        return out;
-    };
-
-    const wanted = ["current address(es):", "previous address(es):"];
-    const labelRow = {};
-    for (const r of rows) {
-        const label = normLabel(cellsOf(r)[0] ? cellsOf(r)[0].textContent : "");
-        if (wanted.indexOf(label) >= 0) labelRow[label] = r;
-    }
-    if (!labelRow[wanted[0]] || !labelRow[wanted[1]]) {
-        return { ok: false, stage: "label_rows", reason: "Current/Previous address label rows not found." };
-    }
-
     const collected = [];
-    for (const label of wanted) {
-        const cells = cellsOf(labelRow[label]);
-        for (const bureau of Object.keys(colOf)) {
-            for (const a of extractCell(cells[colOf[bureau]])) {
-                collected.push({ value: a.value, bureau, raw: a.raw });
+    const addressSections = doc.querySelectorAll(".fields-wrapper > .address-wrapper");
+    if (addressSections.length > 0) {
+        if (addressSections.length !== 1) {
+            return { ok: false, stage: "locate_table", reason: "Multiple rendered address sections matched." };
+        }
+        const header = doc.querySelectorAll(".bureau-data.labels");
+        const bureauColumns = header.length === 1
+            ? [...header[0].parentElement.children].filter(column => column !== header[0])
+            : [];
+        const bureaus = bureauColumns.map(column => {
+            const logo = column.querySelector('[role="img"][aria-label$=" logo"]');
+            return normLabel(logo?.getAttribute("aria-label")).replace(/ logo$/, "");
+        });
+        if (bureaus.length !== 3 || new Set(bureaus).size !== 3 ||
+            bureaus.some(bureau => !Object.hasOwn(BUREAUS, bureau))) {
+            return { ok: false, stage: "map_columns", reason: "Rendered bureau logo columns could not be verified." };
+        }
+
+        const addressRows = [...addressSections[0].children];
+        if (!addressRows.length ||
+            normLabel(addressRows[0].firstElementChild?.textContent) !== "addresses") {
+            return { ok: false, stage: "label_rows", reason: "Rendered Addresses row was not found." };
+        }
+        for (const row of addressRows) {
+            const [label, ...cells] = row.children;
+            if (!row.matches(".field-header-wrapper") || !label?.matches(".addresses-title") ||
+                cells.length !== bureaus.length || cells.some(cell => !cell.matches(".field-value"))) {
+                return { ok: false, stage: "label_rows", reason: "Rendered address row does not match bureau columns." };
+            }
+            for (const [index, cell] of cells.entries()) {
+                const value = cell.querySelector(".address")?.textContent?.replace(/\s+/g, " ").trim();
+                if (!value) {
+                    if (cell.textContent.trim()) {
+                        return { ok: false, stage: "label_rows", reason: "A populated bureau cell has no readable address." };
+                    }
+                    continue;
+                }
+                const date = cell.querySelector(".date")?.textContent?.trim();
+                collected.push({ value, bureau: bureaus[index], raw: date ? value + "  [" + date + "]" : value });
+            }
+        }
+    } else {
+        // 1. locate the Personal Information table by its two address label rows
+        //    (rpt_table4column class is reused by other sections, so not by class).
+        const tables = Array.prototype.slice.call(doc.querySelectorAll("table"));
+        let piTable = null;
+        for (const t of tables) {
+            const rws = Array.prototype.slice.call(t.querySelectorAll("tr"));
+            let hasCurrent = false, hasPrevious = false;
+            for (const r of rws) {
+                const cells = cellsOf(r);
+                const label = normLabel(cells[0] ? cells[0].textContent : "");
+                if (label === "current address(es):") hasCurrent = true;
+                if (label === "previous address(es):") hasPrevious = true;
+            }
+            if (hasCurrent && hasPrevious) {
+                if (piTable) return { ok: false, stage: "locate_table", reason: "More than one Personal Information table matched." };
+                piTable = t;
+            }
+        }
+        if (!piTable) return { ok: false, stage: "locate_table", reason: "Personal Information table not found." };
+
+        const rows = Array.prototype.slice.call(piTable.querySelectorAll("tr"));
+
+        // 2. map the three bureau columns by HEADER TEXT (order-independent)
+        let headerCells = null;
+        for (const r of rows) {
+            const texts = cellsOf(r).map((c) => normLabel(c.textContent));
+            if (texts.indexOf("transunion") >= 0 && texts.indexOf("experian") >= 0 && texts.indexOf("equifax") >= 0) {
+                headerCells = cellsOf(r);
+                break;
+            }
+        }
+        if (!headerCells) return { ok: false, stage: "map_columns", reason: "Bureau header row (TransUnion/Experian/Equifax) not found." };
+
+        const colOf = {};
+        headerCells.forEach((c, i) => {
+            const t = normLabel(c.textContent);
+            if (t in BUREAUS) colOf[BUREAUS[t]] = i;
+        });
+        if (Object.keys(colOf).length < 3) {
+            return { ok: false, stage: "map_columns", reason: "Could not resolve all three bureau columns by header." };
+        }
+
+        // 3/4. extract addresses per bureau column; separate the MM/YYYY date beneath
+        //      as METADATA (kept in raw, excluded from value).
+        const extractCell = (cell) => {
+            if (!cell) return [];
+            const only = normLabel(cell.textContent);
+            if (only === "-" || only === "") return [];
+            const out = [];
+            const blocks = Array.prototype.filter.call(
+                cell.children, (c) => c.tagName === "NG-REPEAT" || c.tagName === "DIV"
+            );
+            const blockList = blocks.length ? blocks : [cell];
+            for (const block of blockList) {
+                const wrapper =
+                    block.tagName === "DIV"
+                        ? block
+                        : Array.prototype.find.call(block.children, (c) => c.tagName === "DIV") || block;
+                const childDivs = Array.prototype.filter.call(wrapper.children, (c) => c.tagName === "DIV");
+                const dateDiv = childDivs.length ? childDivs[childDivs.length - 1] : null;
+                const dateText = dateDiv ? normLabel(dateDiv.textContent) : "";
+                const dateMeta = dateText && isDateOnly(dateText) ? dateDiv.textContent.trim() : null;
+
+                let valueSource;
+                const include = Array.prototype.find.call(wrapper.children, (c) => c.tagName === "NG-INCLUDE");
+                if (include) {
+                    valueSource = include.textContent;
+                } else {
+                    let full = wrapper.textContent || "";
+                    if (dateMeta) full = full.split(dateMeta).join(" ");
+                    valueSource = full;
+                }
+                let value = (valueSource || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+                value = value.replace(/\s*\d{1,2}\/\d{2,4}\s*$/, "").trim();
+                if (!value) continue;
+                out.push({ value, raw: value + (dateMeta ? "  [" + dateMeta + "]" : ""), date: dateMeta });
+            }
+            return out;
+        };
+
+        const wanted = ["current address(es):", "previous address(es):"];
+        const labelRow = {};
+        for (const r of rows) {
+            const label = normLabel(cellsOf(r)[0] ? cellsOf(r)[0].textContent : "");
+            if (wanted.indexOf(label) >= 0) labelRow[label] = r;
+        }
+        if (!labelRow[wanted[0]] || !labelRow[wanted[1]]) {
+            return { ok: false, stage: "label_rows", reason: "Current/Previous address label rows not found." };
+        }
+
+        for (const label of wanted) {
+            const cells = cellsOf(labelRow[label]);
+            for (const bureau of Object.keys(colOf)) {
+                for (const a of extractCell(cells[colOf[bureau]])) {
+                    collected.push({ value: a.value, bureau, raw: a.raw });
+                }
             }
         }
     }
