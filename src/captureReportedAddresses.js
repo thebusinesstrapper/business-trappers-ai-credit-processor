@@ -25,7 +25,39 @@ export async function captureReportedAddresses(page) {
         if (typeof page.frames !== "function" || Date.now() >= deadline) break;
         await new Promise(resolve => setTimeout(resolve, 250));
     } while (Date.now() < deadline);
-    return failure ?? { ok: false, stage: "locate_table", reason: "No report frame was available." };
+    // READ-ONLY diagnostic for Credit Hero layout changes. Return selectors and
+    // element structure only; never return consumer names, report content, or addresses.
+    const structure = [];
+    const frames = typeof page.frames === "function" ? page.frames() : [page];
+    for (const [frameIndex, frame] of frames.entries()) {
+        try {
+            const snapshot = await frame.evaluate(() => {
+                const count = (selector) => document.querySelectorAll(selector).length;
+                const labels = [...document.querySelectorAll("body *")]
+                    .filter((el) => el.children.length === 0 && /^(personal information|current address\\(es\\):?|previous address\\(es\\):?|addresses)$/i.test((el.textContent || "").replace(/\\s+/g, " ").trim()))
+                    .slice(0, 12)
+                    .map((el) => ({
+                        tag: el.tagName,
+                        parentTag: el.parentElement?.tagName ?? null,
+                        parentClass: typeof el.parentElement?.className === "string"
+                            ? el.parentElement.className.slice(0, 120) : "",
+                    }));
+                return {
+                    tables: count("table"),
+                    addressWrappers: count(".fields-wrapper > .address-wrapper"),
+                    addressNodes: count(".address"),
+                    bureauHeaders: count(".bureau-data.labels"),
+                    iframes: count("iframe"),
+                    matchingLabels: labels,
+                };
+            });
+            structure.push({ frameIndex, ...snapshot });
+        } catch {
+            structure.push({ frameIndex, unreadable: true });
+        }
+    }
+    const base = failure ?? { ok: false, stage: "locate_table", reason: "No report frame was available." };
+    return { ...base, diagnostic: { frameCount: frames.length, structure } };
 }
 
 /**
