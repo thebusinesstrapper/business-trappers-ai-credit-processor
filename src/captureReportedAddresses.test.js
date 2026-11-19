@@ -1,36 +1,28 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { captureReportedAddresses } from "./captureReportedAddresses.js";
+import { captureReportedAddresses, parsePiTableCore } from "./captureReportedAddresses.js";
 
-test("rendered report DOM supplies bureau addresses without Copy As HTML", async () => {
+test("captures addresses from the rendered report", async () => {
     const addresses = [{ value: "EXAMPLE ADDRESS", bureaus: ["experian"], raw: "EXAMPLE ADDRESS" }];
-    let clipboardLocatorUsed = false;
     const page = {
-        evaluate: async (_fn, coreSource) => {
-            assert.match(coreSource, /Personal Information table not found/);
+        evaluate: async (parser) => {
+            assert.equal(parser, parsePiTableCore);
             return { ok: true, addresses };
         },
-        getByRole: () => { clipboardLocatorUsed = true; throw Error("Legacy control should not be used"); },
     };
     assert.deepEqual(await captureReportedAddresses(page), { ok: true, addresses });
-    assert.equal(clipboardLocatorUsed, false);
 });
 
-test("unmatched DOM cannot be accepted as a successful empty address result", async () => {
-    const page = {
-        evaluate: async () => ({ ok: false, stage: "locate_table", reason: "Personal Information table not found." }),
-        getByRole: () => ({
-            or() { return this; },
-            first() { return this; },
-            async count() { return 0; },
-        }),
-        getByText: () => ({
-            or() { return this; },
-            first() { return this; },
-        }),
-    };
-    const result = await captureReportedAddresses(page);
-    assert.equal(result.ok, false);
-    assert.equal(result.stage, "locate");
-    assert.match(result.reason, /Copy As HTML/);
+test("preserves the rendered report parser failure", async () => {
+    const failure = { ok: false, stage: "locate_table", reason: "Personal Information table not found." };
+    assert.deepEqual(await captureReportedAddresses({ evaluate: async () => failure }), failure);
+});
+
+test("routes browser evaluation errors to address capture failure", async () => {
+    const page = { evaluate: async () => { throw new Error("Report page closed"); } };
+    assert.deepEqual(await captureReportedAddresses(page), {
+        ok: false,
+        stage: "evaluate",
+        reason: "Reading the rendered Credit Hero report failed: Report page closed",
+    });
 });
