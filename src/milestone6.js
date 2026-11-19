@@ -949,23 +949,14 @@ async function captureAndNormalize(data = {}, identityState = {}) {
 
         console.log(`Captured report payload: ${report.url.slice(0, 100)} (${report.size} bytes)`);
 
-        // ---- CAPTURE BUREAU-REPORTED ADDRESSES (Copy As HTML) ----------------
-        //
-        // The bureau-reported CONSUMER addresses are NOT in the JSON payload; they
-        // live only in the HTML that Credit Hero copies to the clipboard via the
-        // "Copy As HTML" control. JSON capture above is preserved exactly; this
-        // runs AFTER it, on the same report page. The control is read-only — it
-        // copies text and does not order a report or reactivate monitoring.
-        //
-        // FAIL CLOSED: if the click, clipboard read, DOMParser parse, table
-        // location, or bureau mapping fails, route to Manual Review rather than
-        // continue with no addresses (which the analyzer could not distinguish
-        // from "bureaus reported none").
+        // Read bureau-reported addresses from the rendered report after JSON capture.
+        // A capture failure requires manual review so missing data is never treated
+        // as confirmation that the bureaus reported no addresses.
         const addressCapture = await captureReportedAddresses(chPage);
         if (!addressCapture.ok) {
             return errorResponse("REPORTED_ADDRESS_CAPTURE_FAILED",
                 `The report JSON was captured, but the bureau-reported addresses could not be ` +
-                    `extracted from the "Copy As HTML" report (${addressCapture.stage}): ${addressCapture.reason}`,
+                    `extracted from the rendered Credit Hero report (${addressCapture.stage}): ${addressCapture.reason}`,
                 {
                     milestone: "M6_CAPTURE",
                     stage: `address_capture:${addressCapture.stage}`,
