@@ -327,3 +327,35 @@ for (const value of ["Individual", "JointContractualLiability", "Terminated"]) {
 console.log(`\n${passed} passed, ${failed} failed.\n`);
 
 if (failed > 0) process.exit(1);
+
+
+// Business Trappers: documented late counts on otherwise-current accounts
+// must be dispute candidates, while authorized-user exclusions still apply.
+const lateReport = {
+    extraction_ok: true,
+    reported_personal_information: { names: ["TEST CONSUMER"], ssns: ["000-00-0000"], dates_of_birth: ["1980-01-01"] },
+    accounts: [
+        { stable_account_key: "late_individual", bureau_tradelines: [
+            { stable_item_key: "late_tu", bureau: "transunion", furnisher: "BANK A", masked_account: "****1234",
+              observation: { normalized: { status: "Current", past_due: 0, responsibility: "Individual",
+                  late_counts: { days_30: 2, days_60: 0, days_90: 0 } } } },
+        ] },
+        { stable_account_key: "late_authorized", bureau_tradelines: [
+            { stable_item_key: "late_au", bureau: "experian", furnisher: "BANK B", masked_account: "****5678",
+              observation: { normalized: { status: "Current", past_due: 0, responsibility: "AuthorizedUser",
+                  late_counts: { days_30: 1, days_60: 0, days_90: 0 } } } },
+        ] },
+        { stable_account_key: "clean_individual", bureau_tradelines: [
+            { stable_item_key: "clean_tu", bureau: "transunion", furnisher: "BANK C", masked_account: "****9876",
+              observation: { normalized: { status: "Current", past_due: 0, responsibility: "Individual",
+                  late_counts: { days_30: 0, days_60: 0, days_90: 0 } } } },
+        ] },
+    ],
+    collections: [], inquiries: [], public_records: [],
+};
+const lateAnalysis = await analyzeCreditReport(lateReport, { asOf: ASOF });
+const lateDecisions = await decideDisputes(lateAnalysis, { report: lateReport });
+check("late count -> baseline dispute finding", lateAnalysis.tradelines.find(x => x.stableItemKey === "late_tu")?.findings.some(x => x.code === "TL_BASELINE_REINVESTIGATION"), true);
+check("late count on current account -> dispute candidate", decisionFor(lateDecisions, "late_tu")?.outcome, OUTCOME.DISPUTE_CANDIDATE);
+check("late count on authorized user -> excluded", decisionFor(lateDecisions, "late_au")?.outcome, OUTCOME.EXCLUDED);
+check("clean current account -> excluded", decisionFor(lateDecisions, "clean_tu")?.outcome, OUTCOME.EXCLUDED);
