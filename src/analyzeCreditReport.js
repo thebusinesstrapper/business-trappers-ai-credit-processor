@@ -1397,6 +1397,13 @@ function baselineFinding(tradeline, existingFindings, code) {
 }
 
 /** Negative by the reporting of THIS bureau. Not by another bureau's view of it. */
+function hasReportedLatePayments(obs) {
+    const counts = obs?.late_counts ?? {};
+    return [counts.days_30, counts.days_60, counts.days_90].some((value) =>
+        value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) > 0
+    );
+}
+
 function isNegativeTradeline(tradeline) {
     // BUREAU FIDELITY STANDARD: the Intelligence Engine REASONS with the
     // normalized layer. Letters assert from observation.reported (Layer 2). Reading
@@ -1404,7 +1411,7 @@ function isNegativeTradeline(tradeline) {
     const obs = tradeline.observation?.normalized ?? tradeline.observation ?? {};
     const pastDue = Number(obs.past_due ?? 0);
 
-    return isDerogatory(obs.status) || (Number.isFinite(pastDue) && pastDue > 0);
+    return isDerogatory(obs.status) || (Number.isFinite(pastDue) && pastDue > 0) || hasReportedLatePayments(obs);
 }
 
 export async function analyzeCreditReport(report, context = {}) {
