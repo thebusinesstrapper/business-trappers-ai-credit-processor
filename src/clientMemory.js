@@ -571,7 +571,7 @@ export async function advanceRoundAfterDelivery(crcClientId, deliveredRound, rep
             processing_state: "ready",
             last_dispute_date: isoDate(now),
             last_report_date_used: reportDateUsed,
-            next_eligible_date: null,
+            next_eligible_date: isoDatePlusDays(CYCLE_DAYS, now),
             last_successful_processing_at: now.toISOString(),
         })
         .eq("crc_client_id", id)
