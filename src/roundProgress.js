@@ -97,6 +97,23 @@ export function calculateLiveRoundProgress({
         };
     }
 
+    // An entirely disjoint extraction is not proof that every prior account
+    // disappeared. CreditHero format changes can produce a different key space.
+    // Preserve the round and delivered-item counts, but withhold deletion claims.
+    if (priorKeys.size > 0 && ![...priorKeys].some((key) => currentKeys.has(key))) {
+        return {
+            ok: true,
+            priorDisputedItems: priorKeys.size,
+            deletedItems: null,
+            stillReportingItems: null,
+            unknownItems: priorKeys.size,
+            newlyDisputedItems: null,
+            disputedThisRound: thisRoundKeys.size,
+            comparisonComplete: false,
+            outcomes: [],
+        };
+    }
+
     const allPriorKeys = new Set(history.map((row) => asKey(row?.stable_item_key)).filter(Boolean));
 
     let deleted = 0;
