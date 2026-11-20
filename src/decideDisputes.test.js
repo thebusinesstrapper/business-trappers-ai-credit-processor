@@ -337,17 +337,17 @@ const lateReport = {
     accounts: [
         { stable_account_key: "late_individual", bureau_tradelines: [
             { stable_item_key: "late_tu", bureau: "transunion", furnisher: "BANK A", masked_account: "****1234",
-              observation: { normalized: { status: "Current", past_due: 0, responsibility: "Individual",
+              observation: { basis: "BUREAU_SPECIFIC", normalized: { status: "Current", past_due: 0, responsibility: "Individual",
                   late_counts: { days_30: 2, days_60: 0, days_90: 0 } } } },
         ] },
         { stable_account_key: "late_authorized", bureau_tradelines: [
             { stable_item_key: "late_au", bureau: "experian", furnisher: "BANK B", masked_account: "****5678",
-              observation: { normalized: { status: "Current", past_due: 0, responsibility: "AuthorizedUser",
+              observation: { basis: "BUREAU_SPECIFIC", normalized: { status: "Current", past_due: 0, responsibility: "AuthorizedUser",
                   late_counts: { days_30: 1, days_60: 0, days_90: 0 } } } },
         ] },
         { stable_account_key: "clean_individual", bureau_tradelines: [
             { stable_item_key: "clean_tu", bureau: "transunion", furnisher: "BANK C", masked_account: "****9876",
-              observation: { normalized: { status: "Current", past_due: 0, responsibility: "Individual",
+              observation: { basis: "BUREAU_SPECIFIC", normalized: { status: "Current", past_due: 0, responsibility: "Individual",
                   late_counts: { days_30: 0, days_60: 0, days_90: 0 } } } },
         ] },
     ],
