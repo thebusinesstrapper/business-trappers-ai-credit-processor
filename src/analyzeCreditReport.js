@@ -296,20 +296,10 @@ function detectInternalInconsistencies(tradeline, asOf, dofdContested = false) {
         );
     }
 
-    // Status says current, but the account's own payment grid shows a recent late.
-    const history = Array.isArray(obs.payment_history) ? obs.payment_history : [];
-    const hasRecentLate = history.slice(0, 6).some((h) => h && /30|60|90|120|150|180/.test(String(h)));
-
-    if (status && ACTIVE_STATUS.test(status) && hasRecentLate) {
-        findings.push(
-            finding(
-                "TL_STATUS_CONFLICTS_WITH_PAYMENT_HISTORY",
-                `Status is reported as "${obs.status}", but this account's own payment history ` +
-                    `shows a late payment within the last six reporting periods.`,
-                { status: obs.status, recent_history: history.slice(0, 6) }
-            )
-        );
-    }
+    // Current status and historical late payments are NOT contradictory.
+    // The MISMO _PAYMENT_PATTERN is a dated encoded string, not an array of
+    // 30/60/90-day numbers. Do not fabricate a status-conflict finding from it.
+    // Reported late counts are handled as dispute eligibility below.
 
     return findings;
 }
@@ -1397,6 +1387,15 @@ function baselineFinding(tradeline, existingFindings, code) {
 }
 
 /** Negative by the reporting of THIS bureau. Not by another bureau's view of it. */
+function hasReportedLatePayments(obs, basis) {
+    // A shared multi-bureau observation does not prove which bureau reports lates.
+    if (basis !== "BUREAU_SPECIFIC") return false;
+    const counts = obs?.late_counts ?? {};
+    return [counts.days_30, counts.days_60, counts.days_90].some((value) =>
+        value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) > 0
+    );
+}
+
 function isNegativeTradeline(tradeline) {
     // BUREAU FIDELITY STANDARD: the Intelligence Engine REASONS with the
     // normalized layer. Letters assert from observation.reported (Layer 2). Reading
@@ -1404,7 +1403,7 @@ function isNegativeTradeline(tradeline) {
     const obs = tradeline.observation?.normalized ?? tradeline.observation ?? {};
     const pastDue = Number(obs.past_due ?? 0);
 
-    return isDerogatory(obs.status) || (Number.isFinite(pastDue) && pastDue > 0);
+    return isDerogatory(obs.status) || (Number.isFinite(pastDue) && pastDue > 0) || hasReportedLatePayments(obs, tradeline.observation?.basis);
 }
 
 export async function analyzeCreditReport(report, context = {}) {
