@@ -102,6 +102,13 @@ export async function runPipeline(report, identity = null, options = {}) {
     const result = {
         analysis_summary: analysis.clientSummary ?? null,
         item_decisions: decisions.itemDecisions ?? [],
+        // Complete bureau tradeline inventory from the normalized report, not
+        // the filtered set of dispute decisions. Used for deletion comparisons.
+        report_item_keys: report?.extraction_ok === false ? null : [
+            ...(report?.accounts ?? []),
+            ...(report?.collections ?? []),
+            ...(report?.public_records ?? []),
+        ].flatMap((group) => (group.bureau_tradelines ?? []).map((line) => line.stable_item_key).filter(Boolean)),
         // Durable strategy-memory metadata. These are reasoning records only;
         // no binary letter contents are added to the JSON response.
         item_strategies: strategies.itemStrategies ?? [],
