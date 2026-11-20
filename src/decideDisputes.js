@@ -174,6 +174,14 @@ function checkPositiveAccount(observation, findings) {
     const status = observation?.status ?? "";
     const pastDue = Number(observation?.past_due ?? 0);
 
+    const lateCounts = observation?.late_counts ?? {};
+    const hasReportedLates = [lateCounts.days_30, lateCounts.days_60, lateCounts.days_90]
+        .some((value) => value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) > 0);
+    // A positive current status does not erase historical late-payment entries.
+    // Baseline reinvestigation may challenge those entries without alleging an
+    // unsupported error or requesting removal of an otherwise beneficial account.
+    if (hasReportedLates) return null;
+
     const isDerogatory = DEROGATORY_STATUS.test(String(status)) || pastDue > 0;
     if (isDerogatory) return null; // not a positive account — normal rules apply
 
