@@ -296,20 +296,10 @@ function detectInternalInconsistencies(tradeline, asOf, dofdContested = false) {
         );
     }
 
-    // Status says current, but the account's own payment grid shows a recent late.
-    const history = Array.isArray(obs.payment_history) ? obs.payment_history : [];
-    const hasRecentLate = history.slice(0, 6).some((h) => h && /30|60|90|120|150|180/.test(String(h)));
-
-    if (status && ACTIVE_STATUS.test(status) && hasRecentLate) {
-        findings.push(
-            finding(
-                "TL_STATUS_CONFLICTS_WITH_PAYMENT_HISTORY",
-                `Status is reported as "${obs.status}", but this account's own payment history ` +
-                    `shows a late payment within the last six reporting periods.`,
-                { status: obs.status, recent_history: history.slice(0, 6) }
-            )
-        );
-    }
+    // Current status and historical late payments are NOT contradictory.
+    // The MISMO _PAYMENT_PATTERN is a dated encoded string, not an array of
+    // 30/60/90-day numbers. Do not fabricate a status-conflict finding from it.
+    // Reported late counts are handled as dispute eligibility below.
 
     return findings;
 }
