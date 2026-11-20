@@ -1053,11 +1053,15 @@ export async function runProductionClient(data = {}) {
         // on the freshly verified report; prior history is the durable snapshot of
         // what was disputed in the preceding round. Absence from a complete current
         // report is therefore a verified deletion for this live transition.
-        const currentItemKeys = Array.isArray(m7?.item_decisions)
-            ? m7.item_decisions.map((item) => item?.stableItemKey).filter(Boolean)
+        // Decisions are NOT a complete report inventory. Missing from decisions
+        // does not mean deleted from a bureau's credit file.
+        const currentItemKeys = Array.isArray(m7?.report_item_keys)
+            ? m7.report_item_keys
             : [];
+        const hasCompleteReportInventory = Array.isArray(m7?.report_item_keys);
 
         roundProgressAudit = await recordLiveRoundProgress({
+            hasCompleteReportInventory,
             crcClientId,
             roundCompleted: deliveredRound,
             reportDateUsed: successCapture?.lastReportDate ?? null,

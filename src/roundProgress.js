@@ -52,6 +52,7 @@ export function calculateLiveRoundProgress({
     roundCompleted,
     priorHistoryRows = [],
     currentItemKeys = [],
+    hasCompleteReportInventory = false,
     chainItems = [],
 } = {}) {
     const round = validRound(roundCompleted);
@@ -72,6 +73,15 @@ export function calculateLiveRoundProgress({
             disputedThisRound: thisRoundKeys.size,
             comparisonComplete: false,
             outcomes: [],
+        };
+    }
+
+    if (!hasCompleteReportInventory) {
+        return {
+            ok: true, priorDisputedItems: null, deletedItems: null,
+            stillReportingItems: null, unknownItems: null,
+            newlyDisputedItems: null, disputedThisRound: thisRoundKeys.size,
+            comparisonComplete: false, outcomes: [],
         };
     }
 
@@ -151,6 +161,7 @@ export async function recordLiveRoundProgress({
     reportDateUsed,
     priorHistoryRows = [],
     currentItemKeys = [],
+    hasCompleteReportInventory = false,
     chainItems = [],
 } = {}) {
     const id = crcClientId == null ? "" : String(crcClientId).trim();
@@ -164,6 +175,7 @@ export async function recordLiveRoundProgress({
         roundCompleted: round,
         priorHistoryRows,
         currentItemKeys,
+        hasCompleteReportInventory,
         chainItems,
     });
     if (!calculated.ok) return calculated;

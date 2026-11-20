@@ -9,6 +9,7 @@ const prior = [
 const firstRound = calculateLiveRoundProgress({
     roundCompleted: 1,
     priorHistoryRows: [],
+    hasCompleteReportInventory: true,
     currentItemKeys: ["a", "b", "c"],
     chainItems: [
         { stableItemKey: "a", round: 1, chainComplete: true, strategy: { strategy: "s1" }, reason: { reason: "r1" } },
@@ -23,6 +24,7 @@ assert.equal(firstRound.deletedItems, null);
 const live = calculateLiveRoundProgress({
     roundCompleted: 2,
     priorHistoryRows: prior,
+    hasCompleteReportInventory: true,
     currentItemKeys: ["a", "c"],
     chainItems: [
         { stableItemKey: "a", round: 2, chainComplete: true, strategy: { strategy: "s2" }, reason: { reason: "r2" } },
@@ -42,6 +44,7 @@ assert.equal(live.comparisonComplete, true);
 const legacyNoBaseline = calculateLiveRoundProgress({
     roundCompleted: 3,
     priorHistoryRows: [],
+    hasCompleteReportInventory: true,
     currentItemKeys: ["x", "y"],
     chainItems: [
         { stableItemKey: "x", round: 3, chainComplete: true, strategy: { strategy: "s3" }, reason: { reason: "r3" } },
@@ -57,3 +60,12 @@ assert.equal(legacyNoBaseline.newlyDisputedItems, null);
 assert.equal(legacyNoBaseline.comparisonComplete, false);
 
 console.log("roundProgress tests passed");
+
+const missingInventory = calculateLiveRoundProgress({
+    roundCompleted: 2,
+    priorHistoryRows: prior,
+    currentItemKeys: [],
+    chainItems: [],
+});
+assert.equal(missingInventory.comparisonComplete, false);
+assert.equal(missingInventory.deletedItems, null);
