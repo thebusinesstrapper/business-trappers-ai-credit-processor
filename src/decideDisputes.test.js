@@ -324,9 +324,6 @@ for (const value of ["Individual", "JointContractualLiability", "Terminated"]) {
         ["RESPONSIBILITY_UNKNOWN", "RESPONSIBILITY_UNRECOGNISED"].includes(item.exclusion?.rule ?? ""), false);
 }
 
-console.log(`\n${passed} passed, ${failed} failed.\n`);
-
-if (failed > 0) process.exit(1);
 
 
 // Business Trappers: documented late counts on otherwise-current accounts
@@ -367,3 +364,7 @@ check("clean current account -> excluded", decisionFor(lateDecisions, "clean_tu"
 
 check("shared late counts -> no bureau-specific baseline finding", lateAnalysis.tradelines.find(x => x.stableItemKey === "shared_tu")?.findings.some(x => x.code === "TL_BASELINE_REINVESTIGATION"), false);
 check("shared late counts -> positive account excluded", decisionFor(lateDecisions, "shared_tu")?.outcome, OUTCOME.EXCLUDED);
+
+console.log(`\n${passed} passed, ${failed} failed.\n`);
+
+if (failed > 0) process.exit(1);
