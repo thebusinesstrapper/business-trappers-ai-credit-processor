@@ -345,6 +345,11 @@ const lateReport = {
               observation: { basis: "BUREAU_SPECIFIC", normalized: { status: "Current", past_due: 0, responsibility: "AuthorizedUser",
                   late_counts: { days_30: 1, days_60: 0, days_90: 0 } } } },
         ] },
+        { stable_account_key: "shared_late", bureau_tradelines: [
+            { stable_item_key: "shared_tu", bureau: "transunion", furnisher: "BANK D", masked_account: "****4444",
+              observation: { basis: "SHARED_ACROSS_BUREAUS", normalized: { status: "Current", past_due: 0, responsibility: "Individual",
+                  late_counts: { days_30: 3, days_60: 1, days_90: 0 } } } },
+        ] },
         { stable_account_key: "clean_individual", bureau_tradelines: [
             { stable_item_key: "clean_tu", bureau: "transunion", furnisher: "BANK C", masked_account: "****9876",
               observation: { basis: "BUREAU_SPECIFIC", normalized: { status: "Current", past_due: 0, responsibility: "Individual",
@@ -359,3 +364,6 @@ check("late count -> baseline dispute finding", lateAnalysis.tradelines.find(x =
 check("late count on current account -> dispute candidate", decisionFor(lateDecisions, "late_tu")?.outcome, OUTCOME.DISPUTE_CANDIDATE);
 check("late count on authorized user -> excluded", decisionFor(lateDecisions, "late_au")?.outcome, OUTCOME.EXCLUDED);
 check("clean current account -> excluded", decisionFor(lateDecisions, "clean_tu")?.outcome, OUTCOME.EXCLUDED);
+
+check("shared late counts -> no bureau-specific baseline finding", lateAnalysis.tradelines.find(x => x.stableItemKey === "shared_tu")?.findings.some(x => x.code === "TL_BASELINE_REINVESTIGATION"), false);
+check("shared late counts -> positive account excluded", decisionFor(lateDecisions, "shared_tu")?.outcome, OUTCOME.EXCLUDED);
