@@ -174,6 +174,12 @@ function checkPositiveAccount(observation, findings) {
     const status = observation?.status ?? "";
     const pastDue = Number(observation?.past_due ?? 0);
 
+    // Only the analyzer may establish that late-payment reporting is
+    // bureau-specific. It emits this baseline finding only after confirming
+    // BUREAU_SPECIFIC attribution and a positive late count. Never independently
+    // infer bureau attribution from the observation's shared late counts.
+    if (findings.some((f) => f.code === "TL_BASELINE_REINVESTIGATION")) return null;
+
     const isDerogatory = DEROGATORY_STATUS.test(String(status)) || pastDue > 0;
     if (isDerogatory) return null; // not a positive account — normal rules apply
 

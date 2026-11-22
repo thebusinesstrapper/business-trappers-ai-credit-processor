@@ -51,6 +51,7 @@ const mixed = normalizeReport(payload([
     // bureau asserted it to us.
     liability({
         "@ArrayAccountIdentifier": "ARR-2", "@TradelineHashSimple": "h2",
+        "@_AccountIdentifier": "****9876",
         "@_UnpaidBalanceAmount": "9000",
         CREDIT_REPOSITORY: [
             { "@_SourceType": "TransUnion" },

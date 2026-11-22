@@ -1,0 +1,20 @@
+name: Credit decision regression tests
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - '.github/workflows/credit-decision-tests.yml'
+  workflow_dispatch:
+jobs:
+  decision-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node src/decideDisputes.test.js
+      - run: node src/reportNormalize.test.js
+      - run: node src/reportAnalyzer.test.js

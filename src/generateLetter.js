@@ -189,7 +189,7 @@ const AUTH = {
 
 // BT-DM-0001 v2.1 Addendum — required wording, stated verbatim.
 const INQUIRY_STATEMENT =
-    "I do not recognize this inquiry. Please identify and verify the permissible purpose " +
+    "I request verification of the permissible purpose " +
     "for accessing my credit file. If you cannot verify a lawful permissible purpose, " +
     "delete the inquiry.";
 
@@ -645,7 +645,7 @@ export async function generateLetters(chain, analysis, context = {}) {
             // verbatim in the finding evidence at analysis time — not derived,
             // not reformatted.
             const permissiblePurpose = source?.findings?.find(
-                (f) => f.code === "INQ_NO_ASSOCIATED_ACCOUNT"
+                (f) => f.code === "INQ_PERMISSIBLE_PURPOSE_REVIEW" || f.code === "INQ_NO_ASSOCIATED_ACCOUNT"
             );
 
             if (permissiblePurpose) {
@@ -687,7 +687,7 @@ export async function generateLetters(chain, analysis, context = {}) {
                     baseline: false,
                     complianceGated: false,
                     unspeccedFindings: [],
-                    findingCodes: ["INQ_NO_ASSOCIATED_ACCOUNT"],
+                    findingCodes: [permissiblePurpose.code],
                     // AN INQUIRY IS NOT AN ACCOUNT. Reconciliation balances letter
                     // ACCOUNT sections against disputed TRADELINES; an inquiry is
                     // neither, so counting it there would break a true invariant

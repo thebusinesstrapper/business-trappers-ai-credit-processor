@@ -296,20 +296,10 @@ function detectInternalInconsistencies(tradeline, asOf, dofdContested = false) {
         );
     }
 
-    // Status says current, but the account's own payment grid shows a recent late.
-    const history = Array.isArray(obs.payment_history) ? obs.payment_history : [];
-    const hasRecentLate = history.slice(0, 6).some((h) => h && /30|60|90|120|150|180/.test(String(h)));
-
-    if (status && ACTIVE_STATUS.test(status) && hasRecentLate) {
-        findings.push(
-            finding(
-                "TL_STATUS_CONFLICTS_WITH_PAYMENT_HISTORY",
-                `Status is reported as "${obs.status}", but this account's own payment history ` +
-                    `shows a late payment within the last six reporting periods.`,
-                { status: obs.status, recent_history: history.slice(0, 6) }
-            )
-        );
-    }
+    // Current status and historical late payments are NOT contradictory.
+    // The MISMO _PAYMENT_PATTERN is a dated encoded string, not an array of
+    // 30/60/90-day numbers. Do not fabricate a status-conflict finding from it.
+    // Reported late counts are handled as dispute eligibility below.
 
     return findings;
 }
@@ -1065,48 +1055,22 @@ function detectInquiryFindings(report, asOf) {
             );
         }
 
-        // ---- BT-DM-0001 v2.1 ADDENDUM: PERMISSIBLE-PURPOSE EVALUATION ------
-        //
-        // WE STILL DO NOT ASSERT THAT AN INQUIRY WAS UNAUTHORIZED. Authorization
-        // is a fact about what the CONSUMER permitted, and it is not in the
-        // report. What IS in the report is whether the inquiry source has an
-        // account here at all. The v2.1 Addendum makes that absence the trigger.
-        const association = inquiryAssociation(
-            inquiry,
-            namesByBureau.get(inquiry.bureau)
+        // Business Trappers: review every non-protected inquiry, regardless of
+        // whether an associated tradeline appears. Association does not prove
+        // permissible purpose, and its absence does not prove illegality.
+        // The downstream protected-KCB exclusion remains authoritative.
+        findings.push(
+            finding(
+                "INQ_PERMISSIBLE_PURPOSE_REVIEW",
+                "Request verification of the permissible purpose for this reported inquiry; " +
+                    "no claim of fraud, nonrecognition, or lack of authorization is made.",
+                {
+                    furnisher: inquiry.furnisher ?? null,
+                    inquiry_date: inquiry.inquiry_date ?? null,
+                    bureau: inquiry.bureau,
+                }
+            )
         );
-
-        if (association === "NOT_ASSOCIATED") {
-            // Report-derived. No consumer-held fact required.
-            findings.push(
-                finding(
-                    "INQ_NO_ASSOCIATED_ACCOUNT",
-                    `${inquiry.furnisher} has no account or tradeline reported by ${inquiry.bureau}.`,
-                    {
-                        furnisher: inquiry.furnisher,
-                        inquiry_date: inquiry.inquiry_date ?? null,
-                        bureau: inquiry.bureau,
-                    }
-                )
-            );
-        } else if (association === "UNRESOLVED") {
-            // The rule could not be APPLIED — the inquiry has no readable source,
-            // or this bureau reports no furnishers we can compare against. That is
-            // exactly the case the Addendum reserves for consumer input.
-            findings.push(
-                finding(
-                    "INQ_AUTHORIZATION_UNVERIFIABLE",
-                    `Whether ${inquiry.furnisher ?? "this inquiry source"} was authorized to pull this ` +
-                        `report cannot be determined from the credit report, and the account-matching ` +
-                        `rule cannot be applied from the available data. It requires confirmation ` +
-                        `from the consumer.`,
-                    { furnisher: inquiry.furnisher ?? null, inquiry_date: inquiry.inquiry_date ?? null }
-                )
-            );
-        }
-        // ASSOCIATED: the bureau reports an account for this furnisher, so the
-        // inquiry is not disputed SOLELY as an inquiry. Any INQ_DUPLICATE or
-        // INQ_BEYOND_REPORTING_PERIOD finding above still stands on its own.
 
         results.push({
             stableItemKey: inquiry.stable_item_key,
@@ -1397,6 +1361,15 @@ function baselineFinding(tradeline, existingFindings, code) {
 }
 
 /** Negative by the reporting of THIS bureau. Not by another bureau's view of it. */
+function hasReportedLatePayments(obs, basis) {
+    // A shared multi-bureau observation does not prove which bureau reports lates.
+    if (basis !== "BUREAU_SPECIFIC") return false;
+    const counts = obs?.late_counts ?? {};
+    return [counts.days_30, counts.days_60, counts.days_90].some((value) =>
+        value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) > 0
+    );
+}
+
 function isNegativeTradeline(tradeline) {
     // BUREAU FIDELITY STANDARD: the Intelligence Engine REASONS with the
     // normalized layer. Letters assert from observation.reported (Layer 2). Reading
@@ -1404,7 +1377,7 @@ function isNegativeTradeline(tradeline) {
     const obs = tradeline.observation?.normalized ?? tradeline.observation ?? {};
     const pastDue = Number(obs.past_due ?? 0);
 
-    return isDerogatory(obs.status) || (Number.isFinite(pastDue) && pastDue > 0);
+    return isDerogatory(obs.status) || (Number.isFinite(pastDue) && pastDue > 0) || hasReportedLatePayments(obs, tradeline.observation?.basis);
 }
 
 export async function analyzeCreditReport(report, context = {}) {

@@ -488,6 +488,12 @@ export const FINDING_TO_DECISION = Object.freeze({
     // dispute rests on the bureau's data rather than on a consumer-held fact.
     // Automation is authorized for this path; BT-DM-0001's CONSUMER_INPUT mapping
     // survives only for the UNRESOLVED case above.
+    INQ_PERMISSIBLE_PURPOSE_REVIEW: {
+        record: "BT-DM-0001",
+        name: "Permissible Purpose Inquiry Review",
+        evidence: "SELF_EVIDENT",
+    },
+
     INQ_NO_ASSOCIATED_ACCOUNT: {
         record: "BT-DM-0001",
         name: "Unauthorized Hard Inquiry",

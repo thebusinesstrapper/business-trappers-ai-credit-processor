@@ -155,9 +155,24 @@ check("...routed to BT-DM-0050 No Further Action", pos.primaryDecision.record, "
 console.log("\n=== Never assert what the consumer must tell us ===\n");
 
 const inq = decisionFor(result, "bt_iq_1");
-check("inquiry -> REQUIRES_CONSUMER_INPUT", inq.outcome, OUTCOME.REQUIRES_CONSUMER_INPUT);
-check("...NOT a dispute", inq.decisionRecords.length, 0);
-check("...and no BT-DM-0001 asserted", inq.primaryDecision, null);
+// No matching account is reported for this source at this bureau. Under the
+// current BT-DM-0001 rule this is a candidate for permissible-purpose review,
+// NOT proof that the consumer did not authorize the inquiry.
+check("unassociated inquiry -> dispute candidate", inq.outcome, OUTCOME.DISPUTE_CANDIDATE);
+check("...one governed decision", inq.decisionRecords.length, 1);
+check("...governed by BT-DM-0001", inq.primaryDecision?.record, "BT-DM-0001");
+
+// Associated accounts do not exempt inquiries. KCB names remain protected.
+const allInquiryReport = JSON.parse(JSON.stringify(report));
+allInquiryReport.inquiries = [
+    { stable_item_key: "inq_associated", bureau: "experian", furnisher: "SPOUSE CARD", inquiry_date: "2026-06-01" },
+    { stable_item_key: "inq_kcb", bureau: "experian", furnisher: "KCB CREDIT LLC", inquiry_date: "2026-06-01" },
+];
+const allInquiryAnalysis = await analyzeCreditReport(allInquiryReport, { asOf: ASOF });
+const allInquiryDecisions = await decideDisputes(allInquiryAnalysis, { report: allInquiryReport });
+check("associated-account inquiry -> dispute candidate", decisionFor(allInquiryDecisions, "inq_associated")?.outcome, OUTCOME.DISPUTE_CANDIDATE);
+check("associated inquiry -> governed BT-DM-0001", decisionFor(allInquiryDecisions, "inq_associated")?.primaryDecision?.record, "BT-DM-0001");
+check("KCB inquiry -> protected exclusion", decisionFor(allInquiryDecisions, "inq_kcb")?.outcome, OUTCOME.EXCLUDED);
 
 console.log("\n=== NEW Decision Records: obsolete items are now first-class ===\n");
 
@@ -323,6 +338,47 @@ for (const value of ["Individual", "JointContractualLiability", "Terminated"]) {
     check(`${value} -> not blocked by the ownership guard`,
         ["RESPONSIBILITY_UNKNOWN", "RESPONSIBILITY_UNRECOGNISED"].includes(item.exclusion?.rule ?? ""), false);
 }
+
+
+
+// Business Trappers: documented late counts on otherwise-current accounts
+// must be dispute candidates, while authorized-user exclusions still apply.
+const lateReport = {
+    extraction_ok: true,
+    reported_personal_information: { names: ["TEST CONSUMER"], ssns: ["000-00-0000"], dates_of_birth: ["1980-01-01"] },
+    accounts: [
+        { stable_account_key: "late_individual", bureau_tradelines: [
+            { stable_item_key: "late_tu", bureau: "transunion", furnisher: "BANK A", masked_account: "****1234",
+              observation: { basis: "BUREAU_SPECIFIC", normalized: { status: "Current", past_due: 0, responsibility: "Individual",
+                  late_counts: { days_30: 2, days_60: 0, days_90: 0 } } } },
+        ] },
+        { stable_account_key: "late_authorized", bureau_tradelines: [
+            { stable_item_key: "late_au", bureau: "experian", furnisher: "BANK B", masked_account: "****5678",
+              observation: { basis: "BUREAU_SPECIFIC", normalized: { status: "Current", past_due: 0, responsibility: "AuthorizedUser",
+                  late_counts: { days_30: 1, days_60: 0, days_90: 0 } } } },
+        ] },
+        { stable_account_key: "shared_late", bureau_tradelines: [
+            { stable_item_key: "shared_tu", bureau: "transunion", furnisher: "BANK D", masked_account: "****4444",
+              observation: { basis: "SHARED_ACROSS_BUREAUS", normalized: { status: "Current", past_due: 0, responsibility: "Individual",
+                  late_counts: { days_30: 3, days_60: 1, days_90: 0 } } } },
+        ] },
+        { stable_account_key: "clean_individual", bureau_tradelines: [
+            { stable_item_key: "clean_tu", bureau: "transunion", furnisher: "BANK C", masked_account: "****9876",
+              observation: { basis: "BUREAU_SPECIFIC", normalized: { status: "Current", past_due: 0, responsibility: "Individual",
+                  late_counts: { days_30: 0, days_60: 0, days_90: 0 } } } },
+        ] },
+    ],
+    collections: [], inquiries: [], public_records: [],
+};
+const lateAnalysis = await analyzeCreditReport(lateReport, { asOf: ASOF });
+const lateDecisions = await decideDisputes(lateAnalysis, { report: lateReport });
+check("late count -> baseline dispute finding", lateAnalysis.tradelines.find(x => x.stableItemKey === "late_tu")?.findings.some(x => x.code === "TL_BASELINE_REINVESTIGATION"), true);
+check("late count on current account -> dispute candidate", decisionFor(lateDecisions, "late_tu")?.outcome, OUTCOME.DISPUTE_CANDIDATE);
+check("late count on authorized user -> excluded", decisionFor(lateDecisions, "late_au")?.outcome, OUTCOME.EXCLUDED);
+check("clean current account -> no action", decisionFor(lateDecisions, "clean_tu")?.outcome, OUTCOME.NO_ACTION);
+
+check("shared late counts -> no bureau-specific baseline finding", lateAnalysis.tradelines.find(x => x.stableItemKey === "shared_tu")?.findings.some(x => x.code === "TL_BASELINE_REINVESTIGATION"), false);
+check("shared late counts -> no action", decisionFor(lateDecisions, "shared_tu")?.outcome, OUTCOME.NO_ACTION);
 
 console.log(`\n${passed} passed, ${failed} failed.\n`);
 
