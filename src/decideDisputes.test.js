@@ -155,9 +155,12 @@ check("...routed to BT-DM-0050 No Further Action", pos.primaryDecision.record, "
 console.log("\n=== Never assert what the consumer must tell us ===\n");
 
 const inq = decisionFor(result, "bt_iq_1");
-check("inquiry -> REQUIRES_CONSUMER_INPUT", inq.outcome, OUTCOME.REQUIRES_CONSUMER_INPUT);
-check("...NOT a dispute", inq.decisionRecords.length, 0);
-check("...and no BT-DM-0001 asserted", inq.primaryDecision, null);
+// No matching account is reported for this source at this bureau. Under the
+// current BT-DM-0001 rule this is a candidate for permissible-purpose review,
+// NOT proof that the consumer did not authorize the inquiry.
+check("unassociated inquiry -> dispute candidate", inq.outcome, OUTCOME.DISPUTE_CANDIDATE);
+check("...one governed decision", inq.decisionRecords.length, 1);
+check("...governed by BT-DM-0001", inq.primaryDecision?.record, "BT-DM-0001");
 
 console.log("\n=== NEW Decision Records: obsolete items are now first-class ===\n");
 
