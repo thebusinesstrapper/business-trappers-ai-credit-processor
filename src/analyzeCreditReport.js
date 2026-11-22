@@ -1055,48 +1055,22 @@ function detectInquiryFindings(report, asOf) {
             );
         }
 
-        // ---- BT-DM-0001 v2.1 ADDENDUM: PERMISSIBLE-PURPOSE EVALUATION ------
-        //
-        // WE STILL DO NOT ASSERT THAT AN INQUIRY WAS UNAUTHORIZED. Authorization
-        // is a fact about what the CONSUMER permitted, and it is not in the
-        // report. What IS in the report is whether the inquiry source has an
-        // account here at all. The v2.1 Addendum makes that absence the trigger.
-        const association = inquiryAssociation(
-            inquiry,
-            namesByBureau.get(inquiry.bureau)
+        // Business Trappers: review every non-protected inquiry, regardless of
+        // whether an associated tradeline appears. Association does not prove
+        // permissible purpose, and its absence does not prove illegality.
+        // The downstream protected-KCB exclusion remains authoritative.
+        findings.push(
+            finding(
+                "INQ_PERMISSIBLE_PURPOSE_REVIEW",
+                "Request verification of the permissible purpose for this reported inquiry; " +
+                    "no claim of fraud, nonrecognition, or lack of authorization is made.",
+                {
+                    furnisher: inquiry.furnisher ?? null,
+                    inquiry_date: inquiry.inquiry_date ?? null,
+                    bureau: inquiry.bureau,
+                }
+            )
         );
-
-        if (association === "NOT_ASSOCIATED") {
-            // Report-derived. No consumer-held fact required.
-            findings.push(
-                finding(
-                    "INQ_NO_ASSOCIATED_ACCOUNT",
-                    `${inquiry.furnisher} has no account or tradeline reported by ${inquiry.bureau}.`,
-                    {
-                        furnisher: inquiry.furnisher,
-                        inquiry_date: inquiry.inquiry_date ?? null,
-                        bureau: inquiry.bureau,
-                    }
-                )
-            );
-        } else if (association === "UNRESOLVED") {
-            // The rule could not be APPLIED — the inquiry has no readable source,
-            // or this bureau reports no furnishers we can compare against. That is
-            // exactly the case the Addendum reserves for consumer input.
-            findings.push(
-                finding(
-                    "INQ_AUTHORIZATION_UNVERIFIABLE",
-                    `Whether ${inquiry.furnisher ?? "this inquiry source"} was authorized to pull this ` +
-                        `report cannot be determined from the credit report, and the account-matching ` +
-                        `rule cannot be applied from the available data. It requires confirmation ` +
-                        `from the consumer.`,
-                    { furnisher: inquiry.furnisher ?? null, inquiry_date: inquiry.inquiry_date ?? null }
-                )
-            );
-        }
-        // ASSOCIATED: the bureau reports an account for this furnisher, so the
-        // inquiry is not disputed SOLELY as an inquiry. Any INQ_DUPLICATE or
-        // INQ_BEYOND_REPORTING_PERIOD finding above still stands on its own.
 
         results.push({
             stableItemKey: inquiry.stable_item_key,
