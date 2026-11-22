@@ -360,10 +360,10 @@ const lateDecisions = await decideDisputes(lateAnalysis, { report: lateReport })
 check("late count -> baseline dispute finding", lateAnalysis.tradelines.find(x => x.stableItemKey === "late_tu")?.findings.some(x => x.code === "TL_BASELINE_REINVESTIGATION"), true);
 check("late count on current account -> dispute candidate", decisionFor(lateDecisions, "late_tu")?.outcome, OUTCOME.DISPUTE_CANDIDATE);
 check("late count on authorized user -> excluded", decisionFor(lateDecisions, "late_au")?.outcome, OUTCOME.EXCLUDED);
-check("clean current account -> excluded", decisionFor(lateDecisions, "clean_tu")?.outcome, OUTCOME.EXCLUDED);
+check("clean current account -> no action", decisionFor(lateDecisions, "clean_tu")?.outcome, OUTCOME.NO_ACTION);
 
 check("shared late counts -> no bureau-specific baseline finding", lateAnalysis.tradelines.find(x => x.stableItemKey === "shared_tu")?.findings.some(x => x.code === "TL_BASELINE_REINVESTIGATION"), false);
-check("shared late counts -> positive account excluded", decisionFor(lateDecisions, "shared_tu")?.outcome, OUTCOME.EXCLUDED);
+check("shared late counts -> no action", decisionFor(lateDecisions, "shared_tu")?.outcome, OUTCOME.NO_ACTION);
 
 console.log(`\n${passed} passed, ${failed} failed.\n`);
 
