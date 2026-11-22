@@ -423,6 +423,13 @@ export const FINDING_CODES = Object.freeze({
     // It is NOT an assertion that the inquiry was unauthorized, fraudulent, or the
     // product of identity theft. It states an absence, and asks the bureau to do
     // what the FCRA already requires of it — identify the permissible purpose.
+    INQ_PERMISSIBLE_PURPOSE_REVIEW: {
+        level: LEVEL.ITEM,
+        severity: SEVERITY.MEDIUM,
+        requires: REQUIRES.REPORT_ONLY,
+        summary: "A reported inquiry is selected for permissible-purpose verification. This does not assert that the inquiry was unauthorized.",
+    },
+
     INQ_NO_ASSOCIATED_ACCOUNT: {
         level: LEVEL.ITEM,
         severity: SEVERITY.MEDIUM,
