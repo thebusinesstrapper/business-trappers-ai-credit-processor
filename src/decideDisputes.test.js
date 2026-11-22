@@ -162,6 +162,18 @@ check("unassociated inquiry -> dispute candidate", inq.outcome, OUTCOME.DISPUTE_
 check("...one governed decision", inq.decisionRecords.length, 1);
 check("...governed by BT-DM-0001", inq.primaryDecision?.record, "BT-DM-0001");
 
+// Associated accounts do not exempt inquiries. KCB names remain protected.
+const allInquiryReport = JSON.parse(JSON.stringify(report));
+allInquiryReport.inquiries = [
+    { stable_item_key: "inq_associated", bureau: "experian", furnisher: "SPOUSE CARD", inquiry_date: "2026-06-01" },
+    { stable_item_key: "inq_kcb", bureau: "experian", furnisher: "KCB CREDIT LLC", inquiry_date: "2026-06-01" },
+];
+const allInquiryAnalysis = await analyzeCreditReport(allInquiryReport, { asOf: ASOF });
+const allInquiryDecisions = await decideDisputes(allInquiryAnalysis, { report: allInquiryReport });
+check("associated-account inquiry -> dispute candidate", decisionFor(allInquiryDecisions, "inq_associated")?.outcome, OUTCOME.DISPUTE_CANDIDATE);
+check("associated inquiry -> governed BT-DM-0001", decisionFor(allInquiryDecisions, "inq_associated")?.primaryDecision?.record, "BT-DM-0001");
+check("KCB inquiry -> protected exclusion", decisionFor(allInquiryDecisions, "inq_kcb")?.outcome, OUTCOME.EXCLUDED);
+
 console.log("\n=== NEW Decision Records: obsolete items are now first-class ===\n");
 
 const staleReport = JSON.parse(JSON.stringify(report));
